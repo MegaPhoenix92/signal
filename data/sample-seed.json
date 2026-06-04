@@ -1,0 +1,892 @@
+{
+  "meta": {
+    "schemaVersion": 1,
+    "environment": "local",
+    "description": "Sample local state for Signal admin CLI and app development. No secrets are stored here."
+  },
+  "session": {
+    "activeUserId": "usr_admin",
+    "allowedRoles": ["admin", "member"],
+    "localOnly": true
+  },
+  "tenants": [
+    {
+      "id": "tenant_demo",
+      "name": "Acme Revenue Lab",
+      "domain": "acme.example",
+      "status": "active",
+      "planId": "plan_team",
+      "ownerUserId": "usr_admin",
+      "billingOwnerUserId": "usr_admin",
+      "registrationStatus": "active",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "createdByUserId": "usr_admin"
+    }
+  ],
+  "users": [
+    {
+      "id": "usr_admin",
+      "tenantId": "tenant_demo",
+      "name": "Avery Lane",
+      "email": "avery@acme.example",
+      "role": "admin",
+      "status": "active"
+    },
+    {
+      "id": "usr_sales",
+      "tenantId": "tenant_demo",
+      "name": "Mia Chen",
+      "email": "mia@acme.example",
+      "role": "member",
+      "team": "sales",
+      "status": "active"
+    },
+    {
+      "id": "usr_product",
+      "tenantId": "tenant_demo",
+      "name": "Priya Shah",
+      "email": "priya@acme.example",
+      "role": "member",
+      "team": "product",
+      "status": "active"
+    }
+  ],
+  "memberships": [
+    {
+      "id": "mem_tenant_demo_usr_admin",
+      "tenantId": "tenant_demo",
+      "userId": "usr_admin",
+      "role": "admin",
+      "team": "ops",
+      "status": "active",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "createdByUserId": "usr_admin"
+    },
+    {
+      "id": "mem_tenant_demo_usr_sales",
+      "tenantId": "tenant_demo",
+      "userId": "usr_sales",
+      "role": "member",
+      "team": "sales",
+      "status": "active",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "createdByUserId": "usr_admin"
+    },
+    {
+      "id": "mem_tenant_demo_usr_product",
+      "tenantId": "tenant_demo",
+      "userId": "usr_product",
+      "role": "member",
+      "team": "product",
+      "status": "active",
+      "inviteId": "inv_priya_product",
+      "createdAt": "2026-05-30T16:04:00.000Z",
+      "createdByUserId": "usr_admin"
+    }
+  ],
+  "invites": [
+    {
+      "id": "inv_rowan_success",
+      "tenantId": "tenant_demo",
+      "email": "rowan@acme.example",
+      "role": "member",
+      "team": "success",
+      "status": "pending",
+      "claimCode": "local-rowan-success",
+      "invitedByUserId": "usr_admin",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "expiresAt": "2026-06-10T00:00:00.000Z"
+    },
+    {
+      "id": "inv_priya_product",
+      "tenantId": "tenant_demo",
+      "email": "priya@acme.example",
+      "role": "member",
+      "team": "product",
+      "status": "accepted",
+      "claimCode": "local-priya-product",
+      "invitedByUserId": "usr_admin",
+      "createdAt": "2026-05-30T15:30:00.000Z",
+      "expiresAt": "2026-06-06T15:30:00.000Z",
+      "acceptedAt": "2026-05-30T16:04:00.000Z",
+      "acceptedUserId": "usr_product"
+    }
+  ],
+  "mailboxes": [
+    {
+      "id": "mbx_gmail_sales",
+      "tenantId": "tenant_demo",
+      "ownerUserId": "usr_sales",
+      "provider": "gmail",
+      "status": "connected",
+      "selectedScopes": ["thread_metadata", "selected_label_snippets"],
+      "syncPolicy": {
+        "labels": ["Customers", "Prospects"],
+        "lookbackDays": 90,
+        "rawRetentionDays": 14
+      }
+    },
+    {
+      "id": "mbx_outlook_success",
+      "tenantId": "tenant_demo",
+      "ownerUserId": "usr_admin",
+      "provider": "outlook",
+      "status": "needs_reauth",
+      "selectedScopes": ["thread_metadata"],
+      "syncPolicy": {
+        "folders": ["Customers"],
+        "lookbackDays": 60,
+        "rawRetentionDays": 7
+      }
+    }
+  ],
+  "mailboxConnectionSessions": [
+    {
+      "id": "mcs_outlook_reauth",
+      "tenantId": "tenant_demo",
+      "mailboxId": "mbx_outlook_success",
+      "provider": "outlook",
+      "ownerUserId": "usr_admin",
+      "status": "ready",
+      "url": "signal://oauth/outlook/tenant_demo/mbx_outlook_success",
+      "selectedScopes": ["thread_metadata"],
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "expiresAt": "2026-06-03T01:00:00.000Z"
+    }
+  ],
+  "emailSyncCursors": [
+    {
+      "id": "cur_mbx_gmail_sales",
+      "mailboxId": "mbx_gmail_sales",
+      "provider": "gmail",
+      "status": "active",
+      "cursor": "gmail-history-1780502400",
+      "lastSyncedAt": "2026-06-03T00:00:00.000Z",
+      "lastReplayAt": null,
+      "windowStartAt": "2026-03-05T00:00:00.000Z"
+    },
+    {
+      "id": "cur_mbx_outlook_success",
+      "mailboxId": "mbx_outlook_success",
+      "provider": "outlook",
+      "status": "blocked",
+      "cursor": "outlook-delta-needs-reauth",
+      "lastSyncedAt": null,
+      "lastReplayAt": null,
+      "windowStartAt": "2026-04-04T00:00:00.000Z"
+    }
+  ],
+  "emailFlows": [
+    {
+      "id": "flow_buying_intent",
+      "tenantId": "tenant_demo",
+      "name": "Buying intent detector",
+      "status": "enabled",
+      "detects": ["budget", "timeline", "competitor", "security review"],
+      "routeTo": "sales"
+    },
+    {
+      "id": "flow_product_ideas",
+      "tenantId": "tenant_demo",
+      "name": "Product idea clusterer",
+      "status": "enabled",
+      "detects": ["feature request", "workflow pain", "export need", "integration ask"],
+      "routeTo": "product"
+    },
+    {
+      "id": "flow_relationship_risk",
+      "tenantId": "tenant_demo",
+      "name": "Relationship risk monitor",
+      "status": "enabled",
+      "detects": ["champion silence", "negative sentiment", "renewal anxiety", "executive gap"],
+      "routeTo": "customer_success"
+    }
+  ],
+  "routingRules": [
+    {
+      "id": "rr_flow_buying_intent",
+      "tenantId": "tenant_demo",
+      "flowId": "flow_buying_intent",
+      "routeTo": "sales",
+      "ownerUserId": null,
+      "status": "active",
+      "note": "Route buying intent to sales for local follow-up.",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "createdByUserId": "usr_admin",
+      "updatedAt": "2026-06-03T00:00:00.000Z",
+      "updatedByUserId": "usr_admin"
+    },
+    {
+      "id": "rr_flow_product_ideas",
+      "tenantId": "tenant_demo",
+      "flowId": "flow_product_ideas",
+      "routeTo": "product",
+      "ownerUserId": "usr_product",
+      "status": "active",
+      "note": "Route product ideas to product for roadmap review.",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "createdByUserId": "usr_admin",
+      "updatedAt": "2026-06-03T00:00:00.000Z",
+      "updatedByUserId": "usr_admin"
+    },
+    {
+      "id": "rr_flow_relationship_risk",
+      "tenantId": "tenant_demo",
+      "flowId": "flow_relationship_risk",
+      "routeTo": "customer_success",
+      "ownerUserId": "usr_admin",
+      "status": "active",
+      "note": "Route relationship risk to success/admin until the success owner is assigned.",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "createdByUserId": "usr_admin",
+      "updatedAt": "2026-06-03T00:00:00.000Z",
+      "updatedByUserId": "usr_admin"
+    }
+  ],
+  "sourceMessages": [
+    {
+      "id": "msg_northstar_budget_001",
+      "tenantId": "tenant_demo",
+      "mailboxId": "mbx_gmail_sales",
+      "providerThreadId": "gmail-thread-northstar-budget",
+      "account": "Northstar Ops",
+      "from": "kai@northstar.example",
+      "subject": "Budget and security review timing",
+      "snippet": "We have budget approved if the security review clears this month. Can you send a rollout timeline before the competitor workshop?",
+      "receivedAt": "2026-06-02T14:18:00.000Z",
+      "labels": ["Prospects", "Customers"],
+      "processedFlowIds": []
+    },
+    {
+      "id": "msg_ventureworks_export_001",
+      "tenantId": "tenant_demo",
+      "mailboxId": "mbx_gmail_sales",
+      "providerThreadId": "gmail-thread-ventureworks-export",
+      "account": "VentureWorks",
+      "from": "ops@ventureworks.example",
+      "subject": "Feature request for board export workflow",
+      "snippet": "The board packet workflow pain is still manual. We need a CSV export need and Salesforce integration ask before month end.",
+      "receivedAt": "2026-06-02T16:42:00.000Z",
+      "labels": ["Customers"],
+      "processedFlowIds": []
+    },
+    {
+      "id": "msg_acme_health_renewal_001",
+      "tenantId": "tenant_demo",
+      "mailboxId": "mbx_gmail_sales",
+      "providerThreadId": "gmail-thread-acme-renewal",
+      "account": "Acme Health",
+      "from": "programs@acmehealth.example",
+      "subject": "Renewal anxiety and executive gap",
+      "snippet": "Our champion silence has the team worried. There is renewal anxiety because the executive gap remains open.",
+      "receivedAt": "2026-06-03T09:05:00.000Z",
+      "labels": ["Customers"],
+      "processedFlowIds": []
+    }
+  ],
+  "flowRuns": [],
+  "accountProfiles": [
+    {
+      "id": "acct_northstar_ops",
+      "tenantId": "tenant_demo",
+      "name": "Northstar Ops",
+      "domain": "northstar.example",
+      "stage": "Expansion evaluation",
+      "ownerUserId": "usr_sales",
+      "healthScore": 82,
+      "healthTrend": "up",
+      "lastTouchAt": "2026-06-02T14:18:00.000Z",
+      "nextReviewAt": "2026-06-05T15:00:00.000Z",
+      "summary": "Expansion opportunity with approved budget, security review timing, and competitor pressure.",
+      "tags": ["expansion", "security_review", "competitor"],
+      "stakeholders": [
+        {
+          "id": "stk_northstar_finance",
+          "name": "Kai Morgan",
+          "title": "Finance Lead",
+          "role": "economic_buyer",
+          "sentiment": "positive",
+          "lastTouchAt": "2026-06-02T14:18:00.000Z"
+        },
+        {
+          "id": "stk_northstar_it",
+          "name": "Jordan Lee",
+          "title": "IT Security",
+          "role": "security_reviewer",
+          "sentiment": "neutral",
+          "lastTouchAt": "2026-06-01T18:30:00.000Z"
+        }
+      ]
+    },
+    {
+      "id": "acct_ventureworks",
+      "tenantId": "tenant_demo",
+      "name": "VentureWorks",
+      "domain": "ventureworks.example",
+      "stage": "Product discovery",
+      "ownerUserId": "usr_product",
+      "healthScore": 68,
+      "healthTrend": "flat",
+      "lastTouchAt": "2026-06-02T16:42:00.000Z",
+      "nextReviewAt": "2026-06-06T16:00:00.000Z",
+      "summary": "Product-led account asking for export and CRM integration improvements around board reporting.",
+      "tags": ["product_idea", "workflow_pain", "integration"],
+      "stakeholders": [
+        {
+          "id": "stk_ventureworks_ops",
+          "name": "Riley Park",
+          "title": "Operations Lead",
+          "role": "power_user",
+          "sentiment": "mixed",
+          "lastTouchAt": "2026-06-02T16:42:00.000Z"
+        }
+      ]
+    },
+    {
+      "id": "acct_acme_health",
+      "tenantId": "tenant_demo",
+      "name": "Acme Health",
+      "domain": "acmehealth.example",
+      "stage": "Renewal risk",
+      "ownerUserId": "usr_admin",
+      "healthScore": 41,
+      "healthTrend": "down",
+      "lastTouchAt": "2026-06-03T09:05:00.000Z",
+      "nextReviewAt": "2026-06-04T14:30:00.000Z",
+      "summary": "Renewal account with champion silence, anxiety, and an unresolved executive gap.",
+      "tags": ["renewal_risk", "executive_gap", "champion_silence"],
+      "stakeholders": [
+        {
+          "id": "stk_acme_programs",
+          "name": "Sam Rivera",
+          "title": "Programs Director",
+          "role": "champion",
+          "sentiment": "concerned",
+          "lastTouchAt": "2026-05-15T13:00:00.000Z"
+        },
+        {
+          "id": "stk_acme_exec",
+          "name": "Morgan Ellis",
+          "title": "VP Operations",
+          "role": "executive",
+          "sentiment": "unknown",
+          "lastTouchAt": null
+        }
+      ]
+    }
+  ],
+  "accountEvents": [
+    {
+      "id": "evt_acct_northstar_budget",
+      "tenantId": "tenant_demo",
+      "account": "Northstar Ops",
+      "type": "email_signal",
+      "title": "Budget and security review timing",
+      "detail": "Budget is approved if security review clears this month; competitor workshop is scheduled.",
+      "occurredAt": "2026-06-02T14:18:00.000Z",
+      "sourceMessageId": "msg_northstar_budget_001",
+      "signalId": "sig_expansion_001"
+    },
+    {
+      "id": "evt_acct_ventureworks_export",
+      "tenantId": "tenant_demo",
+      "account": "VentureWorks",
+      "type": "product_request",
+      "title": "Board export workflow need",
+      "detail": "Operations asked for CSV exports and Salesforce integration to reduce board packet work.",
+      "occurredAt": "2026-06-02T16:42:00.000Z",
+      "sourceMessageId": "msg_ventureworks_export_001",
+      "signalId": "sig_product_001"
+    },
+    {
+      "id": "evt_acct_acme_renewal",
+      "tenantId": "tenant_demo",
+      "account": "Acme Health",
+      "type": "relationship_risk",
+      "title": "Champion silence and executive gap",
+      "detail": "Programs team flagged renewal anxiety and an unresolved executive relationship gap.",
+      "occurredAt": "2026-06-03T09:05:00.000Z",
+      "sourceMessageId": "msg_acme_health_renewal_001",
+      "signalId": "sig_risk_001"
+    }
+  ],
+  "accountActions": [
+    {
+      "id": "act_northstar_security_packet",
+      "tenantId": "tenant_demo",
+      "account": "Northstar Ops",
+      "ownerUserId": "usr_sales",
+      "title": "Send security review packet",
+      "description": "Package rollout timeline, security answers, and competitor displacement notes for the finance lead.",
+      "status": "open",
+      "priority": "high",
+      "dueAt": "2026-06-05T15:00:00.000Z",
+      "signalId": "sig_expansion_001",
+      "createdAt": "2026-06-03T00:00:00.000Z"
+    },
+    {
+      "id": "act_ventureworks_export_discovery",
+      "tenantId": "tenant_demo",
+      "account": "VentureWorks",
+      "ownerUserId": "usr_product",
+      "title": "Scope export workflow",
+      "description": "Review the CSV export and CRM integration ask before product planning.",
+      "status": "open",
+      "priority": "medium",
+      "dueAt": "2026-06-06T16:00:00.000Z",
+      "signalId": "sig_product_001",
+      "createdAt": "2026-06-03T00:00:00.000Z"
+    },
+    {
+      "id": "act_acme_exec_save",
+      "tenantId": "tenant_demo",
+      "account": "Acme Health",
+      "ownerUserId": "usr_admin",
+      "title": "Schedule executive save plan",
+      "description": "Prepare renewal risk review and find an executive bridge for the stalled champion path.",
+      "status": "open",
+      "priority": "critical",
+      "dueAt": "2026-06-04T14:30:00.000Z",
+      "signalId": "sig_risk_001",
+      "createdAt": "2026-06-03T00:00:00.000Z"
+    }
+  ],
+  "notificationPreferences": [
+    {
+      "id": "pref_usr_admin",
+      "tenantId": "tenant_demo",
+      "userId": "usr_admin",
+      "digestCadence": "daily",
+      "immediateAlerts": true,
+      "channels": ["dashboard", "email_digest"],
+      "mutedAccounts": [],
+      "mutedSignalTypes": [],
+      "emailDeliveryStatus": "subscribed",
+      "unsubscribeCode": "unsub_usr_admin",
+      "unsubscribedAt": null,
+      "updatedAt": "2026-06-03T00:00:00.000Z"
+    },
+    {
+      "id": "pref_usr_sales",
+      "tenantId": "tenant_demo",
+      "userId": "usr_sales",
+      "digestCadence": "daily",
+      "immediateAlerts": true,
+      "channels": ["dashboard", "email_digest"],
+      "mutedAccounts": [],
+      "mutedSignalTypes": [],
+      "emailDeliveryStatus": "subscribed",
+      "unsubscribeCode": "unsub_usr_sales",
+      "unsubscribedAt": null,
+      "updatedAt": "2026-06-03T00:00:00.000Z"
+    },
+    {
+      "id": "pref_usr_product",
+      "tenantId": "tenant_demo",
+      "userId": "usr_product",
+      "digestCadence": "weekly",
+      "immediateAlerts": false,
+      "channels": ["dashboard", "email_digest"],
+      "mutedAccounts": [],
+      "mutedSignalTypes": ["renewal_risk"],
+      "emailDeliveryStatus": "subscribed",
+      "unsubscribeCode": "unsub_usr_product",
+      "unsubscribedAt": null,
+      "updatedAt": "2026-06-03T00:00:00.000Z"
+    }
+  ],
+  "notificationEvents": [
+    {
+      "id": "ntf_sig_sig_expansion_001",
+      "tenantId": "tenant_demo",
+      "userId": "usr_sales",
+      "account": "Northstar Ops",
+      "type": "signal.expansion_intent",
+      "title": "New expansion intent signal",
+      "body": "Finance asked for usage rollups and a department-wide rollout plan.",
+      "status": "unread",
+      "channel": "dashboard_alert",
+      "mutedBy": null,
+      "signalId": "sig_expansion_001",
+      "sourceMessageId": null,
+      "accountActionId": null,
+      "createdAt": "2026-06-02T14:18:00.000Z",
+      "readAt": null,
+      "digestRunId": null
+    },
+    {
+      "id": "ntf_action_act_northstar_security_packet",
+      "tenantId": "tenant_demo",
+      "userId": "usr_sales",
+      "account": "Northstar Ops",
+      "type": "account_action",
+      "title": "Send security review packet",
+      "body": "Package rollout timeline, security answers, and competitor displacement notes for the finance lead.",
+      "status": "unread",
+      "channel": "dashboard_alert",
+      "mutedBy": null,
+      "signalId": "sig_expansion_001",
+      "sourceMessageId": null,
+      "accountActionId": "act_northstar_security_packet",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "readAt": null,
+      "digestRunId": null
+    },
+    {
+      "id": "ntf_sig_sig_product_001",
+      "tenantId": "tenant_demo",
+      "userId": "usr_product",
+      "account": "VentureWorks",
+      "type": "signal.product_idea",
+      "title": "New product idea signal",
+      "body": "Multiple stakeholders requested CSV exports for board reporting.",
+      "status": "unread",
+      "channel": "dashboard_digest",
+      "mutedBy": null,
+      "signalId": "sig_product_001",
+      "sourceMessageId": null,
+      "accountActionId": null,
+      "createdAt": "2026-06-02T16:42:00.000Z",
+      "readAt": null,
+      "digestRunId": null
+    },
+    {
+      "id": "ntf_action_act_ventureworks_export_discovery",
+      "tenantId": "tenant_demo",
+      "userId": "usr_product",
+      "account": "VentureWorks",
+      "type": "account_action",
+      "title": "Scope export workflow",
+      "body": "Review the CSV export and CRM integration ask before product planning.",
+      "status": "unread",
+      "channel": "dashboard_digest",
+      "mutedBy": null,
+      "signalId": "sig_product_001",
+      "sourceMessageId": null,
+      "accountActionId": "act_ventureworks_export_discovery",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "readAt": null,
+      "digestRunId": null
+    },
+    {
+      "id": "ntf_sig_sig_risk_001",
+      "tenantId": "tenant_demo",
+      "userId": "usr_admin",
+      "account": "Acme Health",
+      "type": "signal.renewal_risk",
+      "title": "New renewal risk signal",
+      "body": "Champion has not replied in 19 days and a competitor was mentioned.",
+      "status": "unread",
+      "channel": "dashboard_alert",
+      "mutedBy": null,
+      "signalId": "sig_risk_001",
+      "sourceMessageId": null,
+      "accountActionId": null,
+      "createdAt": "2026-06-03T09:05:00.000Z",
+      "readAt": null,
+      "digestRunId": null
+    },
+    {
+      "id": "ntf_action_act_acme_exec_save",
+      "tenantId": "tenant_demo",
+      "userId": "usr_admin",
+      "account": "Acme Health",
+      "type": "account_action",
+      "title": "Schedule executive save plan",
+      "body": "Prepare renewal risk review and find an executive bridge for the stalled champion path.",
+      "status": "unread",
+      "channel": "dashboard_alert",
+      "mutedBy": null,
+      "signalId": "sig_risk_001",
+      "sourceMessageId": null,
+      "accountActionId": "act_acme_exec_save",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "readAt": null,
+      "digestRunId": null
+    }
+  ],
+  "notificationDigestRuns": [],
+  "emailDeliveryMessages": [],
+  "signalQualitySettings": [
+    {
+      "id": "qlt_tenant_demo",
+      "tenantId": "tenant_demo",
+      "minimumConfidence": 0.72,
+      "requireSourceReference": true,
+      "autoRouteThreshold": 0.88,
+      "updatedAt": "2026-06-03T00:00:00.000Z",
+      "updatedByUserId": "usr_admin"
+    }
+  ],
+  "suppressionRules": [
+    {
+      "id": "sup_internal_domains",
+      "tenantId": "tenant_demo",
+      "type": "domain",
+      "value": "internal.example",
+      "status": "active",
+      "reason": "Suppress internal operational threads from signal generation.",
+      "createdByUserId": "usr_admin",
+      "createdAt": "2026-06-03T00:00:00.000Z"
+    }
+  ],
+  "signalFeedback": [
+    {
+      "id": "fb_seed_risk_useful",
+      "tenantId": "tenant_demo",
+      "signalId": "sig_risk_001",
+      "userId": "usr_admin",
+      "label": "useful",
+      "note": "Strong renewal-save signal for account review.",
+      "createdAt": "2026-06-03T10:30:00.000Z"
+    }
+  ],
+  "governancePolicies": [
+    {
+      "id": "gov_tenant_demo",
+      "tenantId": "tenant_demo",
+      "sourceRetentionDays": 14,
+      "rawSnippetRetentionDays": 7,
+      "exportWindowDays": 30,
+      "deletionReview": "manual",
+      "redactionMode": "standard",
+      "updatedAt": "2026-06-03T00:00:00.000Z",
+      "updatedByUserId": "usr_admin"
+    }
+  ],
+  "redactionRules": [
+    {
+      "id": "redact_payment_terms",
+      "tenantId": "tenant_demo",
+      "label": "Payment card references",
+      "scope": "source_snippets",
+      "pattern": "card|cc|bank account|routing number",
+      "replacement": "[payment detail]",
+      "status": "active",
+      "createdByUserId": "usr_admin",
+      "createdAt": "2026-06-03T00:00:00.000Z"
+    },
+    {
+      "id": "redact_private_health",
+      "tenantId": "tenant_demo",
+      "label": "Private health context",
+      "scope": "exports",
+      "pattern": "patient|diagnosis|medical record",
+      "replacement": "[private context]",
+      "status": "active",
+      "createdByUserId": "usr_admin",
+      "createdAt": "2026-06-03T00:00:00.000Z"
+    }
+  ],
+  "dataRequests": [
+    {
+      "id": "dsr_export_acme_health",
+      "tenantId": "tenant_demo",
+      "type": "export",
+      "requesterEmail": "ops@acmehealth.example",
+      "targetUserId": null,
+      "targetAccount": "Acme Health",
+      "status": "open",
+      "note": "Local fixture for customer data export review.",
+      "exportUri": null,
+      "requestedAt": "2026-06-03T10:00:00.000Z",
+      "dueAt": "2026-07-03T10:00:00.000Z",
+      "handledByUserId": null,
+      "completedAt": null
+    }
+  ],
+  "incidentNotes": [
+    {
+      "id": "inc_outlook_reauth_watch",
+      "tenantId": "tenant_demo",
+      "severity": "watch",
+      "status": "open",
+      "title": "Outlook source needs reauthorization",
+      "body": "Customer success mailbox remains blocked until the owner completes the local OAuth handoff.",
+      "createdByUserId": "usr_admin",
+      "createdAt": "2026-06-03T11:00:00.000Z",
+      "resolvedByUserId": null,
+      "resolvedAt": null
+    }
+  ],
+  "signals": [
+    {
+      "id": "sig_expansion_001",
+      "tenantId": "tenant_demo",
+      "account": "Northstar Ops",
+      "type": "expansion_intent",
+      "severity": "high",
+      "confidence": 0.86,
+      "summary": "Finance asked for usage rollups and a department-wide rollout plan.",
+      "ownerUserId": "usr_sales",
+      "status": "open"
+    },
+    {
+      "id": "sig_product_001",
+      "tenantId": "tenant_demo",
+      "account": "VentureWorks",
+      "type": "product_idea",
+      "severity": "medium",
+      "confidence": 0.78,
+      "summary": "Multiple stakeholders requested CSV exports for board reporting.",
+      "ownerUserId": "usr_product",
+      "status": "routed",
+      "latestHandoffId": "sh_sig_product_001_crm",
+      "latestHandoffStatus": "sent"
+    },
+    {
+      "id": "sig_risk_001",
+      "tenantId": "tenant_demo",
+      "account": "Acme Health",
+      "type": "renewal_risk",
+      "severity": "critical",
+      "confidence": 0.91,
+      "summary": "Champion has not replied in 19 days and a competitor was mentioned.",
+      "ownerUserId": "usr_admin",
+      "status": "open"
+    }
+  ],
+  "signalHandoffs": [
+    {
+      "id": "sh_sig_product_001_crm",
+      "tenantId": "tenant_demo",
+      "signalId": "sig_product_001",
+      "account": "VentureWorks",
+      "target": "crm",
+      "status": "sent",
+      "ownerUserId": "usr_product",
+      "routeTo": "crm",
+      "routingRuleId": null,
+      "provider": "local_crm",
+      "providerRef": "crm_task_sig_product_001",
+      "payloadUri": "signal://handoff/crm/sig_product_001",
+      "summary": "Multiple stakeholders requested CSV exports for board reporting.",
+      "note": "Seed CRM task for product follow-up.",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "createdByUserId": "usr_product",
+      "updatedAt": "2026-06-03T00:05:00.000Z",
+      "updatedByUserId": "usr_product",
+      "sentAt": "2026-06-03T00:05:00.000Z"
+    }
+  ],
+  "plans": [
+    {
+      "id": "plan_beta",
+      "name": "Private Beta",
+      "monthlyCents": 0,
+      "seatLimit": 5,
+      "mailboxLimit": 3,
+      "signalLimit": 500
+    },
+    {
+      "id": "plan_team",
+      "name": "Team",
+      "monthlyCents": 4900,
+      "seatLimit": 10,
+      "mailboxLimit": 10,
+      "signalLimit": 5000
+    }
+  ],
+  "subscriptions": [
+    {
+      "id": "sub_demo",
+      "tenantId": "tenant_demo",
+      "provider": "local_test",
+      "planId": "plan_team",
+      "status": "trialing",
+      "trialEndsAt": "2026-07-01T00:00:00.000Z"
+    }
+  ],
+  "entitlements": [
+    {
+      "id": "ent_tenant_demo",
+      "tenantId": "tenant_demo",
+      "subscriptionId": "sub_demo",
+      "source": "subscription",
+      "status": "active",
+      "seatLimit": 10,
+      "mailboxLimit": 10,
+      "signalLimit": 5000,
+      "retentionDays": 14,
+      "adminControls": true,
+      "updatedAt": "2026-06-03T00:00:00.000Z"
+    }
+  ],
+  "billingSessions": [
+    {
+      "id": "bs_checkout_demo",
+      "tenantId": "tenant_demo",
+      "provider": "local_test",
+      "type": "checkout",
+      "status": "ready",
+      "planId": "plan_team",
+      "url": "signal://billing/checkout/tenant_demo/plan_team",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "expiresAt": "2026-06-03T01:00:00.000Z"
+    }
+  ],
+  "invoices": [
+    {
+      "id": "inv_demo_paid",
+      "tenantId": "tenant_demo",
+      "subscriptionId": "sub_demo",
+      "provider": "local_test",
+      "status": "paid",
+      "amountDueCents": 4900,
+      "currency": "usd",
+      "hostedInvoiceUrl": "signal://billing/invoice/tenant_demo/inv_demo_paid",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "dueAt": "2026-06-10T00:00:00.000Z",
+      "paidAt": "2026-06-03T00:05:00.000Z",
+      "retryCount": 0,
+      "nextPaymentAttemptAt": null
+    }
+  ],
+  "paymentEvents": [
+    {
+      "id": "evt_checkout_ready",
+      "tenantId": "tenant_demo",
+      "provider": "local_test",
+      "type": "checkout.session.ready",
+      "status": "recorded"
+    }
+  ],
+  "jobs": [
+    {
+      "id": "job_gmail_sync_001",
+      "tenantId": "tenant_demo",
+      "queue": "email_sync",
+      "type": "mailbox.sync",
+      "targetId": "mbx_gmail_sales",
+      "status": "succeeded",
+      "attempts": 1,
+      "maxAttempts": 3,
+      "lastRunAt": "2026-06-03T00:00:00.000Z",
+      "message": "Synced selected Gmail customer labels."
+    },
+    {
+      "id": "job_outlook_reauth_001",
+      "tenantId": "tenant_demo",
+      "queue": "email_sync",
+      "type": "mailbox.reauth",
+      "targetId": "mbx_outlook_success",
+      "status": "failed",
+      "attempts": 2,
+      "maxAttempts": 3,
+      "lastRunAt": "2026-06-03T00:00:00.000Z",
+      "message": "Outlook connection requires mailbox owner reauthorization."
+    },
+    {
+      "id": "job_billing_webhook_001",
+      "tenantId": "tenant_demo",
+      "queue": "billing_webhook",
+      "type": "payment.webhook",
+      "targetId": "sub_demo",
+      "status": "succeeded",
+      "attempts": 1,
+      "maxAttempts": 5,
+      "lastRunAt": "2026-06-03T00:00:00.000Z",
+      "message": "Recorded local checkout readiness event."
+    }
+  ]
+}

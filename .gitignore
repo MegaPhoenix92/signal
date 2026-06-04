@@ -1,0 +1,26 @@
+node_modules/
+dist/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+.DS_Store
+
+# Local runtime state (never committed)
+data/signal-local.json
+data/signal-token-vault.json
+data/provider-token-vault.json
+data/signal-scheduler.lock
+data/signal-state-service.json
+data/signal-state-service-backups/
+
+# Real env files (only the .example template is committed)
+.env
+.env.local
+.env.production
+
+# Proprietary / local-only (kept off the remote — same pattern as coinwatch/trozlanomni)
+docs/
+evidence/
+
+# Agent config files
+.clinerules-*

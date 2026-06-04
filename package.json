@@ -1,0 +1,39 @@
+{
+  "name": "signal-landing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "admin": "node scripts/signal-admin.mjs",
+    "admin:bootstrap": "node scripts/signal-admin.mjs bootstrap",
+    "api": "node scripts/signal-api.mjs",
+    "scheduler": "node scripts/signal-scheduler.mjs",
+    "state-service": "node scripts/signal-state-service.mjs",
+    "state-service:admin": "node scripts/signal-state-service-admin.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "dev:local": "node scripts/dev-local.mjs",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test:browser-routes": "node --test scripts/test-signal-browser-routes.mjs",
+    "test:contract": "node --test scripts/test-signal-contract.mjs",
+    "test:jwks-auth": "node --test scripts/test-signal-jwks-auth.mjs",
+    "test:persistence": "node --test scripts/test-signal-persistence.mjs",
+    "test:scheduler": "node --test scripts/test-signal-scheduler.mjs",
+    "test:state-service": "node --test scripts/test-signal-state-service.mjs",
+    "test:local": "npm run verify:local && npm run test:contract && npm run test:jwks-auth && npm run test:persistence && npm run test:state-service && npm run test:scheduler && npm run test:browser-routes",
+    "verify:local": "node scripts/verify-signal-local.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "^1.17.0",
+    "pg": "^8.21.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.16"
+  }
+}
