@@ -100,6 +100,8 @@ import {
   backendReadiness,
 } from './signal-backend-readiness.mjs';
 
+process.env.SIGNAL_OAUTH_STATE_KEY ??= 'signal-local-oauth-state-key';
+
 const statePath = path.join(os.tmpdir(), `signal-verify-${Date.now()}.json`);
 const registrationStatePath = path.join(os.tmpdir(), `signal-registration-verify-${Date.now()}.json`);
 const vaultPath = path.join(os.tmpdir(), `signal-vault-${Date.now()}.json`);
@@ -574,6 +576,7 @@ const tokenExchangeEnv = {
   SIGNAL_GMAIL_CLIENT_ID: 'gmail-client-id',
   SIGNAL_GMAIL_CLIENT_SECRET: 'gmail-client-secret',
   SIGNAL_GMAIL_REDIRECT_URI: 'http://127.0.0.1:8787/api/oauth/gmail/callback',
+  SIGNAL_OAUTH_STATE_KEY: process.env.SIGNAL_OAUTH_STATE_KEY,
   SIGNAL_TOKEN_ENCRYPTION_KEY: 'local-verifier-token-encryption-key',
 };
 const tokenExchangeSession = await createMailboxConnectionSession({ tenantId: 'tenant_demo', provider: 'gmail', ownerUserId: 'usr_admin' }, { actorUserId: 'usr_admin', statePath });

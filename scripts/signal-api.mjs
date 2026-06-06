@@ -52,6 +52,7 @@ import {
   SessionTokenError,
 } from './signal-session-token.mjs';
 import {
+  assertApiSecurityConfig,
   requestAuth,
   requestSessionToken,
   requireAdminRequestAuth,
@@ -64,6 +65,8 @@ import {
 import {
   backendReadiness,
 } from './signal-backend-readiness.mjs';
+
+assertApiSecurityConfig(process.env);
 
 const host = process.env.SIGNAL_API_HOST ?? '127.0.0.1';
 const port = Number(process.env.SIGNAL_API_PORT ?? 8787);

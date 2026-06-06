@@ -95,6 +95,7 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
   const cliEnv = {
     ...process.env,
     SIGNAL_ADMIN_STATE: statePath,
+    SIGNAL_OAUTH_STATE_KEY: 'signal_contract_oauth_state_key',
     SIGNAL_SESSION_SECRET: sessionSecret,
   };
 
@@ -564,6 +565,7 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
       SIGNAL_API_HOST: '127.0.0.1',
       SIGNAL_API_PORT: String(port),
       ...blankSandboxProviderEnv,
+      SIGNAL_OAUTH_STATE_KEY: cliEnv.SIGNAL_OAUTH_STATE_KEY,
       SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
       SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET: emailWebhookSecret,
       SIGNAL_SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY: sendGridPublicKey,

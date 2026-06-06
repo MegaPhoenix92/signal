@@ -19,6 +19,8 @@ const running = children.map(({ name, command, args }) => {
   const child = spawn(command, args, {
     env: {
       ...process.env,
+      SIGNAL_ALLOW_LOCAL_ACTOR: process.env.SIGNAL_ALLOW_LOCAL_ACTOR ?? 'true',
+      SIGNAL_OAUTH_STATE_KEY: process.env.SIGNAL_OAUTH_STATE_KEY ?? 'signal-local-oauth-state-key',
       VITE_SIGNAL_API_URL: process.env.VITE_SIGNAL_API_URL ?? 'http://127.0.0.1:8787',
     },
     stdio: ['inherit', 'pipe', 'pipe'],

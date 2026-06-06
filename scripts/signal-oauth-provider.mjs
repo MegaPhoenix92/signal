@@ -42,7 +42,15 @@ function timingSafeEqualText(left, right) {
 }
 
 function signingKey(env = process.env) {
-  return env.SIGNAL_OAUTH_STATE_KEY ?? 'signal-local-oauth-state-key';
+  const value = env.SIGNAL_OAUTH_STATE_KEY;
+  if (!value) {
+    throw new OAuthProviderError('SIGNAL_OAUTH_STATE_KEY is required to sign or verify OAuth state.', {
+      code: 'OAUTH_STATE_KEY_MISSING',
+      status: 412,
+      details: { requiredEnv: 'SIGNAL_OAUTH_STATE_KEY' },
+    });
+  }
+  return value;
 }
 
 function requireString(value, label) {
