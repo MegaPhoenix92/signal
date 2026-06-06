@@ -6,7 +6,7 @@
   "scripts": {
     "admin": "node scripts/signal-admin.mjs",
     "admin:bootstrap": "node scripts/signal-admin.mjs bootstrap",
-    "api": "node scripts/signal-api.mjs",
+    "api": "SIGNAL_ALLOW_LOCAL_ACTOR=true SIGNAL_OAUTH_STATE_KEY=signal-local-oauth-state-key node scripts/signal-api.mjs",
     "scheduler": "node scripts/signal-scheduler.mjs",
     "state-service": "node scripts/signal-state-service.mjs",
     "state-service:admin": "node scripts/signal-state-service-admin.mjs",
@@ -14,13 +14,14 @@
     "dev:local": "node scripts/dev-local.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
+    "test:api-security": "node --test scripts/test-signal-api-security.mjs",
     "test:browser-routes": "node --test scripts/test-signal-browser-routes.mjs",
     "test:contract": "node --test scripts/test-signal-contract.mjs",
     "test:jwks-auth": "node --test scripts/test-signal-jwks-auth.mjs",
     "test:persistence": "node --test scripts/test-signal-persistence.mjs",
     "test:scheduler": "node --test scripts/test-signal-scheduler.mjs",
     "test:state-service": "node --test scripts/test-signal-state-service.mjs",
-    "test:local": "npm run verify:local && npm run test:contract && npm run test:jwks-auth && npm run test:persistence && npm run test:state-service && npm run test:scheduler && npm run test:browser-routes",
+    "test:local": "npm run verify:local && npm run test:api-security && npm run test:contract && npm run test:jwks-auth && npm run test:persistence && npm run test:state-service && npm run test:scheduler && npm run test:browser-routes",
     "verify:local": "node scripts/verify-signal-local.mjs"
   },
   "dependencies": {

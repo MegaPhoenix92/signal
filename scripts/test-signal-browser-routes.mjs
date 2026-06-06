@@ -82,6 +82,7 @@ async function startApi({ apiPort, statePath }) {
     env: {
       ...process.env,
       SIGNAL_ADMIN_STATE: statePath,
+      SIGNAL_ALLOW_LOCAL_ACTOR: 'true',
       SIGNAL_API_HOST: '127.0.0.1',
       SIGNAL_API_PORT: String(apiPort),
     },

@@ -59,8 +59,48 @@ export function signedSessionRequired(env = process.env) {
   return env.SIGNAL_REQUIRE_SIGNED_SESSION === 'true';
 }
 
+export function localActorAllowed(env = process.env) {
+  return env.SIGNAL_ALLOW_LOCAL_ACTOR === 'true';
+}
+
+export function isLoopbackApiHost(host = process.env.SIGNAL_API_HOST ?? '127.0.0.1') {
+  const normalized = String(host).trim().toLowerCase();
+  return normalized === '127.0.0.1'
+    || normalized === 'localhost'
+    || normalized === '::1'
+    || normalized === '[::1]';
+}
+
+function oauthProviderConfigured(env = process.env) {
+  return Boolean(env.SIGNAL_GMAIL_CLIENT_ID || env.SIGNAL_OUTLOOK_CLIENT_ID);
+}
+
 function productionAuthProvider(env = process.env) {
   return env.SIGNAL_AUTH_PROVIDER === 'jwks' ? 'jwks' : null;
+}
+
+export function assertApiSecurityConfig(env = process.env) {
+  const host = env.SIGNAL_API_HOST ?? '127.0.0.1';
+  const authEnforced = signedSessionRequired(env) || productionAuthProvider(env) === 'jwks';
+
+  if (!isLoopbackApiHost(host) && !authEnforced) {
+    throw new Error(
+      'SIGNAL_API_HOST is not loopback but signed-session/JWKS auth is not enabled. '
+      + 'Set SIGNAL_REQUIRE_SIGNED_SESSION=true with SIGNAL_SESSION_SECRET, or SIGNAL_AUTH_PROVIDER=jwks with SIGNAL_AUTH_JWKS_URL.',
+    );
+  }
+
+  if (productionAuthProvider(env) === 'jwks' && !env.SIGNAL_AUTH_JWKS_URL) {
+    throw new Error('SIGNAL_AUTH_PROVIDER=jwks requires SIGNAL_AUTH_JWKS_URL.');
+  }
+
+  if (signedSessionRequired(env) && !env.SIGNAL_SESSION_SECRET) {
+    throw new Error('SIGNAL_REQUIRE_SIGNED_SESSION=true requires SIGNAL_SESSION_SECRET.');
+  }
+
+  if (oauthProviderConfigured(env) && !env.SIGNAL_OAUTH_STATE_KEY) {
+    throw new Error('OAuth provider client IDs are configured but SIGNAL_OAUTH_STATE_KEY is missing.');
+  }
 }
 
 function decodeJsonPart(value, label) {
@@ -261,6 +301,15 @@ export async function requestAuth(req, body = {}, { env = process.env, fetchImpl
       code: 'SESSION_TOKEN_REQUIRED',
       status: 401,
       details: { requiredEnv: productionAuthProvider(env) === 'jwks' ? 'SIGNAL_AUTH_JWKS_URL' : 'SIGNAL_SESSION_SECRET' },
+    });
+  }
+  if (!localActorAllowed(env)) {
+    throw new SignalStateError('A verified bearer token is required for this API operation.', {
+      code: 'SESSION_TOKEN_REQUIRED',
+      status: 401,
+      details: {
+        requiredEnv: 'SIGNAL_ALLOW_LOCAL_ACTOR,SIGNAL_REQUIRE_SIGNED_SESSION,SIGNAL_AUTH_PROVIDER',
+      },
     });
   }
   return {
