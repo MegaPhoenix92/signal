@@ -384,6 +384,74 @@ test('Signal state-service admin CLI backs up, verifies, and restores through be
   assert.equal(restoredState.auditEvents.length, 1);
 });
 
+test('Signal state service enforces optimistic concurrency with ETag and If-Match', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-state-etag-'));
+  const stateFile = path.join(tempDir, 'etag-state.json');
+  const backupDir = path.join(tempDir, 'backups');
+  const serviceToken = 'state_service_etag_test_token';
+  const stateServicePort = await freePort();
+  let stateService = null;
+
+  t.after(async () => {
+    await stopProcess(stateService?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  stateService = await startStateService({ backupDir, port: stateServicePort, stateFile, token: serviceToken });
+  const serviceHeaders = {
+    Authorization: `Bearer ${serviceToken}`,
+    'Content-Type': 'application/json',
+  };
+  const originalState = {
+    auditEvents: [{ action: 'seed', actor: 'usr_admin' }],
+    meta: { schemaVersion: 1 },
+    tenants: [{ id: 'tenant_demo', name: 'Demo', domain: 'acme.example', status: 'active' }],
+    users: [{ id: 'usr_admin', tenantId: 'tenant_demo', name: 'Avery Lane', email: 'avery@acme.example', role: 'admin', status: 'active' }],
+  };
+
+  const seed = await fetch(`${stateService.baseUrl}/state`, {
+    body: JSON.stringify(originalState),
+    headers: serviceHeaders,
+    method: 'PUT',
+  });
+  assert.equal(seed.status, 200);
+
+  const read = await fetch(`${stateService.baseUrl}/state`, {
+    headers: { Authorization: `Bearer ${serviceToken}` },
+  });
+  assert.equal(read.status, 200);
+  const etag = read.headers.get('etag');
+  assert.ok(etag, 'state service GET should return an ETag');
+
+  const staleWrite = await fetch(`${stateService.baseUrl}/state`, {
+    body: JSON.stringify({
+      ...originalState,
+      auditEvents: [...originalState.auditEvents, { action: 'stale', actor: 'usr_admin' }],
+    }),
+    headers: {
+      ...serviceHeaders,
+      'If-Match': '"stale-revision"',
+    },
+    method: 'PUT',
+  });
+  assert.equal(staleWrite.status, 409);
+  const stalePayload = await staleWrite.json();
+  assert.equal(stalePayload.code, 'STATE_REVISION_CONFLICT');
+
+  const freshWrite = await fetch(`${stateService.baseUrl}/state`, {
+    body: JSON.stringify({
+      ...originalState,
+      auditEvents: [...originalState.auditEvents, { action: 'fresh', actor: 'usr_admin' }],
+    }),
+    headers: {
+      ...serviceHeaders,
+      'If-Match': etag,
+    },
+    method: 'PUT',
+  });
+  assert.equal(freshWrite.status, 200);
+});
+
 test('Signal API can persist state through an external state service backend', async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-state-service-'));
   const apiPort = await freePort();

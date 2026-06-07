@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -8,12 +10,21 @@ import {
   isLoopbackApiHost,
   localActorAllowed,
   requestAuth,
+  resolveOAuthActor,
+  resolveWebhookActor,
+  sessionCookieHeader,
+  sessionCookieSecure,
 } from './signal-api-auth.mjs';
 import {
   OAuthProviderError,
+  createOAuthStatePayload,
   signOAuthState,
   verifyOAuthState,
 } from './signal-oauth-provider.mjs';
+import {
+  bootstrapState,
+  completeMailboxConnectionFromOAuthCallback,
+} from './signal-state.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -78,6 +89,78 @@ test('loopback helper recognizes local-only bind addresses', () => {
   assert.equal(isLoopbackApiHost('localhost'), true);
   assert.equal(isLoopbackApiHost('0.0.0.0'), false);
   assert.equal(localActorAllowed({ SIGNAL_ALLOW_LOCAL_ACTOR: 'true' }), true);
+});
+
+test('resolveWebhookActor ignores caller-supplied X-Signal-Actor unless local actor mode is enabled', async () => {
+  const spoofed = await resolveWebhookActor({ headers: { 'x-signal-actor': 'usr_admin' } }, { env: {} });
+  assert.equal(spoofed, null);
+
+  const configured = await resolveWebhookActor({ headers: { 'x-signal-actor': 'usr_admin' } }, {
+    env: { SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook' },
+  });
+  assert.equal(configured, 'usr_system_webhook');
+
+  const local = await resolveWebhookActor({ headers: { 'x-signal-actor': 'usr_admin' } }, {
+    env: { SIGNAL_ALLOW_LOCAL_ACTOR: 'true' },
+  });
+  assert.equal(local, 'usr_admin');
+});
+
+test('resolveOAuthActor ignores caller-supplied X-Signal-Actor unless local actor mode is enabled', async () => {
+  const spoofed = await resolveOAuthActor({ headers: { 'x-signal-actor': 'usr_admin' } }, { env: {} });
+  assert.equal(spoofed, null);
+
+  const configured = await resolveOAuthActor({ headers: { 'x-signal-actor': 'usr_admin' } }, {
+    env: { SIGNAL_OAUTH_ACTOR: 'usr_system_oauth' },
+  });
+  assert.equal(configured, 'usr_system_oauth');
+});
+
+test('session cookie adds Secure when production HTTPS base URL is configured', () => {
+  assert.equal(sessionCookieSecure({ SIGNAL_APP_BASE_URL: 'https://signal.example' }), true);
+  assert.equal(sessionCookieSecure({ SIGNAL_APP_BASE_URL: 'http://127.0.0.1:8787' }), false);
+  const header = sessionCookieHeader('token_value', {
+    env: { SIGNAL_APP_BASE_URL: 'https://signal.example' },
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    issuedAt: new Date().toISOString(),
+  });
+  assert.match(header, /;\s*Secure(?:;|$)/);
+});
+
+test('OAuth callback rejects legacy connection sessions missing oauthStateDigest', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-oauth-digest-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const oauthEnv = { SIGNAL_OAUTH_STATE_KEY: 'oauth-digest-test-key' };
+  const previousOAuthStateKey = process.env.SIGNAL_OAUTH_STATE_KEY;
+  process.env.SIGNAL_OAUTH_STATE_KEY = oauthEnv.SIGNAL_OAUTH_STATE_KEY;
+  t.after(() => {
+    if (previousOAuthStateKey === undefined) {
+      delete process.env.SIGNAL_OAUTH_STATE_KEY;
+    } else {
+      process.env.SIGNAL_OAUTH_STATE_KEY = previousOAuthStateKey;
+    }
+  });
+  const oauthState = signOAuthState(createOAuthStatePayload({
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    mailboxId: 'mbx_outlook_success',
+    ownerUserId: 'usr_admin',
+    provider: 'outlook',
+    sessionId: 'mcs_outlook_reauth',
+    tenantId: 'tenant_demo',
+  }), { env: oauthEnv });
+
+  await assert.rejects(
+    () => completeMailboxConnectionFromOAuthCallback('outlook', { code: 'provider-code', state: oauthState }, {
+      actorUserId: 'usr_admin',
+      statePath,
+    }),
+    (error) => error.code === 'OAUTH_STATE_SESSION_MISMATCH',
+  );
 });
 
 test('signal-api refuses to boot on non-loopback host without verified auth', async () => {

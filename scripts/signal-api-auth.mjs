@@ -377,13 +377,46 @@ export function requireRegisteredSessionRequestAuth(state, requestActor) {
   return session;
 }
 
-export function sessionCookieHeader(token, { expiresAt, issuedAt } = {}) {
+export function sessionCookieSecure(env = process.env) {
+  if (env.SIGNAL_COOKIE_SECURE === 'false') {
+    return false;
+  }
+  if (env.SIGNAL_COOKIE_SECURE === 'true') {
+    return true;
+  }
+  return /^https:\/\//i.test(env.SIGNAL_APP_BASE_URL ?? '');
+}
+
+export async function resolveWebhookActor(req, { env = process.env } = {}) {
+  if (requestSessionToken(req)) {
+    return (await requestAuth(req, {}, { env })).actorUserId;
+  }
+  if (localActorAllowed(env)) {
+    return headerValue(req, 'x-signal-actor') ?? env.SIGNAL_WEBHOOK_ACTOR ?? null;
+  }
+  return env.SIGNAL_WEBHOOK_ACTOR ?? null;
+}
+
+export async function resolveOAuthActor(req, { env = process.env } = {}) {
+  if (requestSessionToken(req)) {
+    return (await requestAuth(req, {}, { env })).actorUserId;
+  }
+  if (localActorAllowed(env)) {
+    return headerValue(req, 'x-signal-actor') ?? env.SIGNAL_OAUTH_ACTOR ?? null;
+  }
+  return env.SIGNAL_OAUTH_ACTOR ?? null;
+}
+
+export function sessionCookieHeader(token, { expiresAt, issuedAt, env = process.env } = {}) {
   const cookieParts = [
     `${SIGNAL_SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
     'HttpOnly',
     'SameSite=Lax',
     'Path=/',
   ];
+  if (sessionCookieSecure(env)) {
+    cookieParts.push('Secure');
+  }
   const expiresMs = Date.parse(expiresAt);
   if (Number.isFinite(expiresMs)) {
     cookieParts.push(`Expires=${new Date(expiresMs).toUTCString()}`);

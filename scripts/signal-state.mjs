@@ -96,6 +96,36 @@ function stateServiceHeaders(extra = {}) {
   };
 }
 
+const stateRevisionByPath = new Map();
+const stateMutationChains = new Map();
+
+function parseStateEtag(etag) {
+  if (!etag) {
+    return null;
+  }
+  const trimmed = String(etag).trim();
+  const match = trimmed.match(/^W\/"([^"]+)"$/) || trimmed.match(/^"([^"]+)"$/);
+  return match ? match[1] : trimmed;
+}
+
+function rememberStateRevision(statePath, revision) {
+  if (revision !== null && revision !== undefined && revision !== '') {
+    stateRevisionByPath.set(statePath, revision);
+  }
+}
+
+function withStateMutationLock(statePath, fn) {
+  const key = resolveStatePath(statePath);
+  const previous = stateMutationChains.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(fn);
+  stateMutationChains.set(key, next);
+  return next.finally(() => {
+    if (stateMutationChains.get(key) === next) {
+      stateMutationChains.delete(key);
+    }
+  });
+}
+
 function stateServiceError(message, { code = 'STATE_SERVICE_ERROR', status = 502, details = {} } = {}) {
   return new SignalStateError(message, { code, status, details });
 }
@@ -113,31 +143,52 @@ export async function readJson(filePath) {
         details: { serviceUrl: filePath, statusCode: response.status },
       });
     }
+    rememberStateRevision(filePath, parseStateEtag(response.headers.get('etag')));
     return response.json();
   }
   return JSON.parse(await fs.readFile(filePath, 'utf8'));
 }
 
-export async function writeJson(filePath, value) {
+export async function writeJson(filePath, value, { ifMatch } = {}) {
   if (isHttpResource(filePath)) {
+    const expectedRevision = ifMatch ?? stateRevisionByPath.get(filePath);
+    const headers = stateServiceHeaders({
+      'Content-Type': 'application/json',
+      ...(expectedRevision !== null && expectedRevision !== undefined
+        ? { 'If-Match': `"${expectedRevision}"` }
+        : {}),
+    });
     const response = await fetch(filePath, {
       body: `${JSON.stringify(value, null, 2)}\n`,
-      headers: stateServiceHeaders({
-        'Content-Type': 'application/json',
-      }),
+      headers,
       method: 'PUT',
       signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(Number(process.env.SIGNAL_STATE_SERVICE_TIMEOUT_MS ?? 5000)) : undefined,
     });
+    if (response.status === 409) {
+      throw stateServiceError('State revision conflict — concurrent write detected.', {
+        code: 'STATE_REVISION_CONFLICT',
+        status: 409,
+        details: { serviceUrl: filePath, statusCode: 409 },
+      });
+    }
     if (!response.ok) {
       throw stateServiceError(`State service write failed with ${response.status}.`, {
         code: 'STATE_SERVICE_WRITE_FAILED',
         details: { serviceUrl: filePath, statusCode: response.status },
       });
     }
+    const payload = await response.json().catch(() => null);
+    const nextRevision = parseStateEtag(response.headers.get('etag'))
+      ?? (payload?.state?.revision !== undefined ? String(payload.state.revision) : null)
+      ?? payload?.state?.digest
+      ?? null;
+    rememberStateRevision(filePath, nextRevision);
     return;
   }
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
+  await fs.rename(tempPath, filePath);
 }
 
 export async function exists(filePath) {
@@ -221,14 +272,16 @@ export async function loadState({ allowMissing = false, statePath } = {}) {
   return normalizeState(await readJson(resolvedStatePath));
 }
 
-export async function saveState(state, { statePath } = {}) {
+export async function saveState(state, { ifMatch, statePath } = {}) {
   const resolvedStatePath = resolveStatePath(statePath);
   normalizeState(state);
   state.meta = {
     ...state.meta,
     updatedAt: new Date().toISOString(),
   };
-  await writeJson(resolvedStatePath, state);
+  await writeJson(resolvedStatePath, state, {
+    ifMatch: ifMatch ?? stateRevisionByPath.get(resolvedStatePath),
+  });
   return {
     state,
     statePath: resolvedStatePath,
@@ -237,6 +290,8 @@ export async function saveState(state, { statePath } = {}) {
 }
 
 export async function switchSession(userId, { actorUserId, statePath } = {}) {
+  const resolvedStatePath = resolveStatePath(statePath);
+  return withStateMutationLock(resolvedStatePath, async () => {
   const state = await loadState({ statePath });
   const previousActor = getActor(state, actorUserId ?? state.session?.activeUserId, { allowMissing: true });
   const nextActor = getActor(state, requireArg(userId, 'user id', 'session switch <userId>'));
@@ -265,6 +320,7 @@ export async function switchSession(userId, { actorUserId, statePath } = {}) {
     state: saved.state,
     summary: saved.summary,
   };
+  });
 }
 
 export function normalizeState(state) {
@@ -9555,19 +9611,39 @@ function appendAudit(state, action, targetId, message, actor) {
 }
 
 async function mutateState(action, mutator, { actorUserId, statePath } = {}) {
-  const state = await loadState({ statePath });
-  const actor = getActor(state, actorUserId);
-  const details = await mutator(state, actor);
-  appendAudit(state, action, details.targetId ?? details.id ?? action, details.message, actor);
-  const saved = await saveState(state, { statePath });
-  return {
-    ok: true,
-    action,
-    actor,
-    details,
-    state: saved.state,
-    summary: saved.summary,
-  };
+  const resolvedStatePath = resolveStatePath(statePath);
+  return withStateMutationLock(resolvedStatePath, async () => {
+    const maxAttempts = isHttpResource(resolvedStatePath) ? 5 : 1;
+    let lastError = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const state = await loadState({ statePath });
+        const actor = getActor(state, actorUserId);
+        const details = await mutator(state, actor);
+        appendAudit(state, action, details.targetId ?? details.id ?? action, details.message, actor);
+        const saved = await saveState(state, { statePath });
+        return {
+          ok: true,
+          action,
+          actor,
+          details,
+          state: saved.state,
+          summary: saved.summary,
+        };
+      } catch (error) {
+        if (error instanceof SignalStateError && error.code === 'STATE_REVISION_CONFLICT' && attempt < maxAttempts - 1) {
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw lastError ?? new SignalStateError('State mutation failed after retrying concurrent writes.', {
+      code: 'STATE_REVISION_CONFLICT',
+      status: 409,
+      details: { action, statePath: resolvedStatePath },
+    });
+  });
 }
 
 function createTenantWorkspaceInState(state, {
@@ -9741,23 +9817,26 @@ export async function createTenantWorkspace({ name, domain, adminEmail, adminNam
 }
 
 export async function registerTenantWorkspace({ name, domain, adminEmail, adminName, planId = 'plan_beta' } = {}, { statePath } = {}) {
-  const state = await loadState({ statePath });
-  const details = createTenantWorkspaceInState(state, { name, domain, adminEmail, adminName, planId }, {
-    action: 'tenants.register',
-    registrationMode: 'self_service',
-    usage: 'registration <workspaceName> <domain> <adminEmail> [adminName] [planId]',
+  const resolvedStatePath = resolveStatePath(statePath);
+  return withStateMutationLock(resolvedStatePath, async () => {
+    const state = await loadState({ statePath });
+    const details = createTenantWorkspaceInState(state, { name, domain, adminEmail, adminName, planId }, {
+      action: 'tenants.register',
+      registrationMode: 'self_service',
+      usage: 'registration <workspaceName> <domain> <adminEmail> [adminName] [planId]',
+    });
+    const actor = getActor(state, details.adminUserId);
+    appendAudit(state, 'tenants.register', details.targetId, details.message, actor);
+    const saved = await saveState(state, { statePath });
+    return {
+      ok: true,
+      action: 'tenants.register',
+      actor,
+      details,
+      state: saved.state,
+      summary: saved.summary,
+    };
   });
-  const actor = getActor(state, details.adminUserId);
-  appendAudit(state, 'tenants.register', details.targetId, details.message, actor);
-  const saved = await saveState(state, { statePath });
-  return {
-    ok: true,
-    action: 'tenants.register',
-    actor,
-    details,
-    state: saved.state,
-    summary: saved.summary,
-  };
 }
 
 function requireTenantOwnerOrAdminMember(state, actor, tenant, action) {
@@ -10118,6 +10197,8 @@ export async function claimUserInvite({ claimCode, email, name, team } = {}, { s
   const usage = 'users claim <claimCode> <email> [name] [team]';
   const code = requireArg(claimCode, 'claim code', usage).trim();
   const claimEmail = normalizeEmail(email, usage);
+  const resolvedStatePath = resolveStatePath(statePath);
+  return withStateMutationLock(resolvedStatePath, async () => {
   const state = await loadState({ statePath });
   const invite = (state.invites ?? []).find((candidate) =>
     candidate.claimCode === code &&
@@ -10162,6 +10243,7 @@ export async function claimUserInvite({ claimCode, email, name, team } = {}, { s
     state: saved.state,
     summary: saved.summary,
   };
+  });
 }
 
 export async function revokeUserInvite(inviteId, options = {}) {
@@ -10469,7 +10551,7 @@ export async function completeMailboxConnectionFromOAuthCallback(provider, { cod
       requireActiveEntitlementForMember(localState, actor, session.tenantId, 'mailboxes.oauth-callback');
       const expectedDigest = session.oauthStateDigest ?? null;
       const receivedDigest = oauthStateDigest(oauthState);
-      if (expectedDigest && expectedDigest !== receivedDigest) {
+      if (!expectedDigest || expectedDigest !== receivedDigest) {
         throw new SignalStateError('OAuth callback state does not match the connection session.', {
           code: 'OAUTH_STATE_SESSION_MISMATCH',
           status: 401,

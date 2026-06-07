@@ -67,9 +67,42 @@ export function createStateServiceConfig(env = process.env) {
   };
 }
 
-function json(res, statusCode, payload) {
-  res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+function json(res, statusCode, payload, extraHeaders = {}) {
+  res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8', ...extraHeaders });
   res.end(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function parseIfMatchHeader(value) {
+  if (!value) {
+    return null;
+  }
+  const trimmed = String(value).trim();
+  const match = trimmed.match(/^W\/"([^"]+)"$/) || trimmed.match(/^"([^"]+)"$/);
+  return match ? match[1] : trimmed;
+}
+
+function formatStateEtag(meta) {
+  if (!meta?.exists) {
+    return null;
+  }
+  if (Number.isFinite(meta.revision)) {
+    return `"${meta.revision}"`;
+  }
+  if (meta.digest) {
+    return `"${meta.digest}"`;
+  }
+  return null;
+}
+
+function etagMatches(meta, ifMatchHeader) {
+  const expected = parseIfMatchHeader(ifMatchHeader);
+  if (!expected) {
+    return false;
+  }
+  if (Number.isFinite(meta.revision)) {
+    return String(meta.revision) === expected;
+  }
+  return meta.digest === expected;
 }
 
 function digest(value) {
@@ -412,19 +445,37 @@ async function route(req, res, config, store) {
   }
 
   if (req.method === 'GET') {
+    const meta = await store.meta();
     const body = await store.read();
     if (!body) {
       json(res, 404, { ok: false, code: 'STATE_MISSING', error: 'State has not been bootstrapped.' });
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    const etag = formatStateEtag(meta);
+    const headers = { 'Content-Type': 'application/json; charset=utf-8' };
+    if (etag) {
+      headers.ETag = etag;
+    }
+    res.writeHead(200, headers);
     res.end(body);
     return;
   }
 
   if (req.method === 'PUT') {
+    const currentMeta = await store.meta();
+    const ifMatch = req.headers['if-match'];
+    if (currentMeta.exists && ifMatch && !etagMatches(currentMeta, ifMatch)) {
+      json(res, 409, {
+        ok: false,
+        code: 'STATE_REVISION_CONFLICT',
+        error: 'State revision conflict — concurrent write detected.',
+        state: currentMeta,
+      });
+      return;
+    }
     const meta = await store.write(await readRawBody(req));
-    json(res, 200, { ok: true, state: meta });
+    const etag = formatStateEtag(meta);
+    json(res, 200, { ok: true, state: meta }, etag ? { ETag: etag } : {});
     return;
   }
 
