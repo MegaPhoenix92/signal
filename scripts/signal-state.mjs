@@ -96,6 +96,61 @@ function stateServiceHeaders(extra = {}) {
   };
 }
 
+const stateRevisionByPath = new Map();
+const stateMutationChains = new Map();
+
+function parseStateEtag(etag) {
+  if (!etag) {
+    return null;
+  }
+  const trimmed = String(etag).trim();
+  const match = trimmed.match(/^W\/"([^"]+)"$/) || trimmed.match(/^"([^"]+)"$/);
+  return match ? match[1] : trimmed;
+}
+
+function rememberStateRevision(statePath, revision) {
+  if (revision !== null && revision !== undefined && revision !== '') {
+    stateRevisionByPath.set(statePath, revision);
+  }
+}
+
+function withStateMutationLock(statePath, fn) {
+  const key = resolveStatePath(statePath);
+  const previous = stateMutationChains.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(fn);
+  stateMutationChains.set(key, next);
+  return next.finally(() => {
+    if (stateMutationChains.get(key) === next) {
+      stateMutationChains.delete(key);
+    }
+  });
+}
+
+// Multi-process deployments still perform read-modify-write at the API layer.
+// Long-term follow-up (issue #5): push transactional RMW into the state-service backend.
+async function runLockedStateWriter(resolvedStatePath, writer, { retryOnConflict = true } = {}) {
+  return withStateMutationLock(resolvedStatePath, async () => {
+    const maxAttempts = isHttpResource(resolvedStatePath) && retryOnConflict ? 5 : 1;
+    let lastError = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        return await writer();
+      } catch (error) {
+        if (error instanceof SignalStateError && error.code === 'STATE_REVISION_CONFLICT' && attempt < maxAttempts - 1) {
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw lastError ?? new SignalStateError('State mutation failed after retrying concurrent writes.', {
+      code: 'STATE_REVISION_CONFLICT',
+      status: 409,
+      details: { statePath: resolvedStatePath },
+    });
+  });
+}
+
 function stateServiceError(message, { code = 'STATE_SERVICE_ERROR', status = 502, details = {} } = {}) {
   return new SignalStateError(message, { code, status, details });
 }
@@ -113,31 +168,64 @@ export async function readJson(filePath) {
         details: { serviceUrl: filePath, statusCode: response.status },
       });
     }
+    rememberStateRevision(filePath, parseStateEtag(response.headers.get('etag')));
     return response.json();
   }
   return JSON.parse(await fs.readFile(filePath, 'utf8'));
 }
 
-export async function writeJson(filePath, value) {
+export async function writeJson(filePath, value, { ifMatch } = {}) {
   if (isHttpResource(filePath)) {
+    const expectedRevision = ifMatch ?? stateRevisionByPath.get(filePath);
+    const headers = stateServiceHeaders({
+      'Content-Type': 'application/json',
+      ...(expectedRevision !== null && expectedRevision !== undefined
+        ? { 'If-Match': `"${expectedRevision}"` }
+        : {}),
+    });
     const response = await fetch(filePath, {
       body: `${JSON.stringify(value, null, 2)}\n`,
-      headers: stateServiceHeaders({
-        'Content-Type': 'application/json',
-      }),
+      headers,
       method: 'PUT',
       signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(Number(process.env.SIGNAL_STATE_SERVICE_TIMEOUT_MS ?? 5000)) : undefined,
     });
+    if (response.status === 409) {
+      throw stateServiceError('State revision conflict — concurrent write detected.', {
+        code: 'STATE_REVISION_CONFLICT',
+        status: 409,
+        details: { serviceUrl: filePath, statusCode: 409 },
+      });
+    }
+    if (response.status === 428) {
+      throw stateServiceError('State service requires If-Match for updates.', {
+        code: 'STATE_PRECONDITION_REQUIRED',
+        status: 428,
+        details: { serviceUrl: filePath, statusCode: 428 },
+      });
+    }
     if (!response.ok) {
       throw stateServiceError(`State service write failed with ${response.status}.`, {
         code: 'STATE_SERVICE_WRITE_FAILED',
         details: { serviceUrl: filePath, statusCode: response.status },
       });
     }
+    const payload = await response.json().catch(() => null);
+    const nextRevision = parseStateEtag(response.headers.get('etag'))
+      ?? (payload?.state?.revision !== undefined ? String(payload.state.revision) : null)
+      ?? payload?.state?.digest
+      ?? null;
+    rememberStateRevision(filePath, nextRevision);
     return;
   }
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
+    await fs.rename(tempPath, filePath);
+  } catch (error) {
+    await fs.unlink(tempPath).catch(() => {});
+    throw error;
+  }
 }
 
 export async function exists(filePath) {
@@ -167,29 +255,36 @@ export async function exists(filePath) {
 
 export async function bootstrapState({ force = false, statePath } = {}) {
   const resolvedStatePath = resolveStatePath(statePath);
-  if ((await exists(resolvedStatePath)) && !force) {
-    throw new SignalStateError(`Local state already exists at ${resolvedStatePath}. Use force to overwrite.`, {
-      code: 'STATE_EXISTS',
-      status: 409,
-      details: { statePath: resolvedStatePath },
-    });
-  }
+  return withStateMutationLock(resolvedStatePath, async () => {
+    if ((await exists(resolvedStatePath)) && !force) {
+      throw new SignalStateError(`Local state already exists at ${resolvedStatePath}. Use force to overwrite.`, {
+        code: 'STATE_EXISTS',
+        status: 409,
+        details: { statePath: resolvedStatePath },
+      });
+    }
 
-  const seed = await readJson(seedPath);
-  const stamped = normalizeState({
-    ...seed,
-    meta: {
-      ...seed.meta,
-      bootstrappedAt: new Date().toISOString(),
+    const seed = await readJson(seedPath);
+    const stamped = normalizeState({
+      ...seed,
+      meta: {
+        ...seed.meta,
+        bootstrappedAt: new Date().toISOString(),
+        statePath: resolvedStatePath,
+      },
+    });
+    let ifMatch;
+    if (force && isHttpResource(resolvedStatePath) && (await exists(resolvedStatePath))) {
+      await readJson(resolvedStatePath);
+      ifMatch = stateRevisionByPath.get(resolvedStatePath);
+    }
+    await writeJson(resolvedStatePath, stamped, { ifMatch });
+    return {
+      state: stamped,
       statePath: resolvedStatePath,
-    },
+      summary: summarizeState(stamped, resolvedStatePath),
+    };
   });
-  await writeJson(resolvedStatePath, stamped);
-  return {
-    state: stamped,
-    statePath: resolvedStatePath,
-    summary: summarizeState(stamped, resolvedStatePath),
-  };
 }
 
 export async function ensureState({ statePath } = {}) {
@@ -221,14 +316,16 @@ export async function loadState({ allowMissing = false, statePath } = {}) {
   return normalizeState(await readJson(resolvedStatePath));
 }
 
-export async function saveState(state, { statePath } = {}) {
+export async function saveState(state, { ifMatch, statePath } = {}) {
   const resolvedStatePath = resolveStatePath(statePath);
   normalizeState(state);
   state.meta = {
     ...state.meta,
     updatedAt: new Date().toISOString(),
   };
-  await writeJson(resolvedStatePath, state);
+  await writeJson(resolvedStatePath, state, {
+    ifMatch: ifMatch ?? stateRevisionByPath.get(resolvedStatePath),
+  });
   return {
     state,
     statePath: resolvedStatePath,
@@ -237,34 +334,37 @@ export async function saveState(state, { statePath } = {}) {
 }
 
 export async function switchSession(userId, { actorUserId, statePath } = {}) {
-  const state = await loadState({ statePath });
-  const previousActor = getActor(state, actorUserId ?? state.session?.activeUserId, { allowMissing: true });
-  const nextActor = getActor(state, requireArg(userId, 'user id', 'session switch <userId>'));
-  const previousUserId = state.session?.activeUserId ?? null;
-  state.session = {
-    activeUserId: nextActor.id,
-    allowedRoles: ['admin', 'member'],
-    localOnly: true,
-    ...(state.session ?? {}),
-  };
-  state.session.activeUserId = nextActor.id;
+  const resolvedStatePath = resolveStatePath(statePath);
+  return runLockedStateWriter(resolvedStatePath, async () => {
+    const state = await loadState({ statePath });
+    const previousActor = getActor(state, actorUserId ?? state.session?.activeUserId, { allowMissing: true });
+    const nextActor = getActor(state, requireArg(userId, 'user id', 'session switch <userId>'));
+    const previousUserId = state.session?.activeUserId ?? null;
+    state.session = {
+      activeUserId: nextActor.id,
+      allowedRoles: ['admin', 'member'],
+      localOnly: true,
+      ...(state.session ?? {}),
+    };
+    state.session.activeUserId = nextActor.id;
 
-  const details = {
-    message: `Local session switched to ${nextActor.email}`,
-    nextUserId: nextActor.id,
-    previousUserId,
-    targetId: nextActor.id,
-  };
-  appendAudit(state, 'session.switch', nextActor.id, details.message, previousActor ?? nextActor);
-  const saved = await saveState(state, { statePath });
-  return {
-    ok: true,
-    action: 'session.switch',
-    actor: nextActor,
-    details,
-    state: saved.state,
-    summary: saved.summary,
-  };
+    const details = {
+      message: `Local session switched to ${nextActor.email}`,
+      nextUserId: nextActor.id,
+      previousUserId,
+      targetId: nextActor.id,
+    };
+    appendAudit(state, 'session.switch', nextActor.id, details.message, previousActor ?? nextActor);
+    const saved = await saveState(state, { statePath });
+    return {
+      ok: true,
+      action: 'session.switch',
+      actor: nextActor,
+      details,
+      state: saved.state,
+      summary: saved.summary,
+    };
+  });
 }
 
 export function normalizeState(state) {
@@ -9108,7 +9208,14 @@ function signalForSourceMessage(state, flow, message, mailbox, matches) {
   };
 }
 
-export function getActor(state, actorUserId, { allowMissing = false } = {}) {
+export function getActor(state, actorUserId, { allowMissing = false, requireExplicit = false } = {}) {
+  if (requireExplicit && !actorUserId) {
+    throw new SignalStateError('Actor identity is required.', {
+      code: 'ACTOR_REQUIRED',
+      status: 401,
+      details: {},
+    });
+  }
   const fallbackUserId = actorUserId ?? state.session?.activeUserId ?? process.env.SIGNAL_ADMIN_ACTOR ?? 'usr_admin';
   const user = state.users?.find((candidate) => candidate.id === fallbackUserId && candidate.status === 'active');
   const membership = user ? activeMembershipForUser(state, user.id, user.tenantId) : null;
@@ -9554,20 +9661,28 @@ function appendAudit(state, action, targetId, message, actor) {
   });
 }
 
-async function mutateState(action, mutator, { actorUserId, statePath } = {}) {
-  const state = await loadState({ statePath });
-  const actor = getActor(state, actorUserId);
-  const details = await mutator(state, actor);
-  appendAudit(state, action, details.targetId ?? details.id ?? action, details.message, actor);
-  const saved = await saveState(state, { statePath });
-  return {
-    ok: true,
-    action,
-    actor,
-    details,
-    state: saved.state,
-    summary: saved.summary,
-  };
+async function mutateState(action, mutator, {
+  actorUserId,
+  requireExplicitActor = false,
+  retryOnConflict = true,
+  statePath,
+} = {}) {
+  const resolvedStatePath = resolveStatePath(statePath);
+  return runLockedStateWriter(resolvedStatePath, async () => {
+    const state = await loadState({ statePath });
+    const actor = getActor(state, actorUserId, { requireExplicit: requireExplicitActor });
+    const details = await mutator(state, actor);
+    appendAudit(state, action, details.targetId ?? details.id ?? action, details.message, actor);
+    const saved = await saveState(state, { statePath });
+    return {
+      ok: true,
+      action,
+      actor,
+      details,
+      state: saved.state,
+      summary: saved.summary,
+    };
+  }, { retryOnConflict });
 }
 
 function createTenantWorkspaceInState(state, {
@@ -9741,23 +9856,26 @@ export async function createTenantWorkspace({ name, domain, adminEmail, adminNam
 }
 
 export async function registerTenantWorkspace({ name, domain, adminEmail, adminName, planId = 'plan_beta' } = {}, { statePath } = {}) {
-  const state = await loadState({ statePath });
-  const details = createTenantWorkspaceInState(state, { name, domain, adminEmail, adminName, planId }, {
-    action: 'tenants.register',
-    registrationMode: 'self_service',
-    usage: 'registration <workspaceName> <domain> <adminEmail> [adminName] [planId]',
+  const resolvedStatePath = resolveStatePath(statePath);
+  return runLockedStateWriter(resolvedStatePath, async () => {
+    const state = await loadState({ statePath });
+    const details = createTenantWorkspaceInState(state, { name, domain, adminEmail, adminName, planId }, {
+      action: 'tenants.register',
+      registrationMode: 'self_service',
+      usage: 'registration <workspaceName> <domain> <adminEmail> [adminName] [planId]',
+    });
+    const actor = getActor(state, details.adminUserId);
+    appendAudit(state, 'tenants.register', details.targetId, details.message, actor);
+    const saved = await saveState(state, { statePath });
+    return {
+      ok: true,
+      action: 'tenants.register',
+      actor,
+      details,
+      state: saved.state,
+      summary: saved.summary,
+    };
   });
-  const actor = getActor(state, details.adminUserId);
-  appendAudit(state, 'tenants.register', details.targetId, details.message, actor);
-  const saved = await saveState(state, { statePath });
-  return {
-    ok: true,
-    action: 'tenants.register',
-    actor,
-    details,
-    state: saved.state,
-    summary: saved.summary,
-  };
 }
 
 function requireTenantOwnerOrAdminMember(state, actor, tenant, action) {
@@ -10118,6 +10236,8 @@ export async function claimUserInvite({ claimCode, email, name, team } = {}, { s
   const usage = 'users claim <claimCode> <email> [name] [team]';
   const code = requireArg(claimCode, 'claim code', usage).trim();
   const claimEmail = normalizeEmail(email, usage);
+  const resolvedStatePath = resolveStatePath(statePath);
+  return runLockedStateWriter(resolvedStatePath, async () => {
   const state = await loadState({ statePath });
   const invite = (state.invites ?? []).find((candidate) =>
     candidate.claimCode === code &&
@@ -10162,6 +10282,7 @@ export async function claimUserInvite({ claimCode, email, name, team } = {}, { s
     state: saved.state,
     summary: saved.summary,
   };
+  });
 }
 
 export async function revokeUserInvite(inviteId, options = {}) {
@@ -10469,7 +10590,7 @@ export async function completeMailboxConnectionFromOAuthCallback(provider, { cod
       requireActiveEntitlementForMember(localState, actor, session.tenantId, 'mailboxes.oauth-callback');
       const expectedDigest = session.oauthStateDigest ?? null;
       const receivedDigest = oauthStateDigest(oauthState);
-      if (expectedDigest && expectedDigest !== receivedDigest) {
+      if (!expectedDigest || expectedDigest !== receivedDigest) {
         throw new SignalStateError('OAuth callback state does not match the connection session.', {
           code: 'OAUTH_STATE_SESSION_MISMATCH',
           status: 401,
@@ -10529,7 +10650,7 @@ export async function completeMailboxConnectionFromOAuthCallback(provider, { cod
         message: `Verified ${sourceProvider} OAuth callback for ${details.mailboxId}`,
       };
     },
-    options,
+    { ...options, requireExplicitActor: true, retryOnConflict: false },
   );
 }
 
@@ -10620,7 +10741,7 @@ export async function syncMailbox(mailboxId, options = {}) {
         targetId: mailbox.id,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -10676,7 +10797,7 @@ export async function replayMailbox(mailboxId, options = {}) {
         targetId: mailbox.id,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -11213,7 +11334,7 @@ export async function setupMailboxWatch(mailboxId, options = {}) {
         watchId: watch.id,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -11272,7 +11393,7 @@ export async function renewMailboxWatch(watchId, options = {}) {
         watchId: watch.id,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -11353,7 +11474,7 @@ export async function handleProviderWatchNotification(provider, payload = {}, op
         watchId: targetWatch.id,
       };
     },
-    options,
+    { ...options, requireExplicitActor: true },
   );
 }
 
@@ -13182,7 +13303,7 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
         url: session.url,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -13260,7 +13381,7 @@ export async function createBillingPortalSession(tenantId, options = {}) {
         url: session.url,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -13539,7 +13660,7 @@ export async function handlePaymentWebhook(eventType, {
         tenantId: tenant.id,
       };
     },
-    options,
+    { ...options, requireExplicitActor: true },
   );
 }
 
@@ -13695,7 +13816,7 @@ export async function handleEmailDeliveryWebhook(payload, options = {}) {
       }
       return reconcileEmailWebhookEventsInState(state, event);
     },
-    options,
+    { ...options, requireExplicitActor: true },
   );
 }
 
@@ -13726,7 +13847,7 @@ export async function handleSignedEmailDeliveryWebhook(rawBody, signatureHeader,
       requireAdmin(actor, 'notifications.delivery-webhook');
       return reconcileEmailWebhookEventsInState(state, event);
     },
-    { actorUserId, statePath },
+    { actorUserId, requireExplicitActor: true, statePath },
   );
 }
 
@@ -13757,7 +13878,7 @@ export async function handleSignedSendGridEmailDeliveryWebhook(rawBody, signatur
       requireAdmin(actor, 'notifications.delivery-webhook');
       return reconcileEmailWebhookEventsInState(state, event);
     },
-    { actorUserId, statePath },
+    { actorUserId, requireExplicitActor: true, statePath },
   );
 }
 
@@ -14217,7 +14338,7 @@ export async function runJobs({ jobId, queue, limit } = {}, options = {}) {
         targetId: jobId ?? queue ?? 'queued_jobs',
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 

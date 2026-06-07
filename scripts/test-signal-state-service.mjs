@@ -262,7 +262,9 @@ test('Signal state service postgres backend migrates, versions, and backs up sta
     apiSessions: [{ digest: 'session_digest_only' }],
     auditEvents: [{ action: 'users.invite', actor: 'usr_admin' }],
     meta: { tenantId: 'tenant_demo' },
-  }));
+  }), {
+    ifMatch: `"${firstMeta.revision}"`,
+  });
   assert.equal(secondMeta.revision, 2);
   assert.equal(secondMeta.backups, 1);
   assert.equal(pool.backups.length, 1);
@@ -355,11 +357,19 @@ test('Signal state-service admin CLI backs up, verifies, and restores through be
   assert.equal(verified.ok, true);
   assert.equal(verified.backup.digest, backup.backup.digest);
 
+  const beforeChange = await fetch(`${stateService.baseUrl}/state`, {
+    headers: { Authorization: `Bearer ${serviceToken}` },
+  });
+  assert.equal(beforeChange.status, 200);
+  const changeEtag = beforeChange.headers.get('etag');
+  assert.ok(changeEtag, 'state service GET should return an ETag before update');
+
   const changed = await fetch(`${stateService.baseUrl}/state`, {
     body: JSON.stringify(changedState),
     headers: {
       Authorization: `Bearer ${serviceToken}`,
       'Content-Type': 'application/json',
+      'If-Match': changeEtag,
     },
     method: 'PUT',
   });
@@ -382,6 +392,95 @@ test('Signal state-service admin CLI backs up, verifies, and restores through be
   assert.equal(restoredState.users.length, 1);
   assert.equal(restoredState.users[0].id, 'usr_admin');
   assert.equal(restoredState.auditEvents.length, 1);
+});
+
+test('Signal state service enforces optimistic concurrency with ETag and If-Match', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-state-etag-'));
+  const stateFile = path.join(tempDir, 'etag-state.json');
+  const backupDir = path.join(tempDir, 'backups');
+  const serviceToken = 'state_service_etag_test_token';
+  const stateServicePort = await freePort();
+  let stateService = null;
+
+  t.after(async () => {
+    await stopProcess(stateService?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  stateService = await startStateService({ backupDir, port: stateServicePort, stateFile, token: serviceToken });
+  const serviceHeaders = {
+    Authorization: `Bearer ${serviceToken}`,
+    'Content-Type': 'application/json',
+  };
+  const originalState = {
+    auditEvents: [{ action: 'seed', actor: 'usr_admin' }],
+    meta: { schemaVersion: 1 },
+    tenants: [{ id: 'tenant_demo', name: 'Demo', domain: 'acme.example', status: 'active' }],
+    users: [{ id: 'usr_admin', tenantId: 'tenant_demo', name: 'Avery Lane', email: 'avery@acme.example', role: 'admin', status: 'active' }],
+  };
+
+  const seed = await fetch(`${stateService.baseUrl}/state`, {
+    body: JSON.stringify(originalState),
+    headers: serviceHeaders,
+    method: 'PUT',
+  });
+  assert.equal(seed.status, 200);
+
+  const read = await fetch(`${stateService.baseUrl}/state`, {
+    headers: { Authorization: `Bearer ${serviceToken}` },
+  });
+  assert.equal(read.status, 200);
+  const etag = read.headers.get('etag');
+  assert.ok(etag, 'state service GET should return an ETag');
+
+  const staleWrite = await fetch(`${stateService.baseUrl}/state`, {
+    body: JSON.stringify({
+      ...originalState,
+      auditEvents: [...originalState.auditEvents, { action: 'stale', actor: 'usr_admin' }],
+    }),
+    headers: {
+      ...serviceHeaders,
+      'If-Match': '"stale-revision"',
+    },
+    method: 'PUT',
+  });
+  assert.equal(staleWrite.status, 409);
+  const stalePayload = await staleWrite.json();
+  assert.equal(stalePayload.code, 'STATE_REVISION_CONFLICT');
+
+  const afterStaleRead = await fetch(`${stateService.baseUrl}/state`, {
+    headers: { Authorization: `Bearer ${serviceToken}` },
+  });
+  assert.equal(afterStaleRead.status, 200);
+  const afterStaleState = await afterStaleRead.json();
+  assert.equal(afterStaleState.auditEvents.length, 1);
+  assert.equal(afterStaleState.auditEvents[0].action, 'seed');
+  assert.ok(!afterStaleState.auditEvents.some((event) => event.action === 'stale'), 'stale PUT must not persist');
+
+  const missingIfMatch = await fetch(`${stateService.baseUrl}/state`, {
+    body: JSON.stringify({
+      ...originalState,
+      auditEvents: [...originalState.auditEvents, { action: 'blocked', actor: 'usr_admin' }],
+    }),
+    headers: serviceHeaders,
+    method: 'PUT',
+  });
+  assert.equal(missingIfMatch.status, 428);
+  const missingIfMatchPayload = await missingIfMatch.json();
+  assert.equal(missingIfMatchPayload.code, 'STATE_PRECONDITION_REQUIRED');
+
+  const freshWrite = await fetch(`${stateService.baseUrl}/state`, {
+    body: JSON.stringify({
+      ...originalState,
+      auditEvents: [...originalState.auditEvents, { action: 'fresh', actor: 'usr_admin' }],
+    }),
+    headers: {
+      ...serviceHeaders,
+      'If-Match': etag,
+    },
+    method: 'PUT',
+  });
+  assert.equal(freshWrite.status, 200);
 });
 
 test('Signal API can persist state through an external state service backend', async (t) => {
@@ -460,4 +559,87 @@ test('Signal API can persist state through an external state service backend', a
   assert.equal(after.status, 200);
   assert(after.payload.state.invites.some((item) => item.email === inviteEmail && item.status === 'pending'), 'restarted API should read state from the external state service');
   assert.equal(after.payload.summary.statePath, serviceUrl);
+});
+
+test('Signal API preserves concurrent mutations through external state service', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-state-service-concurrency-'));
+  const apiPort = await freePort();
+  const stateServicePort = await freePort();
+  const stateFile = path.join(tempDir, 'concurrent-state.json');
+  const backupDir = path.join(tempDir, 'backups');
+  const serviceToken = 'state_service_concurrency_token';
+  const sessionSecret = 'state_service_concurrency_session_secret';
+  const serviceUrl = `http://127.0.0.1:${stateServicePort}/state`;
+  const previousServiceToken = process.env.SIGNAL_STATE_SERVICE_TOKEN;
+  let api = null;
+  let stateService = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await stopProcess(stateService?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+    if (previousServiceToken === undefined) {
+      delete process.env.SIGNAL_STATE_SERVICE_TOKEN;
+    } else {
+      process.env.SIGNAL_STATE_SERVICE_TOKEN = previousServiceToken;
+    }
+  });
+
+  stateService = await startStateService({ backupDir, port: stateServicePort, stateFile, token: serviceToken });
+  process.env.SIGNAL_STATE_SERVICE_TOKEN = serviceToken;
+  await bootstrapState({ force: true, statePath: serviceUrl });
+  const tokenResult = await issueSessionToken('usr_admin', {
+    actorUserId: 'usr_admin',
+    env: { SIGNAL_SESSION_SECRET: sessionSecret },
+    statePath: serviceUrl,
+    ttlSeconds: 900,
+  });
+  const token = tokenResult.details.token;
+  api = await startApi({ apiPort, serviceToken, serviceUrl, sessionSecret });
+
+  const suffix = Date.now();
+  const [tenantA, tenantB] = await Promise.all([
+    requestApi(api.apiBaseUrl, '/api/mutations', {
+      body: {
+        action: 'tenants.create',
+        args: {
+          name: `Service Tenant A ${suffix}`,
+          domain: `svc-a-${suffix}.test`,
+          adminEmail: `svc-a-${suffix}@acme.example`,
+        },
+      },
+      method: 'POST',
+      token,
+    }),
+    requestApi(api.apiBaseUrl, '/api/mutations', {
+      body: {
+        action: 'tenants.create',
+        args: {
+          name: `Service Tenant B ${suffix}`,
+          domain: `svc-b-${suffix}.test`,
+          adminEmail: `svc-b-${suffix}@acme.example`,
+        },
+      },
+      method: 'POST',
+      token,
+    }),
+  ]);
+
+  assert.equal(tenantA.status, 200);
+  assert.equal(tenantB.status, 200);
+  assert.equal(tenantA.payload.ok, true);
+  assert.equal(tenantB.payload.ok, true);
+
+  const persistedState = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  const tenantARecord = persistedState.tenants.find((tenant) => tenant.domain === `svc-a-${suffix}.test`);
+  const tenantBRecord = persistedState.tenants.find((tenant) => tenant.domain === `svc-b-${suffix}.test`);
+  assert.ok(tenantARecord?.id, 'concurrent mutation A should persist through state service');
+  assert.ok(tenantBRecord?.id, 'concurrent mutation B should persist through state service');
+  assert.notEqual(tenantARecord.id, tenantBRecord.id, 'concurrent tenants should receive distinct ids');
+
+  const createAudits = persistedState.auditEvents.filter((event) =>
+    event.action === 'tenants.create'
+    && (event.targetId === tenantARecord.id || event.targetId === tenantBRecord.id));
+  assert.equal(createAudits.length, 2, 'both concurrent tenant creates should append audit events');
+  assert.equal(createAudits.every((event) => event.actor === 'usr_admin'), true);
 });

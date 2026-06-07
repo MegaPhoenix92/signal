@@ -174,3 +174,109 @@ test('Signal local API persists mutations across process restart', async (t) => 
   assert(after.payload.state.auditEvents.some((event) => event.action === 'users.invite' && event.actor === 'usr_admin'), 'restarted API should expose persisted mutation audit event');
   assert.equal(after.payload.summary.pendingInvites, after.payload.state.invites.filter((item) => item.status === 'pending').length);
 });
+
+async function startLocalActorApi({ port, statePath }) {
+  const apiBaseUrl = `http://127.0.0.1:${port}`;
+  let output = '';
+  const child = spawn(process.execPath, [path.join(rootDir, 'scripts', 'signal-api.mjs')], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      SIGNAL_ADMIN_STATE: statePath,
+      SIGNAL_ALLOW_LOCAL_ACTOR: 'true',
+      SIGNAL_API_HOST: '127.0.0.1',
+      SIGNAL_API_PORT: String(port),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => {
+    output += chunk.toString();
+  });
+  child.stderr.on('data', (chunk) => {
+    output += chunk.toString();
+  });
+
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (child.exitCode !== null) {
+      throw new Error(`Signal API exited before concurrent mutation test startup.\n${output}`);
+    }
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/health`, { signal: AbortSignal.timeout(500) });
+      if (response.ok) {
+        return { apiBaseUrl, child, output: () => output };
+      }
+    } catch {
+      // Keep polling until the API binds the requested port.
+    }
+    await sleep(100);
+  }
+  throw new Error(`Signal API did not start on ${apiBaseUrl}.\n${output}`);
+}
+
+test('Signal local API preserves concurrent mutations without lost updates', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-concurrency-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startLocalActorApi({ port, statePath });
+
+  const suffix = Date.now();
+  const [tenantA, tenantB] = await Promise.all([
+    fetch(`${api.apiBaseUrl}/api/mutations`, {
+      body: JSON.stringify({
+        action: 'tenants.create',
+        args: {
+          name: `Tenant A ${suffix}`,
+          domain: `a-${suffix}.test`,
+          adminEmail: `a-${suffix}@acme.example`,
+        },
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Signal-Actor': 'usr_admin',
+      },
+      method: 'POST',
+    }).then(async (response) => ({ payload: await parseJsonResponse(response), status: response.status })),
+    fetch(`${api.apiBaseUrl}/api/mutations`, {
+      body: JSON.stringify({
+        action: 'tenants.create',
+        args: {
+          name: `Tenant B ${suffix}`,
+          domain: `b-${suffix}.test`,
+          adminEmail: `b-${suffix}@acme.example`,
+        },
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Signal-Actor': 'usr_admin',
+      },
+      method: 'POST',
+    }).then(async (response) => ({ payload: await parseJsonResponse(response), status: response.status })),
+  ]);
+
+  assert.equal(tenantA.status, 200);
+  assert.equal(tenantB.status, 200);
+  assert.equal(tenantA.payload.ok, true);
+  assert.equal(tenantB.payload.ok, true);
+
+  const fileState = JSON.parse(await fs.readFile(statePath, 'utf8'));
+  const tenantARecord = fileState.tenants.find((tenant) => tenant.domain === `a-${suffix}.test`);
+  const tenantBRecord = fileState.tenants.find((tenant) => tenant.domain === `b-${suffix}.test`);
+  assert.ok(tenantARecord?.id, 'concurrent mutation A should persist with an id');
+  assert.ok(tenantBRecord?.id, 'concurrent mutation B should persist with an id');
+  assert.notEqual(tenantARecord.id, tenantBRecord.id, 'concurrent tenants should receive distinct ids');
+
+  const createAudits = fileState.auditEvents.filter((event) =>
+    event.action === 'tenants.create'
+    && (event.targetId === tenantARecord.id || event.targetId === tenantBRecord.id));
+  assert.equal(createAudits.length, 2, 'both concurrent tenant creates should append audit events');
+  assert.equal(new Set(createAudits.map((event) => event.actor)).size, 1);
+  assert.equal(createAudits[0].actor, 'usr_admin');
+});
