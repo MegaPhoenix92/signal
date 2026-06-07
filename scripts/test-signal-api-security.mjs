@@ -457,6 +457,33 @@ test('production OAuth callback route ignores spoofed X-Signal-Actor and uses SI
   assert.notEqual(oauthAudit.actor, 'usr_sales');
 });
 
+test('webhook route fails closed when SIGNAL_WEBHOOK_ACTOR is missing', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-webhook-actor-missing-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({ port, statePath });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/webhooks/gmail`, {
+    body: JSON.stringify({}),
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Signal-Actor': 'usr_sales',
+    },
+    method: 'POST',
+  });
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 500);
+  assert.equal(payload.code, 'WEBHOOK_ACTOR_REQUIRED');
+});
+
 test('OAuth callback route fails closed when SIGNAL_OAUTH_ACTOR is missing', async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-oauth-actor-missing-'));
   const statePath = path.join(tempDir, 'signal-state.json');

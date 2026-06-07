@@ -11334,7 +11334,7 @@ export async function setupMailboxWatch(mailboxId, options = {}) {
         watchId: watch.id,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -11393,7 +11393,7 @@ export async function renewMailboxWatch(watchId, options = {}) {
         watchId: watch.id,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -13303,7 +13303,7 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
         url: session.url,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -13381,7 +13381,7 @@ export async function createBillingPortalSession(tenantId, options = {}) {
         url: session.url,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 

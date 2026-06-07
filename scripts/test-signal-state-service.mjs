@@ -560,3 +560,86 @@ test('Signal API can persist state through an external state service backend', a
   assert(after.payload.state.invites.some((item) => item.email === inviteEmail && item.status === 'pending'), 'restarted API should read state from the external state service');
   assert.equal(after.payload.summary.statePath, serviceUrl);
 });
+
+test('Signal API preserves concurrent mutations through external state service', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-state-service-concurrency-'));
+  const apiPort = await freePort();
+  const stateServicePort = await freePort();
+  const stateFile = path.join(tempDir, 'concurrent-state.json');
+  const backupDir = path.join(tempDir, 'backups');
+  const serviceToken = 'state_service_concurrency_token';
+  const sessionSecret = 'state_service_concurrency_session_secret';
+  const serviceUrl = `http://127.0.0.1:${stateServicePort}/state`;
+  const previousServiceToken = process.env.SIGNAL_STATE_SERVICE_TOKEN;
+  let api = null;
+  let stateService = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await stopProcess(stateService?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+    if (previousServiceToken === undefined) {
+      delete process.env.SIGNAL_STATE_SERVICE_TOKEN;
+    } else {
+      process.env.SIGNAL_STATE_SERVICE_TOKEN = previousServiceToken;
+    }
+  });
+
+  stateService = await startStateService({ backupDir, port: stateServicePort, stateFile, token: serviceToken });
+  process.env.SIGNAL_STATE_SERVICE_TOKEN = serviceToken;
+  await bootstrapState({ force: true, statePath: serviceUrl });
+  const tokenResult = await issueSessionToken('usr_admin', {
+    actorUserId: 'usr_admin',
+    env: { SIGNAL_SESSION_SECRET: sessionSecret },
+    statePath: serviceUrl,
+    ttlSeconds: 900,
+  });
+  const token = tokenResult.details.token;
+  api = await startApi({ apiPort, serviceToken, serviceUrl, sessionSecret });
+
+  const suffix = Date.now();
+  const [tenantA, tenantB] = await Promise.all([
+    requestApi(api.apiBaseUrl, '/api/mutations', {
+      body: {
+        action: 'tenants.create',
+        args: {
+          name: `Service Tenant A ${suffix}`,
+          domain: `svc-a-${suffix}.test`,
+          adminEmail: `svc-a-${suffix}@acme.example`,
+        },
+      },
+      method: 'POST',
+      token,
+    }),
+    requestApi(api.apiBaseUrl, '/api/mutations', {
+      body: {
+        action: 'tenants.create',
+        args: {
+          name: `Service Tenant B ${suffix}`,
+          domain: `svc-b-${suffix}.test`,
+          adminEmail: `svc-b-${suffix}@acme.example`,
+        },
+      },
+      method: 'POST',
+      token,
+    }),
+  ]);
+
+  assert.equal(tenantA.status, 200);
+  assert.equal(tenantB.status, 200);
+  assert.equal(tenantA.payload.ok, true);
+  assert.equal(tenantB.payload.ok, true);
+
+  const persistedState = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  const tenantARecord = persistedState.tenants.find((tenant) => tenant.domain === `svc-a-${suffix}.test`);
+  const tenantBRecord = persistedState.tenants.find((tenant) => tenant.domain === `svc-b-${suffix}.test`);
+  assert.ok(tenantARecord?.id, 'concurrent mutation A should persist through state service');
+  assert.ok(tenantBRecord?.id, 'concurrent mutation B should persist through state service');
+  assert.notEqual(tenantARecord.id, tenantBRecord.id, 'concurrent tenants should receive distinct ids');
+
+  const createAudits = persistedState.auditEvents.filter((event) =>
+    event.action === 'tenants.create'
+    && (event.targetId === tenantARecord.id || event.targetId === tenantBRecord.id));
+  assert.equal(createAudits.length, 2, 'both concurrent tenant creates should append audit events');
+  assert.equal(createAudits.every((event) => event.actor === 'usr_admin'), true);
+});
