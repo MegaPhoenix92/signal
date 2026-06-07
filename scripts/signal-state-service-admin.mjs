@@ -69,7 +69,10 @@ async function requestState(url, env = process.env) {
     error.code = payload.code ?? 'STATE_SERVICE_READ_FAILED';
     throw error;
   }
-  return text;
+  return {
+    body: text,
+    etag: response.headers.get('etag'),
+  };
 }
 
 function parseStateArtifact(raw, source = 'state artifact') {
@@ -146,11 +149,11 @@ async function commandHealth() {
 async function commandBackup() {
   const { healthUrl, stateUrl } = stateServiceUrls();
   const outputPath = path.resolve(process.cwd(), positionals[1] ?? flagValue('--output') ?? defaultBackupPath());
-  const [health, raw] = await Promise.all([
+  const [health, current] = await Promise.all([
     requestJson(healthUrl),
     requestState(stateUrl),
   ]);
-  const artifact = parseStateArtifact(raw, 'state service response');
+  const artifact = parseStateArtifact(current.body, 'state service response');
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, artifact.raw, { mode: 0o600 });
   emit({
@@ -205,10 +208,20 @@ async function commandRestore() {
     });
     return;
   }
+  let ifMatch = null;
+  try {
+    const current = await requestState(stateUrl);
+    ifMatch = current.etag;
+  } catch (error) {
+    if (error.status !== 404) {
+      throw error;
+    }
+  }
   const restored = await requestJson(stateUrl, {
     body: artifact.raw,
     headers: {
       'Content-Type': 'application/json',
+      ...(ifMatch ? { 'If-Match': ifMatch } : {}),
       ...authHeaders(),
     },
     method: 'PUT',

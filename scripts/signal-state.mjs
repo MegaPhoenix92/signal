@@ -126,6 +126,31 @@ function withStateMutationLock(statePath, fn) {
   });
 }
 
+// Multi-process deployments still perform read-modify-write at the API layer.
+// Long-term follow-up (issue #5): push transactional RMW into the state-service backend.
+async function runLockedStateWriter(resolvedStatePath, writer, { retryOnConflict = true } = {}) {
+  return withStateMutationLock(resolvedStatePath, async () => {
+    const maxAttempts = isHttpResource(resolvedStatePath) && retryOnConflict ? 5 : 1;
+    let lastError = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        return await writer();
+      } catch (error) {
+        if (error instanceof SignalStateError && error.code === 'STATE_REVISION_CONFLICT' && attempt < maxAttempts - 1) {
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw lastError ?? new SignalStateError('State mutation failed after retrying concurrent writes.', {
+      code: 'STATE_REVISION_CONFLICT',
+      status: 409,
+      details: { statePath: resolvedStatePath },
+    });
+  });
+}
+
 function stateServiceError(message, { code = 'STATE_SERVICE_ERROR', status = 502, details = {} } = {}) {
   return new SignalStateError(message, { code, status, details });
 }
@@ -171,6 +196,13 @@ export async function writeJson(filePath, value, { ifMatch } = {}) {
         details: { serviceUrl: filePath, statusCode: 409 },
       });
     }
+    if (response.status === 428) {
+      throw stateServiceError('State service requires If-Match for updates.', {
+        code: 'STATE_PRECONDITION_REQUIRED',
+        status: 428,
+        details: { serviceUrl: filePath, statusCode: 428 },
+      });
+    }
     if (!response.ok) {
       throw stateServiceError(`State service write failed with ${response.status}.`, {
         code: 'STATE_SERVICE_WRITE_FAILED',
@@ -187,8 +219,13 @@ export async function writeJson(filePath, value, { ifMatch } = {}) {
   }
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
-  await fs.rename(tempPath, filePath);
+  try {
+    await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
+    await fs.rename(tempPath, filePath);
+  } catch (error) {
+    await fs.unlink(tempPath).catch(() => {});
+    throw error;
+  }
 }
 
 export async function exists(filePath) {
@@ -218,29 +255,36 @@ export async function exists(filePath) {
 
 export async function bootstrapState({ force = false, statePath } = {}) {
   const resolvedStatePath = resolveStatePath(statePath);
-  if ((await exists(resolvedStatePath)) && !force) {
-    throw new SignalStateError(`Local state already exists at ${resolvedStatePath}. Use force to overwrite.`, {
-      code: 'STATE_EXISTS',
-      status: 409,
-      details: { statePath: resolvedStatePath },
-    });
-  }
+  return withStateMutationLock(resolvedStatePath, async () => {
+    if ((await exists(resolvedStatePath)) && !force) {
+      throw new SignalStateError(`Local state already exists at ${resolvedStatePath}. Use force to overwrite.`, {
+        code: 'STATE_EXISTS',
+        status: 409,
+        details: { statePath: resolvedStatePath },
+      });
+    }
 
-  const seed = await readJson(seedPath);
-  const stamped = normalizeState({
-    ...seed,
-    meta: {
-      ...seed.meta,
-      bootstrappedAt: new Date().toISOString(),
+    const seed = await readJson(seedPath);
+    const stamped = normalizeState({
+      ...seed,
+      meta: {
+        ...seed.meta,
+        bootstrappedAt: new Date().toISOString(),
+        statePath: resolvedStatePath,
+      },
+    });
+    let ifMatch;
+    if (force && isHttpResource(resolvedStatePath) && (await exists(resolvedStatePath))) {
+      await readJson(resolvedStatePath);
+      ifMatch = stateRevisionByPath.get(resolvedStatePath);
+    }
+    await writeJson(resolvedStatePath, stamped, { ifMatch });
+    return {
+      state: stamped,
       statePath: resolvedStatePath,
-    },
+      summary: summarizeState(stamped, resolvedStatePath),
+    };
   });
-  await writeJson(resolvedStatePath, stamped);
-  return {
-    state: stamped,
-    statePath: resolvedStatePath,
-    summary: summarizeState(stamped, resolvedStatePath),
-  };
 }
 
 export async function ensureState({ statePath } = {}) {
@@ -291,35 +335,35 @@ export async function saveState(state, { ifMatch, statePath } = {}) {
 
 export async function switchSession(userId, { actorUserId, statePath } = {}) {
   const resolvedStatePath = resolveStatePath(statePath);
-  return withStateMutationLock(resolvedStatePath, async () => {
-  const state = await loadState({ statePath });
-  const previousActor = getActor(state, actorUserId ?? state.session?.activeUserId, { allowMissing: true });
-  const nextActor = getActor(state, requireArg(userId, 'user id', 'session switch <userId>'));
-  const previousUserId = state.session?.activeUserId ?? null;
-  state.session = {
-    activeUserId: nextActor.id,
-    allowedRoles: ['admin', 'member'],
-    localOnly: true,
-    ...(state.session ?? {}),
-  };
-  state.session.activeUserId = nextActor.id;
+  return runLockedStateWriter(resolvedStatePath, async () => {
+    const state = await loadState({ statePath });
+    const previousActor = getActor(state, actorUserId ?? state.session?.activeUserId, { allowMissing: true });
+    const nextActor = getActor(state, requireArg(userId, 'user id', 'session switch <userId>'));
+    const previousUserId = state.session?.activeUserId ?? null;
+    state.session = {
+      activeUserId: nextActor.id,
+      allowedRoles: ['admin', 'member'],
+      localOnly: true,
+      ...(state.session ?? {}),
+    };
+    state.session.activeUserId = nextActor.id;
 
-  const details = {
-    message: `Local session switched to ${nextActor.email}`,
-    nextUserId: nextActor.id,
-    previousUserId,
-    targetId: nextActor.id,
-  };
-  appendAudit(state, 'session.switch', nextActor.id, details.message, previousActor ?? nextActor);
-  const saved = await saveState(state, { statePath });
-  return {
-    ok: true,
-    action: 'session.switch',
-    actor: nextActor,
-    details,
-    state: saved.state,
-    summary: saved.summary,
-  };
+    const details = {
+      message: `Local session switched to ${nextActor.email}`,
+      nextUserId: nextActor.id,
+      previousUserId,
+      targetId: nextActor.id,
+    };
+    appendAudit(state, 'session.switch', nextActor.id, details.message, previousActor ?? nextActor);
+    const saved = await saveState(state, { statePath });
+    return {
+      ok: true,
+      action: 'session.switch',
+      actor: nextActor,
+      details,
+      state: saved.state,
+      summary: saved.summary,
+    };
   });
 }
 
@@ -9164,7 +9208,14 @@ function signalForSourceMessage(state, flow, message, mailbox, matches) {
   };
 }
 
-export function getActor(state, actorUserId, { allowMissing = false } = {}) {
+export function getActor(state, actorUserId, { allowMissing = false, requireExplicit = false } = {}) {
+  if (requireExplicit && !actorUserId) {
+    throw new SignalStateError('Actor identity is required.', {
+      code: 'ACTOR_REQUIRED',
+      status: 401,
+      details: {},
+    });
+  }
   const fallbackUserId = actorUserId ?? state.session?.activeUserId ?? process.env.SIGNAL_ADMIN_ACTOR ?? 'usr_admin';
   const user = state.users?.find((candidate) => candidate.id === fallbackUserId && candidate.status === 'active');
   const membership = user ? activeMembershipForUser(state, user.id, user.tenantId) : null;
@@ -9610,40 +9661,28 @@ function appendAudit(state, action, targetId, message, actor) {
   });
 }
 
-async function mutateState(action, mutator, { actorUserId, statePath } = {}) {
+async function mutateState(action, mutator, {
+  actorUserId,
+  requireExplicitActor = false,
+  retryOnConflict = true,
+  statePath,
+} = {}) {
   const resolvedStatePath = resolveStatePath(statePath);
-  return withStateMutationLock(resolvedStatePath, async () => {
-    const maxAttempts = isHttpResource(resolvedStatePath) ? 5 : 1;
-    let lastError = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      try {
-        const state = await loadState({ statePath });
-        const actor = getActor(state, actorUserId);
-        const details = await mutator(state, actor);
-        appendAudit(state, action, details.targetId ?? details.id ?? action, details.message, actor);
-        const saved = await saveState(state, { statePath });
-        return {
-          ok: true,
-          action,
-          actor,
-          details,
-          state: saved.state,
-          summary: saved.summary,
-        };
-      } catch (error) {
-        if (error instanceof SignalStateError && error.code === 'STATE_REVISION_CONFLICT' && attempt < maxAttempts - 1) {
-          lastError = error;
-          continue;
-        }
-        throw error;
-      }
-    }
-    throw lastError ?? new SignalStateError('State mutation failed after retrying concurrent writes.', {
-      code: 'STATE_REVISION_CONFLICT',
-      status: 409,
-      details: { action, statePath: resolvedStatePath },
-    });
-  });
+  return runLockedStateWriter(resolvedStatePath, async () => {
+    const state = await loadState({ statePath });
+    const actor = getActor(state, actorUserId, { requireExplicit: requireExplicitActor });
+    const details = await mutator(state, actor);
+    appendAudit(state, action, details.targetId ?? details.id ?? action, details.message, actor);
+    const saved = await saveState(state, { statePath });
+    return {
+      ok: true,
+      action,
+      actor,
+      details,
+      state: saved.state,
+      summary: saved.summary,
+    };
+  }, { retryOnConflict });
 }
 
 function createTenantWorkspaceInState(state, {
@@ -9818,7 +9857,7 @@ export async function createTenantWorkspace({ name, domain, adminEmail, adminNam
 
 export async function registerTenantWorkspace({ name, domain, adminEmail, adminName, planId = 'plan_beta' } = {}, { statePath } = {}) {
   const resolvedStatePath = resolveStatePath(statePath);
-  return withStateMutationLock(resolvedStatePath, async () => {
+  return runLockedStateWriter(resolvedStatePath, async () => {
     const state = await loadState({ statePath });
     const details = createTenantWorkspaceInState(state, { name, domain, adminEmail, adminName, planId }, {
       action: 'tenants.register',
@@ -10198,7 +10237,7 @@ export async function claimUserInvite({ claimCode, email, name, team } = {}, { s
   const code = requireArg(claimCode, 'claim code', usage).trim();
   const claimEmail = normalizeEmail(email, usage);
   const resolvedStatePath = resolveStatePath(statePath);
-  return withStateMutationLock(resolvedStatePath, async () => {
+  return runLockedStateWriter(resolvedStatePath, async () => {
   const state = await loadState({ statePath });
   const invite = (state.invites ?? []).find((candidate) =>
     candidate.claimCode === code &&
@@ -10611,7 +10650,7 @@ export async function completeMailboxConnectionFromOAuthCallback(provider, { cod
         message: `Verified ${sourceProvider} OAuth callback for ${details.mailboxId}`,
       };
     },
-    options,
+    { ...options, requireExplicitActor: true, retryOnConflict: false },
   );
 }
 
@@ -10702,7 +10741,7 @@ export async function syncMailbox(mailboxId, options = {}) {
         targetId: mailbox.id,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -10758,7 +10797,7 @@ export async function replayMailbox(mailboxId, options = {}) {
         targetId: mailbox.id,
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 
@@ -11435,7 +11474,7 @@ export async function handleProviderWatchNotification(provider, payload = {}, op
         watchId: targetWatch.id,
       };
     },
-    options,
+    { ...options, requireExplicitActor: true },
   );
 }
 
@@ -13621,7 +13660,7 @@ export async function handlePaymentWebhook(eventType, {
         tenantId: tenant.id,
       };
     },
-    options,
+    { ...options, requireExplicitActor: true },
   );
 }
 
@@ -13777,7 +13816,7 @@ export async function handleEmailDeliveryWebhook(payload, options = {}) {
       }
       return reconcileEmailWebhookEventsInState(state, event);
     },
-    options,
+    { ...options, requireExplicitActor: true },
   );
 }
 
@@ -13808,7 +13847,7 @@ export async function handleSignedEmailDeliveryWebhook(rawBody, signatureHeader,
       requireAdmin(actor, 'notifications.delivery-webhook');
       return reconcileEmailWebhookEventsInState(state, event);
     },
-    { actorUserId, statePath },
+    { actorUserId, requireExplicitActor: true, statePath },
   );
 }
 
@@ -13839,7 +13878,7 @@ export async function handleSignedSendGridEmailDeliveryWebhook(rawBody, signatur
       requireAdmin(actor, 'notifications.delivery-webhook');
       return reconcileEmailWebhookEventsInState(state, event);
     },
-    { actorUserId, statePath },
+    { actorUserId, requireExplicitActor: true, statePath },
   );
 }
 
@@ -14299,7 +14338,7 @@ export async function runJobs({ jobId, queue, limit } = {}, options = {}) {
         targetId: jobId ?? queue ?? 'queued_jobs',
       };
     },
-    options,
+    { ...options, retryOnConflict: false },
   );
 }
 

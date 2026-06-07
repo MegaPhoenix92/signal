@@ -79,14 +79,48 @@ function productionAuthProvider(env = process.env) {
   return env.SIGNAL_AUTH_PROVIDER === 'jwks' ? 'jwks' : null;
 }
 
+function isHttpStatePath(statePath) {
+  return /^https?:\/\//i.test(String(statePath ?? '').trim());
+}
+
+function stateTargetForEnv(env = process.env) {
+  return env.SIGNAL_ADMIN_STATE
+    ?? (env.SIGNAL_BACKEND_MODE === 'external-service' ? env.SIGNAL_STATE_SERVICE_URL : null);
+}
+
 export function assertApiSecurityConfig(env = process.env) {
   const host = env.SIGNAL_API_HOST ?? '127.0.0.1';
   const authEnforced = signedSessionRequired(env) || productionAuthProvider(env) === 'jwks';
+  const loopback = isLoopbackApiHost(host);
 
-  if (!isLoopbackApiHost(host) && !authEnforced) {
+  if (!loopback && !authEnforced) {
     throw new Error(
       'SIGNAL_API_HOST is not loopback but signed-session/JWKS auth is not enabled. '
       + 'Set SIGNAL_REQUIRE_SIGNED_SESSION=true with SIGNAL_SESSION_SECRET, or SIGNAL_AUTH_PROVIDER=jwks with SIGNAL_AUTH_JWKS_URL.',
+    );
+  }
+
+  if (!loopback && localActorAllowed(env)) {
+    throw new Error('SIGNAL_ALLOW_LOCAL_ACTOR=true is not allowed on non-loopback hosts.');
+  }
+
+  if (!loopback && !env.SIGNAL_WEBHOOK_ACTOR) {
+    throw new Error('Non-loopback hosts require SIGNAL_WEBHOOK_ACTOR for webhook mutations.');
+  }
+
+  if (!loopback && !env.SIGNAL_OAUTH_ACTOR) {
+    throw new Error('Non-loopback hosts require SIGNAL_OAUTH_ACTOR for OAuth callback mutations.');
+  }
+
+  if (!loopback && signedSessionRequired(env) && !sessionCookieSecure(env)) {
+    throw new Error(
+      'Non-loopback signed-session mode requires SIGNAL_COOKIE_SECURE=true or an HTTPS SIGNAL_APP_BASE_URL.',
+    );
+  }
+
+  if (!loopback && !isHttpStatePath(stateTargetForEnv(env))) {
+    throw new Error(
+      'Non-loopback hosts must use an HTTP state-service URL (SIGNAL_STATE_SERVICE_URL), not local file-backed state.',
     );
   }
 
@@ -387,24 +421,48 @@ export function sessionCookieSecure(env = process.env) {
   return /^https:\/\//i.test(env.SIGNAL_APP_BASE_URL ?? '');
 }
 
-export async function resolveWebhookActor(req, { env = process.env } = {}) {
-  if (requestSessionToken(req)) {
-    return (await requestAuth(req, {}, { env })).actorUserId;
-  }
+export function resolveWebhookActor(req, { env = process.env } = {}) {
   if (localActorAllowed(env)) {
     return headerValue(req, 'x-signal-actor') ?? env.SIGNAL_WEBHOOK_ACTOR ?? null;
   }
   return env.SIGNAL_WEBHOOK_ACTOR ?? null;
 }
 
-export async function resolveOAuthActor(req, { env = process.env } = {}) {
+export async function resolveOAuthActor(req, { env = process.env, authenticateSession } = {}) {
   if (requestSessionToken(req)) {
-    return (await requestAuth(req, {}, { env })).actorUserId;
+    if (!authenticateSession) {
+      throw new SignalStateError('OAuth callback session validation is not configured.', {
+        code: 'OAUTH_SESSION_AUTH_UNAVAILABLE',
+        status: 500,
+      });
+    }
+    const auth = await authenticateSession(req);
+    return auth.actorUserId;
   }
   if (localActorAllowed(env)) {
     return headerValue(req, 'x-signal-actor') ?? env.SIGNAL_OAUTH_ACTOR ?? null;
   }
   return env.SIGNAL_OAUTH_ACTOR ?? null;
+}
+
+export function requireWebhookActor(actorUserId) {
+  if (!actorUserId) {
+    throw new SignalStateError('SIGNAL_WEBHOOK_ACTOR is required for webhook mutations.', {
+      code: 'WEBHOOK_ACTOR_REQUIRED',
+      status: 500,
+    });
+  }
+  return actorUserId;
+}
+
+export function requireOAuthActor(actorUserId) {
+  if (!actorUserId) {
+    throw new SignalStateError('SIGNAL_OAUTH_ACTOR is required for OAuth callback mutations.', {
+      code: 'OAUTH_ACTOR_REQUIRED',
+      status: 500,
+    });
+  }
+  return actorUserId;
 }
 
 export function sessionCookieHeader(token, { expiresAt, issuedAt, env = process.env } = {}) {

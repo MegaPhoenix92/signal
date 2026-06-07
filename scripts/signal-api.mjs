@@ -57,6 +57,8 @@ import {
   requestSessionToken,
   requireAdminRequestAuth,
   requireRegisteredSessionRequestAuth,
+  requireOAuthActor,
+  requireWebhookActor,
   resolveOAuthActor,
   resolveWebhookActor,
   sessionCookieHeader,
@@ -1076,13 +1078,15 @@ async function route(req, res) {
 
   const oauthCallbackMatch = url.pathname.match(/^\/api\/oauth\/(gmail|outlook)\/callback$/);
   if (req.method === 'GET' && oauthCallbackMatch) {
-    const oauthActorUserId = await resolveOAuthActor(req);
+    const oauthActorUserId = requireOAuthActor(await resolveOAuthActor(req, {
+      authenticateSession: requestStateAuth,
+    }));
     const result = await completeMailboxConnectionFromOAuthCallback(oauthCallbackMatch[1], {
       code: url.searchParams.get('code'),
       error: url.searchParams.get('error'),
       errorDescription: url.searchParams.get('error_description'),
       state: url.searchParams.get('state'),
-    }, { actorUserId: oauthActorUserId ?? process.env.SIGNAL_OAUTH_ACTOR, statePath });
+    }, { actorUserId: oauthActorUserId, statePath });
     sendJson(res, 200, {
       ok: true,
       action: result.action,
@@ -1171,9 +1175,9 @@ async function route(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/webhooks/stripe') {
     const rawBody = await readRawBody(req);
     const signatureHeader = req.headers['stripe-signature']?.toString();
-    const webhookActorUserId = await resolveWebhookActor(req);
+    const webhookActorUserId = requireWebhookActor(resolveWebhookActor(req));
     const result = await handleSignedStripePaymentWebhook(rawBody, signatureHeader, {
-      actorUserId: webhookActorUserId ?? process.env.SIGNAL_WEBHOOK_ACTOR,
+      actorUserId: webhookActorUserId,
       statePath,
     });
     sendJson(res, 200, {
@@ -1191,14 +1195,14 @@ async function route(req, res) {
     const signatureHeader = req.headers['signal-email-signature']?.toString();
     const sendGridSignatureHeader = req.headers['x-twilio-email-event-webhook-signature']?.toString();
     const sendGridTimestampHeader = req.headers['x-twilio-email-event-webhook-timestamp']?.toString();
-    const webhookActorUserId = await resolveWebhookActor(req);
+    const webhookActorUserId = requireWebhookActor(resolveWebhookActor(req));
     const result = sendGridSignatureHeader && sendGridTimestampHeader
       ? await handleSignedSendGridEmailDeliveryWebhook(rawBody, sendGridSignatureHeader, sendGridTimestampHeader, {
-          actorUserId: webhookActorUserId ?? process.env.SIGNAL_WEBHOOK_ACTOR,
+          actorUserId: webhookActorUserId,
           statePath,
         })
       : await handleSignedEmailDeliveryWebhook(rawBody, signatureHeader, {
-          actorUserId: webhookActorUserId ?? process.env.SIGNAL_WEBHOOK_ACTOR,
+          actorUserId: webhookActorUserId,
           statePath,
         });
     sendJson(res, 200, {
@@ -1213,9 +1217,9 @@ async function route(req, res) {
 
   if (req.method === 'POST' && url.pathname === '/api/webhooks/gmail') {
     const body = await readBody(req);
-    const webhookActorUserId = await resolveWebhookActor(req);
+    const webhookActorUserId = requireWebhookActor(resolveWebhookActor(req));
     const result = await handleProviderWatchNotification('gmail', body, {
-      actorUserId: webhookActorUserId ?? process.env.SIGNAL_WEBHOOK_ACTOR,
+      actorUserId: webhookActorUserId,
       statePath,
     });
     sendJson(res, 200, {
@@ -1235,9 +1239,9 @@ async function route(req, res) {
       return;
     }
     const body = await readBody(req);
-    const webhookActorUserId = await resolveWebhookActor(req);
+    const webhookActorUserId = requireWebhookActor(resolveWebhookActor(req));
     const result = await handleProviderWatchNotification('outlook', body, {
-      actorUserId: webhookActorUserId ?? process.env.SIGNAL_WEBHOOK_ACTOR,
+      actorUserId: webhookActorUserId,
       statePath,
     });
     sendJson(res, 200, {

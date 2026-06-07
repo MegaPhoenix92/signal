@@ -262,7 +262,9 @@ test('Signal state service postgres backend migrates, versions, and backs up sta
     apiSessions: [{ digest: 'session_digest_only' }],
     auditEvents: [{ action: 'users.invite', actor: 'usr_admin' }],
     meta: { tenantId: 'tenant_demo' },
-  }));
+  }), {
+    ifMatch: `"${firstMeta.revision}"`,
+  });
   assert.equal(secondMeta.revision, 2);
   assert.equal(secondMeta.backups, 1);
   assert.equal(pool.backups.length, 1);
@@ -355,11 +357,19 @@ test('Signal state-service admin CLI backs up, verifies, and restores through be
   assert.equal(verified.ok, true);
   assert.equal(verified.backup.digest, backup.backup.digest);
 
+  const beforeChange = await fetch(`${stateService.baseUrl}/state`, {
+    headers: { Authorization: `Bearer ${serviceToken}` },
+  });
+  assert.equal(beforeChange.status, 200);
+  const changeEtag = beforeChange.headers.get('etag');
+  assert.ok(changeEtag, 'state service GET should return an ETag before update');
+
   const changed = await fetch(`${stateService.baseUrl}/state`, {
     body: JSON.stringify(changedState),
     headers: {
       Authorization: `Bearer ${serviceToken}`,
       'Content-Type': 'application/json',
+      'If-Match': changeEtag,
     },
     method: 'PUT',
   });
@@ -437,6 +447,27 @@ test('Signal state service enforces optimistic concurrency with ETag and If-Matc
   assert.equal(staleWrite.status, 409);
   const stalePayload = await staleWrite.json();
   assert.equal(stalePayload.code, 'STATE_REVISION_CONFLICT');
+
+  const afterStaleRead = await fetch(`${stateService.baseUrl}/state`, {
+    headers: { Authorization: `Bearer ${serviceToken}` },
+  });
+  assert.equal(afterStaleRead.status, 200);
+  const afterStaleState = await afterStaleRead.json();
+  assert.equal(afterStaleState.auditEvents.length, 1);
+  assert.equal(afterStaleState.auditEvents[0].action, 'seed');
+  assert.ok(!afterStaleState.auditEvents.some((event) => event.action === 'stale'), 'stale PUT must not persist');
+
+  const missingIfMatch = await fetch(`${stateService.baseUrl}/state`, {
+    body: JSON.stringify({
+      ...originalState,
+      auditEvents: [...originalState.auditEvents, { action: 'blocked', actor: 'usr_admin' }],
+    }),
+    headers: serviceHeaders,
+    method: 'PUT',
+  });
+  assert.equal(missingIfMatch.status, 428);
+  const missingIfMatchPayload = await missingIfMatch.json();
+  assert.equal(missingIfMatchPayload.code, 'STATE_PRECONDITION_REQUIRED');
 
   const freshWrite = await fetch(`${stateService.baseUrl}/state`, {
     body: JSON.stringify({

@@ -267,6 +267,16 @@ test('Signal local API preserves concurrent mutations without lost updates', asy
   assert.equal(tenantB.payload.ok, true);
 
   const fileState = JSON.parse(await fs.readFile(statePath, 'utf8'));
-  assert(fileState.tenants.some((tenant) => tenant.domain === `a-${suffix}.test`), 'concurrent mutation A should persist');
-  assert(fileState.tenants.some((tenant) => tenant.domain === `b-${suffix}.test`), 'concurrent mutation B should persist');
+  const tenantARecord = fileState.tenants.find((tenant) => tenant.domain === `a-${suffix}.test`);
+  const tenantBRecord = fileState.tenants.find((tenant) => tenant.domain === `b-${suffix}.test`);
+  assert.ok(tenantARecord?.id, 'concurrent mutation A should persist with an id');
+  assert.ok(tenantBRecord?.id, 'concurrent mutation B should persist with an id');
+  assert.notEqual(tenantARecord.id, tenantBRecord.id, 'concurrent tenants should receive distinct ids');
+
+  const createAudits = fileState.auditEvents.filter((event) =>
+    event.action === 'tenants.create'
+    && (event.targetId === tenantARecord.id || event.targetId === tenantBRecord.id));
+  assert.equal(createAudits.length, 2, 'both concurrent tenant creates should append audit events');
+  assert.equal(new Set(createAudits.map((event) => event.actor)).size, 1);
+  assert.equal(createAudits[0].actor, 'usr_admin');
 });

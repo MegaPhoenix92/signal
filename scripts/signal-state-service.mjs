@@ -178,9 +178,28 @@ function timestamp(value) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
+function assertIfMatchForWrite(currentMeta, ifMatch) {
+  if (!currentMeta.exists) {
+    return;
+  }
+  if (!ifMatch) {
+    throw new StateServiceError('If-Match is required when state exists.', {
+      code: 'STATE_PRECONDITION_REQUIRED',
+      status: 428,
+    });
+  }
+  if (!etagMatches(currentMeta, ifMatch)) {
+    throw new StateServiceError('State revision conflict — concurrent write detected.', {
+      code: 'STATE_REVISION_CONFLICT',
+      status: 409,
+    });
+  }
+}
+
 export class FileStateStore {
   constructor(config) {
     this.config = config;
+    this.writeChain = Promise.resolve();
   }
 
   async init() {}
@@ -220,18 +239,30 @@ export class FileStateStore {
     return fs.readFile(this.config.stateFile, 'utf8');
   }
 
-  async write(rawBody) {
-    const next = parseStatePayload(rawBody);
-    await fs.mkdir(path.dirname(this.config.stateFile), { recursive: true });
-    await fs.mkdir(this.config.backupDir, { recursive: true });
-    if (await exists(this.config.stateFile)) {
-      const backupStamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await fs.copyFile(this.config.stateFile, path.join(this.config.backupDir, `state-${backupStamp}.json`));
-    }
-    const tempPath = `${this.config.stateFile}.${process.pid}.${Date.now()}.tmp`;
-    await fs.writeFile(tempPath, next.body);
-    await fs.rename(tempPath, this.config.stateFile);
-    return this.meta();
+  async write(rawBody, { ifMatch } = {}) {
+    const run = async () => {
+      const next = parseStatePayload(rawBody);
+      const currentMeta = await this.meta();
+      assertIfMatchForWrite(currentMeta, ifMatch);
+      await fs.mkdir(path.dirname(this.config.stateFile), { recursive: true });
+      await fs.mkdir(this.config.backupDir, { recursive: true });
+      if (currentMeta.exists) {
+        const backupStamp = new Date().toISOString().replace(/[:.]/g, '-');
+        await fs.copyFile(this.config.stateFile, path.join(this.config.backupDir, `state-${backupStamp}.json`));
+      }
+      const tempPath = `${this.config.stateFile}.${process.pid}.${Date.now()}.tmp`;
+      try {
+        await fs.writeFile(tempPath, next.body);
+        await fs.rename(tempPath, this.config.stateFile);
+      } catch (error) {
+        await fs.unlink(tempPath).catch(() => {});
+        throw error;
+      }
+      return this.meta();
+    };
+    const next = this.writeChain.catch(() => {}).then(run);
+    this.writeChain = next;
+    return next;
   }
 
   async close() {}
@@ -326,7 +357,7 @@ export class PostgresStateStore {
     return `${serializePgBody(result.rows[0].body)}\n`;
   }
 
-  async write(rawBody) {
+  async write(rawBody, { ifMatch } = {}) {
     const next = parseStatePayload(rawBody);
     const client = await this.pool.connect();
     try {
@@ -338,6 +369,14 @@ export class PostgresStateStore {
          FOR UPDATE`,
         [this.config.stateId],
       );
+      const currentMeta = previous.rows.length
+        ? {
+            exists: true,
+            revision: Number(previous.rows[0].revision),
+            digest: previous.rows[0].body_digest,
+          }
+        : { exists: false };
+      assertIfMatchForWrite(currentMeta, ifMatch);
       const revision = previous.rows.length ? Number(previous.rows[0].revision) + 1 : 1;
       if (previous.rows.length) {
         await client.query(
@@ -462,20 +501,25 @@ async function route(req, res, config, store) {
   }
 
   if (req.method === 'PUT') {
-    const currentMeta = await store.meta();
-    const ifMatch = req.headers['if-match'];
-    if (currentMeta.exists && ifMatch && !etagMatches(currentMeta, ifMatch)) {
-      json(res, 409, {
-        ok: false,
-        code: 'STATE_REVISION_CONFLICT',
-        error: 'State revision conflict — concurrent write detected.',
-        state: currentMeta,
+    try {
+      const meta = await store.write(await readRawBody(req), {
+        ifMatch: req.headers['if-match'],
       });
-      return;
+      const etag = formatStateEtag(meta);
+      json(res, 200, { ok: true, state: meta }, etag ? { ETag: etag } : {});
+    } catch (error) {
+      if (error instanceof StateServiceError) {
+        const currentMeta = error.status === 409 ? await store.meta().catch(() => null) : null;
+        json(res, error.status, {
+          ok: false,
+          code: error.code,
+          error: error.message,
+          ...(currentMeta ? { state: currentMeta } : {}),
+        });
+        return;
+      }
+      throw error;
     }
-    const meta = await store.write(await readRawBody(req));
-    const etag = formatStateEtag(meta);
-    json(res, 200, { ok: true, state: meta }, etag ? { ETag: etag } : {});
     return;
   }
 
