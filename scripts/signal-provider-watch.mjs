@@ -22,6 +22,10 @@ function digest(value, length = 24) {
   return crypto.createHash('sha256').update(String(value), 'utf8').digest('hex').slice(0, length);
 }
 
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 function requireValue(value, label, code = 'PROVIDER_WATCH_ARG_MISSING') {
   if (typeof value !== 'string' || value.length === 0) {
     throw new ProviderWatchError(`${label} is required.`, {
@@ -98,8 +102,11 @@ export function providerWatchEndpoint(provider) {
   });
 }
 
-export function createProviderWatchSecret(provider, mailboxId) {
-  return `signal_${provider}_${mailboxId}_${crypto.randomBytes(18).toString('base64url')}`;
+export function createProviderWatchSecret(provider, mailboxId, { local = false } = {}) {
+  const suffix = local
+    ? digest(`${provider}:${mailboxId}`, 18)
+    : crypto.randomBytes(18).toString('base64url');
+  return `signal_${provider}_${mailboxId}_${suffix}`;
 }
 
 export function createGmailWatchRequest({ mailbox, env = process.env } = {}) {
@@ -307,4 +314,166 @@ export function parseOutlookChangeNotification(body = {}) {
 
 export function digestClientState(value) {
   return digest(value);
+}
+
+const GOOGLE_PUBSUB_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
+const GOOGLE_PUBSUB_ISSUERS = new Set(['accounts.google.com', 'https://accounts.google.com']);
+
+const googlePubSubJwksCache = new Map();
+
+function bearerTokenFromRequest(req) {
+  const authorization = req.headers?.authorization?.toString() ?? '';
+  if (!authorization.toLowerCase().startsWith('bearer ')) {
+    return null;
+  }
+  return authorization.slice(7).trim() || null;
+}
+
+function decodeJwtPart(part, label, code = 'GMAIL_WEBHOOK_TOKEN_FORMAT_INVALID') {
+  try {
+    return JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+  } catch {
+    throw new ProviderWatchError(`${label} is not valid base64url JSON.`, {
+      code,
+      status: 401,
+    });
+  }
+}
+
+function isLoopbackApiHost(host = process.env.SIGNAL_API_HOST ?? '127.0.0.1') {
+  const normalized = String(host).trim().toLowerCase();
+  return normalized === '127.0.0.1'
+    || normalized === 'localhost'
+    || normalized === '::1'
+    || normalized === '[::1]';
+}
+
+async function fetchGooglePubSubJwks({ fetchImpl = globalThis.fetch, env = process.env } = {}) {
+  const jwksUrl = nonEmptyString(env.SIGNAL_GMAIL_WEBHOOK_JWKS_URL) ?? GOOGLE_PUBSUB_JWKS_URL;
+  const cacheSeconds = Number(env.SIGNAL_GMAIL_WEBHOOK_JWKS_CACHE_SECONDS ?? 300);
+  const cached = googlePubSubJwksCache.get(jwksUrl);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.jwks;
+  }
+  if (typeof fetchImpl !== 'function') {
+    throw new ProviderWatchError('A fetch implementation is required for Gmail webhook verification.', {
+      code: 'GMAIL_WEBHOOK_FETCH_MISSING',
+      status: 500,
+    });
+  }
+  const response = await fetchImpl(jwksUrl, {
+    signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+      ? AbortSignal.timeout(Number(env.SIGNAL_GMAIL_WEBHOOK_JWKS_TIMEOUT_MS ?? 5000))
+      : undefined,
+  });
+  if (!response.ok) {
+    throw new ProviderWatchError(`Google Pub/Sub JWKS endpoint returned ${response.status}.`, {
+      code: 'GMAIL_WEBHOOK_JWKS_FETCH_FAILED',
+      status: 401,
+      details: { statusCode: response.status },
+    });
+  }
+  const jwks = await response.json();
+  googlePubSubJwksCache.set(jwksUrl, {
+    expiresAt: Date.now() + Math.max(0, cacheSeconds) * 1000,
+    jwks,
+  });
+  return jwks;
+}
+
+function audienceMatchesClaim(expectedAudience, claim) {
+  if (Array.isArray(claim)) {
+    return claim.map((item) => String(item)).includes(expectedAudience);
+  }
+  return String(claim ?? '') === expectedAudience;
+}
+
+export async function verifyGmailPubSubPushAuthorization(req, { env = process.env, fetchImpl = globalThis.fetch, nowMs = Date.now() } = {}) {
+  const audience = nonEmptyString(env.SIGNAL_GMAIL_WEBHOOK_AUDIENCE);
+  if (!audience) {
+    if (isLoopbackApiHost(env.SIGNAL_API_HOST)) {
+      return;
+    }
+    throw new ProviderWatchError('SIGNAL_GMAIL_WEBHOOK_AUDIENCE is required for Gmail webhook verification.', {
+      code: 'GMAIL_WEBHOOK_AUDIENCE_REQUIRED',
+      status: 412,
+      details: { requiredEnv: 'SIGNAL_GMAIL_WEBHOOK_AUDIENCE' },
+    });
+  }
+
+  const token = bearerTokenFromRequest(req);
+  if (!token) {
+    throw new ProviderWatchError('Gmail Pub/Sub push requires an Authorization bearer token.', {
+      code: 'GMAIL_WEBHOOK_AUTH_REQUIRED',
+      status: 401,
+    });
+  }
+
+  const parts = String(token).split('.');
+  if (parts.length !== 3) {
+    throw new ProviderWatchError('Gmail Pub/Sub bearer token must have three JWT parts.', {
+      code: 'GMAIL_WEBHOOK_TOKEN_FORMAT_INVALID',
+      status: 401,
+    });
+  }
+
+  const [headerPart, payloadPart, signaturePart] = parts;
+  const header = decodeJwtPart(headerPart, 'Gmail Pub/Sub token header');
+  const payload = decodeJwtPart(payloadPart, 'Gmail Pub/Sub token payload');
+  if (header.alg !== 'RS256' || !header.kid) {
+    throw new ProviderWatchError('Gmail Pub/Sub push only accepts RS256 tokens with a key id.', {
+      code: 'GMAIL_WEBHOOK_TOKEN_HEADER_INVALID',
+      status: 401,
+      details: { alg: header.alg ?? null, kid: header.kid ?? null },
+    });
+  }
+
+  const jwks = await fetchGooglePubSubJwks({ env, fetchImpl });
+  const jwk = (jwks.keys ?? []).find((key) => key.kid === header.kid && key.kty === 'RSA');
+  if (!jwk) {
+    throw new ProviderWatchError('Gmail Pub/Sub JWKS key id was not found.', {
+      code: 'GMAIL_WEBHOOK_JWKS_KEY_NOT_FOUND',
+      status: 401,
+      details: { kid: header.kid },
+    });
+  }
+
+  const publicKey = crypto.createPublicKey({ format: 'jwk', key: jwk });
+  const verified = crypto.verify(
+    'RSA-SHA256',
+    Buffer.from(`${headerPart}.${payloadPart}`, 'utf8'),
+    publicKey,
+    Buffer.from(signaturePart, 'base64url'),
+  );
+  if (!verified) {
+    throw new ProviderWatchError('Gmail Pub/Sub bearer token signature verification failed.', {
+      code: 'GMAIL_WEBHOOK_TOKEN_SIGNATURE_INVALID',
+      status: 401,
+    });
+  }
+
+  const nowSeconds = Math.floor(nowMs / 1000);
+  if (!Number.isFinite(payload.exp) || payload.exp <= nowSeconds) {
+    throw new ProviderWatchError('Gmail Pub/Sub bearer token has expired.', {
+      code: 'GMAIL_WEBHOOK_TOKEN_EXPIRED',
+      status: 401,
+      details: { exp: payload.exp, now: nowSeconds },
+    });
+  }
+
+  if (!GOOGLE_PUBSUB_ISSUERS.has(String(payload.iss ?? ''))) {
+    throw new ProviderWatchError('Gmail Pub/Sub bearer token issuer is invalid.', {
+      code: 'GMAIL_WEBHOOK_TOKEN_ISSUER_INVALID',
+      status: 401,
+      details: { iss: payload.iss ?? null },
+    });
+  }
+
+  if (!audienceMatchesClaim(audience, payload.aud)) {
+    throw new ProviderWatchError('Gmail Pub/Sub bearer token audience is invalid.', {
+      code: 'GMAIL_WEBHOOK_TOKEN_AUDIENCE_INVALID',
+      status: 401,
+      details: { aud: payload.aud ?? null, expectedAudience: audience },
+    });
+  }
 }

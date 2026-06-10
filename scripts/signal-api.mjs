@@ -64,6 +64,10 @@ import {
   sessionCookieHeader,
 } from './signal-api-auth.mjs';
 import {
+  ProviderWatchError,
+  verifyGmailPubSubPushAuthorization,
+} from './signal-provider-watch.mjs';
+import {
   validateProviderSandbox,
 } from './signal-provider-sandbox.mjs';
 import {
@@ -95,12 +99,15 @@ function isLoopbackOrigin(origin) {
 
 function allowedCorsOrigin(req) {
   const origin = req.headers.origin?.toString();
-  if (!origin) {
-    return '*';
-  }
   const configuredOrigins = configuredCorsOrigins();
-  if (configuredOrigins.includes('*') || configuredOrigins.includes(origin)) {
+  if (!origin) {
+    return configuredOrigins.includes('*') ? '*' : null;
+  }
+  if (configuredOrigins.includes(origin)) {
     return origin;
+  }
+  if (configuredOrigins.includes('*')) {
+    return '*';
   }
   if (configuredOrigins.length === 0 && isLoopbackOrigin(origin)) {
     return origin;
@@ -112,8 +119,10 @@ function applyCorsHeaders(req, res) {
   const origin = allowedCorsOrigin(req);
   if (origin) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+    if (origin !== '*') {
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
   }
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Headers', corsHeaders);
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Vary', 'Origin');
@@ -143,7 +152,14 @@ async function readBody(req) {
   if (!raw) {
     return {};
   }
-  return JSON.parse(raw);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new SignalStateError('Invalid JSON body', {
+      code: 'INVALID_JSON',
+      status: 400,
+    });
+  }
 }
 
 async function readRawBody(req) {
@@ -176,7 +192,7 @@ async function authenticatedState(req, body = {}) {
 }
 
 function errorPayload(error) {
-  if (error instanceof SignalStateError || error instanceof SessionTokenError) {
+  if (error instanceof SignalStateError || error instanceof SessionTokenError || error instanceof ProviderWatchError) {
     return {
       status: error.status,
       payload: {
@@ -1216,6 +1232,7 @@ async function route(req, res) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/webhooks/gmail') {
+    await verifyGmailPubSubPushAuthorization(req);
     const body = await readBody(req);
     const webhookActorUserId = requireWebhookActor(resolveWebhookActor(req));
     const result = await handleProviderWatchNotification('gmail', body, {

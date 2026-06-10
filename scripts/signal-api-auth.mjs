@@ -75,6 +75,17 @@ function oauthProviderConfigured(env = process.env) {
   return Boolean(env.SIGNAL_GMAIL_CLIENT_ID || env.SIGNAL_OUTLOOK_CLIENT_ID);
 }
 
+function configuredCorsOrigins(env = process.env) {
+  return String(env.SIGNAL_API_CORS_ORIGINS ?? env.SIGNAL_API_CORS_ORIGIN ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function gmailWebhookConfigured(env = process.env) {
+  return Boolean(env.SIGNAL_GMAIL_CLIENT_ID || env.SIGNAL_GMAIL_NOTIFICATION_URL);
+}
+
 function productionAuthProvider(env = process.env) {
   return env.SIGNAL_AUTH_PROVIDER === 'jwks' ? 'jwks' : null;
 }
@@ -134,6 +145,22 @@ export function assertApiSecurityConfig(env = process.env) {
 
   if (oauthProviderConfigured(env) && !env.SIGNAL_OAUTH_STATE_KEY) {
     throw new Error('OAuth provider client IDs are configured but SIGNAL_OAUTH_STATE_KEY is missing.');
+  }
+
+  if (!loopback) {
+    const corsOrigins = configuredCorsOrigins(env);
+    if (corsOrigins.includes('*')) {
+      throw new Error(
+        'SIGNAL_API_CORS_ORIGINS cannot include * on non-loopback hosts when credentialed CORS is enabled.',
+      );
+    }
+    if (corsOrigins.length === 0) {
+      throw new Error('Non-loopback hosts require explicit SIGNAL_API_CORS_ORIGINS.');
+    }
+  }
+
+  if (!loopback && gmailWebhookConfigured(env) && !env.SIGNAL_GMAIL_WEBHOOK_AUDIENCE) {
+    throw new Error('Non-loopback Gmail webhook intake requires SIGNAL_GMAIL_WEBHOOK_AUDIENCE.');
   }
 }
 
