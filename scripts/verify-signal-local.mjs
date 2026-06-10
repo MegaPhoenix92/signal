@@ -82,6 +82,9 @@ import {
   verifyLocalSessionToken,
 } from './signal-state.mjs';
 import {
+  createProviderWatchSecret,
+} from './signal-provider-watch.mjs';
+import {
   signStripeWebhookPayload,
 } from './signal-payment-provider.mjs';
 import {
@@ -891,10 +894,12 @@ assert.equal(gmailNotification.action, 'mailboxes.watch-notification');
 assert.equal(gmailNotification.details.provider, 'gmail');
 assert.equal(gmailNotification.details.notificationCount, 1);
 
+const outlookClientState = createProviderWatchSecret('outlook', 'mbx_outlook_success', { local: true });
 const outlookNotification = await handleProviderWatchNotification('outlook', {
   value: [
     {
       changeType: 'updated',
+      clientState: outlookClientState,
       resource: 'me/messages/msg-001',
       resourceData: { id: 'msg-001' },
       subscriptionId: restoredOutlookWatch.details.providerWatchId,
@@ -904,6 +909,17 @@ const outlookNotification = await handleProviderWatchNotification('outlook', {
 assert.equal(outlookNotification.action, 'mailboxes.watch-notification');
 assert.equal(outlookNotification.details.provider, 'outlook');
 assert.equal(outlookNotification.details.notificationCount, 1);
+
+await expectStateError('missing Outlook client state is rejected', 'OUTLOOK_NOTIFICATION_CLIENT_STATE_REQUIRED', () =>
+  handleProviderWatchNotification('outlook', {
+    value: [
+      {
+        resource: 'me/messages/msg-missing-client-state',
+        resourceData: { id: 'msg-missing-client-state' },
+      },
+    ],
+  }, { actorUserId: 'usr_admin', statePath }),
+);
 
 await expectStateError('invalid Outlook client state is rejected', 'OUTLOOK_NOTIFICATION_CLIENT_STATE_INVALID', () =>
   handleProviderWatchNotification('outlook', {

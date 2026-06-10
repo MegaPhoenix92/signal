@@ -11227,7 +11227,9 @@ function recordProviderWatchFailure(state, mailbox, error, { clientState = null,
 }
 
 async function applyProviderWatchAttempt(state, mailbox, options = {}, { existingWatchId = null, operation = 'setup' } = {}) {
-  const clientState = mailbox.provider === 'outlook' ? createProviderWatchSecret(mailbox.provider, mailbox.id) : null;
+  const clientState = mailbox.provider === 'outlook'
+    ? createProviderWatchSecret(mailbox.provider, mailbox.id, { local: !options.liveProviderWatch })
+    : null;
   const credential = options.liveProviderWatch
     ? await providerWatchCredential(mailbox, { ...options, env: options.env ?? process.env })
     : { accessToken: null, source: 'local', vaultRef: null };
@@ -11417,17 +11419,19 @@ export async function handleProviderWatchNotification(provider, payload = {}, op
           const notifications = parseOutlookChangeNotification(payload);
           notificationCount = notifications.length;
           const firstNotification = notifications[0];
-          if (firstNotification.clientState) {
-            const receivedDigest = digestClientState(firstNotification.clientState);
-            targetWatch = (state.emailWatchSubscriptions ?? []).find((watch) => watch.provider === 'outlook' && watch.clientStateDigest === receivedDigest);
-            if (!targetWatch) {
-              throw new ProviderWatchError('Outlook notification clientState did not match any active watch.', {
-                code: 'OUTLOOK_NOTIFICATION_CLIENT_STATE_INVALID',
-                status: 401,
-              });
-            }
-          } else {
-            targetWatch = [...(state.emailWatchSubscriptions ?? [])].reverse().find((watch) => watch.provider === 'outlook' && watch.status === 'active');
+          if (!firstNotification.clientState) {
+            throw new ProviderWatchError('Outlook notification clientState is required.', {
+              code: 'OUTLOOK_NOTIFICATION_CLIENT_STATE_REQUIRED',
+              status: 401,
+            });
+          }
+          const receivedDigest = digestClientState(firstNotification.clientState);
+          targetWatch = (state.emailWatchSubscriptions ?? []).find((watch) => watch.provider === 'outlook' && watch.clientStateDigest === receivedDigest);
+          if (!targetWatch) {
+            throw new ProviderWatchError('Outlook notification clientState did not match any active watch.', {
+              code: 'OUTLOOK_NOTIFICATION_CLIENT_STATE_INVALID',
+              status: 401,
+            });
           }
           cursorValue = firstNotification.subscriptionId ?? firstNotification.resourceData?.id ?? null;
         }

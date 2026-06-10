@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
@@ -25,6 +27,10 @@ import {
   verifyOAuthState,
 } from './signal-oauth-provider.mjs';
 import { signStripeWebhookPayload } from './signal-payment-provider.mjs';
+import {
+  createProviderWatchSecret,
+  digestClientState,
+} from './signal-provider-watch.mjs';
 import {
   bootstrapState,
   completeMailboxConnectionFromOAuthCallback,
@@ -115,6 +121,7 @@ test('assertApiSecurityConfig blocks non-loopback hosts without verified auth', 
   );
   assert.doesNotThrow(() => assertApiSecurityConfig({
     SIGNAL_API_HOST: '0.0.0.0',
+    SIGNAL_API_CORS_ORIGINS: 'https://signal.example',
     SIGNAL_BACKEND_MODE: 'external-service',
     SIGNAL_STATE_SERVICE_URL: 'http://state-service.example/state',
     SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
@@ -155,6 +162,7 @@ test('assertApiSecurityConfig rejects file-backed state on non-loopback hosts', 
   );
   assert.doesNotThrow(() => assertApiSecurityConfig({
     SIGNAL_API_HOST: '0.0.0.0',
+    SIGNAL_API_CORS_ORIGINS: 'https://signal.example',
     SIGNAL_BACKEND_MODE: 'external-service',
     SIGNAL_STATE_SERVICE_URL: 'http://state-service.example/state',
     SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
@@ -183,6 +191,57 @@ test('assertApiSecurityConfig requires system actors and secure cookies on non-l
       SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
     }),
     /SIGNAL_COOKIE_SECURE|HTTPS SIGNAL_APP_BASE_URL/i,
+  );
+});
+
+test('assertApiSecurityConfig rejects wildcard CORS origins on non-loopback hosts', () => {
+  assert.throws(
+    () => assertApiSecurityConfig({
+      SIGNAL_API_HOST: '0.0.0.0',
+      SIGNAL_API_CORS_ORIGINS: '*',
+      SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
+      SIGNAL_SESSION_SECRET: 'test-secret',
+      SIGNAL_COOKIE_SECURE: 'true',
+      SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
+      SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
+      SIGNAL_BACKEND_MODE: 'external-service',
+      SIGNAL_STATE_SERVICE_URL: 'http://state-service.example/state',
+    }),
+    /SIGNAL_API_CORS_ORIGINS cannot include \*/i,
+  );
+});
+
+test('assertApiSecurityConfig requires explicit CORS origins on non-loopback hosts', () => {
+  assert.throws(
+    () => assertApiSecurityConfig({
+      SIGNAL_API_HOST: '0.0.0.0',
+      SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
+      SIGNAL_SESSION_SECRET: 'test-secret',
+      SIGNAL_COOKIE_SECURE: 'true',
+      SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
+      SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
+      SIGNAL_BACKEND_MODE: 'external-service',
+      SIGNAL_STATE_SERVICE_URL: 'http://state-service.example/state',
+    }),
+    /explicit SIGNAL_API_CORS_ORIGINS/i,
+  );
+});
+
+test('assertApiSecurityConfig requires Gmail webhook audience when Gmail intake is configured', () => {
+  assert.throws(
+    () => assertApiSecurityConfig({
+      SIGNAL_API_HOST: '0.0.0.0',
+      SIGNAL_GMAIL_NOTIFICATION_URL: 'https://signal.example/api/webhooks/gmail',
+      SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
+      SIGNAL_SESSION_SECRET: 'test-secret',
+      SIGNAL_COOKIE_SECURE: 'true',
+      SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
+      SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
+      SIGNAL_API_CORS_ORIGINS: 'https://signal.example',
+      SIGNAL_BACKEND_MODE: 'external-service',
+      SIGNAL_STATE_SERVICE_URL: 'http://state-service.example/state',
+    }),
+    /SIGNAL_GMAIL_WEBHOOK_AUDIENCE/i,
   );
 });
 
@@ -569,6 +628,288 @@ test('production webhook route ignores spoofed X-Signal-Actor and uses SIGNAL_WE
   assert.ok(webhookAudit, 'webhook mutation should append an audit event');
   assert.equal(webhookAudit.actor, 'usr_admin');
   assert.notEqual(webhookAudit.actor, 'usr_sales');
+});
+
+function encodeJson(value) {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+}
+
+function signJwt({ kid, payload, privateKey }) {
+  const header = {
+    alg: 'RS256',
+    kid,
+    typ: 'JWT',
+  };
+  const unsigned = `${encodeJson(header)}.${encodeJson(payload)}`;
+  const signature = crypto.sign('RSA-SHA256', Buffer.from(unsigned, 'utf8'), privateKey).toString('base64url');
+  return `${unsigned}.${signature}`;
+}
+
+function startGoogleJwksServer({ jwk, port }) {
+  const server = http.createServer((req, res) => {
+    if (req.url === '/oauth2/v3/certs') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(`${JSON.stringify({ keys: [jwk] })}\n`);
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end('{"ok":false}\n');
+  });
+  return new Promise((resolve) => {
+    server.listen(port, '127.0.0.1', () => resolve(server));
+  });
+}
+
+async function stopServer(server) {
+  if (!server) {
+    return;
+  }
+  await new Promise((resolve) => server.close(resolve));
+}
+
+test('malformed JSON request bodies return 400 instead of 500', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-invalid-json-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({ port, statePath });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/webhooks/gmail`, {
+    body: '{not-json',
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 400);
+  assert.equal(payload.code, 'INVALID_JSON');
+  assert.equal(payload.error, 'Invalid JSON body');
+});
+
+test('wildcard CORS does not reflect arbitrary origins with credentials', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-cors-wildcard-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: { SIGNAL_API_CORS_ORIGINS: '*' },
+  });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/health`, {
+    headers: { Origin: 'https://evil.example' },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('access-control-allow-origin'), '*');
+  assert.equal(response.headers.get('access-control-allow-credentials'), null);
+});
+
+test('Gmail webhook rejects unauthenticated push when audience verification is enabled', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-gmail-webhook-auth-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: {
+      SIGNAL_GMAIL_WEBHOOK_AUDIENCE: `http://127.0.0.1:${port}/api/webhooks/gmail`,
+      SIGNAL_WEBHOOK_ACTOR: 'usr_admin',
+    },
+  });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/webhooks/gmail`, {
+    body: JSON.stringify({ message: { data: Buffer.from('{}', 'utf8').toString('base64') } }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 401);
+  assert.equal(payload.code, 'GMAIL_WEBHOOK_AUTH_REQUIRED');
+});
+
+test('Gmail webhook accepts verified Pub/Sub push tokens when audience verification is enabled', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-gmail-webhook-verified-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  const jwksPort = await freePort();
+  const audience = `http://127.0.0.1:${port}/api/webhooks/gmail`;
+  const kid = 'gmail-webhook-test-key';
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = {
+    ...publicKey.export({ format: 'jwk' }),
+    alg: 'RS256',
+    kid,
+    use: 'sig',
+  };
+  let api = null;
+  let jwksServer = null;
+
+  t.after(async () => {
+    await stopServer(jwksServer);
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  jwksServer = await startGoogleJwksServer({ jwk, port: jwksPort });
+  const state = await loadState({ statePath });
+  state.emailWatchSubscriptions = state.emailWatchSubscriptions ?? [];
+  state.emailWatchSubscriptions.push({
+    expirationAt: new Date(Date.now() + 86_400_000).toISOString(),
+    id: 'watch_gmail_security_test',
+    mailboxId: 'mbx_gmail_sales',
+    notificationUrl: `${audience}`,
+    provider: 'gmail',
+    providerWatchId: 'gmail-watch-security-test',
+    status: 'active',
+  });
+  await saveState(state, { statePath });
+
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: {
+      SIGNAL_GMAIL_WEBHOOK_AUDIENCE: audience,
+      SIGNAL_GMAIL_WEBHOOK_JWKS_URL: `http://127.0.0.1:${jwksPort}/oauth2/v3/certs`,
+      SIGNAL_WEBHOOK_ACTOR: 'usr_admin',
+    },
+  });
+
+  const token = signJwt({
+    kid,
+    privateKey,
+    payload: {
+      aud: audience,
+      email: 'pubsub@system.gserviceaccount.com',
+      exp: Math.floor(Date.now() / 1000) + 300,
+      iss: 'https://accounts.google.com',
+      sub: 'pubsub@system.gserviceaccount.com',
+    },
+  });
+  const response = await fetch(`${api.apiBaseUrl}/api/webhooks/gmail`, {
+    body: JSON.stringify({
+      message: {
+        data: Buffer.from(JSON.stringify({ emailAddress: 'sales@acme.example', historyId: '12345' }), 'utf8').toString('base64'),
+      },
+    }),
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    method: 'POST',
+  });
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.equal(payload.action, 'mailboxes.watch-notification');
+});
+
+test('Outlook webhook rejects notifications missing clientState', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-outlook-webhook-client-state-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: { SIGNAL_WEBHOOK_ACTOR: 'usr_admin' },
+  });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/webhooks/outlook`, {
+    body: JSON.stringify({
+      value: [
+        {
+          resource: 'me/messages/msg-001',
+          resourceData: { id: 'msg-001' },
+        },
+      ],
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 401);
+  assert.equal(payload.code, 'OUTLOOK_NOTIFICATION_CLIENT_STATE_REQUIRED');
+});
+
+test('Outlook webhook accepts notifications with matching clientState', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-outlook-webhook-valid-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const state = await loadState({ statePath });
+  const mailboxId = 'mbx_outlook_success';
+  const clientState = createProviderWatchSecret('outlook', mailboxId, { local: true });
+  state.emailWatchSubscriptions = state.emailWatchSubscriptions ?? [];
+  state.emailWatchSubscriptions.push({
+    clientStateDigest: digestClientState(clientState),
+    expirationAt: new Date(Date.now() + 86_400_000).toISOString(),
+    id: 'watch_outlook_security_test',
+    mailboxId,
+    notificationUrl: `http://127.0.0.1:${port}/api/webhooks/outlook`,
+    provider: 'outlook',
+    providerWatchId: 'outlook-sub-security-test',
+    status: 'active',
+  });
+  await saveState(state, { statePath });
+
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: { SIGNAL_WEBHOOK_ACTOR: 'usr_admin' },
+  });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/webhooks/outlook`, {
+    body: JSON.stringify({
+      value: [
+        {
+          clientState,
+          resource: 'me/messages/msg-001',
+          resourceData: { id: 'msg-001' },
+        },
+      ],
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.equal(payload.action, 'mailboxes.watch-notification');
 });
 
 test('signal-api refuses to boot on non-loopback host without verified auth', async () => {
