@@ -13236,14 +13236,17 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
       const plan = findById(state.plans, requireArg(planId, 'plan id', 'payments checkout <tenantId> <planId>'), 'Plan');
       const livePaymentProvider = options.livePaymentProvider === true || options.paymentProviderMode === 'live' || process.env.SIGNAL_PAYMENT_PROVIDER_MODE === 'live';
       const subscription = state.subscriptions?.find((candidate) => candidate.tenantId === tenant.id);
+      state.billingSessions = state.billingSessions ?? [];
+      const sessionAttempt = state.billingSessions.filter((session) => session.tenantId === tenant.id && session.type === 'checkout').length + 1;
       let providerSession = null;
       if (livePaymentProvider) {
         try {
           providerSession = await createStripeCheckoutSession({
             env: options.env ?? process.env,
             fetchImpl: options.fetchImpl,
-            idempotencyKey: options.idempotencyKey ?? `signal-checkout-${tenant.id}-${plan.id}-${Date.now()}`,
+            idempotencyKey: options.idempotencyKey,
             plan,
+            sessionAttempt,
             stripeCustomerId: options.stripeCustomerId,
             subscription,
             tenant,
@@ -13252,7 +13255,6 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
           throw signalErrorFromProviderError(providerError);
         }
       }
-      state.billingSessions = state.billingSessions ?? [];
       const session = {
         id: makeId('bs_checkout'),
         tenantId: tenant.id,
@@ -13326,13 +13328,16 @@ export async function createBillingPortalSession(tenantId, options = {}) {
         });
       }
       const livePaymentProvider = options.livePaymentProvider === true || options.paymentProviderMode === 'live' || process.env.SIGNAL_PAYMENT_PROVIDER_MODE === 'live';
+      state.billingSessions = state.billingSessions ?? [];
+      const sessionAttempt = state.billingSessions.filter((session) => session.tenantId === tenant.id && session.type === 'portal').length + 1;
       let providerSession = null;
       if (livePaymentProvider) {
         try {
           providerSession = await createStripeBillingPortalSession({
             env: options.env ?? process.env,
             fetchImpl: options.fetchImpl,
-            idempotencyKey: options.idempotencyKey ?? `signal-portal-${tenant.id}-${Date.now()}`,
+            idempotencyKey: options.idempotencyKey,
+            sessionAttempt,
             stripeCustomerId: options.stripeCustomerId,
             subscription,
             tenant,
@@ -13341,7 +13346,6 @@ export async function createBillingPortalSession(tenantId, options = {}) {
           throw signalErrorFromProviderError(providerError);
         }
       }
-      state.billingSessions = state.billingSessions ?? [];
       const session = {
         id: makeId('bs_portal'),
         tenantId: tenant.id,
