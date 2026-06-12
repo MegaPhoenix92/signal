@@ -59,13 +59,14 @@ test('checkout sessions derive a stable Stripe idempotency key by default', asyn
     env,
     fetchImpl: stripeFetchRecorder(calls),
     plan,
+    sessionAttempt: 1,
     subscription,
     tenant,
   });
 
-  assert.equal(stripeCheckoutIdempotencyKey({ plan, subscription, tenant }), 'signal-checkout-tenant_demo-plan_team-sub_demo');
-  assert.equal(calls[0].init.headers['Idempotency-Key'], 'signal-checkout-tenant_demo-plan_team-sub_demo');
-  assert.equal(checkout.requestIdempotencyKey, 'signal-checkout-tenant_demo-plan_team-sub_demo');
+  assert.equal(stripeCheckoutIdempotencyKey({ plan, sessionAttempt: 1, subscription, tenant }), 'signal-checkout-tenant_demo-plan_team-sub_demo-1');
+  assert.equal(calls[0].init.headers['Idempotency-Key'], 'signal-checkout-tenant_demo-plan_team-sub_demo-1');
+  assert.equal(checkout.requestIdempotencyKey, 'signal-checkout-tenant_demo-plan_team-sub_demo-1');
 });
 
 test('billing portal sessions derive a stable Stripe idempotency key by default', async () => {
@@ -73,13 +74,29 @@ test('billing portal sessions derive a stable Stripe idempotency key by default'
   const portal = await createStripeBillingPortalSession({
     env,
     fetchImpl: stripeFetchRecorder(calls),
+    sessionAttempt: 2,
     subscription,
     tenant,
   });
 
-  assert.equal(stripeBillingPortalIdempotencyKey({ subscription, tenant }), 'signal-portal-tenant_demo-sub_demo-cus_signal');
-  assert.equal(calls[0].init.headers['Idempotency-Key'], 'signal-portal-tenant_demo-sub_demo-cus_signal');
-  assert.equal(portal.requestIdempotencyKey, 'signal-portal-tenant_demo-sub_demo-cus_signal');
+  assert.equal(stripeBillingPortalIdempotencyKey({ sessionAttempt: 2, subscription, tenant }), 'signal-portal-tenant_demo-sub_demo-cus_signal-2');
+  assert.equal(calls[0].init.headers['Idempotency-Key'], 'signal-portal-tenant_demo-sub_demo-cus_signal-2');
+  assert.equal(portal.requestIdempotencyKey, 'signal-portal-tenant_demo-sub_demo-cus_signal-2');
+});
+
+test('derived Stripe idempotency keys are stable per attempt and unique across attempts', () => {
+  assert.equal(
+    stripeCheckoutIdempotencyKey({ plan, sessionAttempt: 3, subscription, tenant }),
+    stripeCheckoutIdempotencyKey({ plan, sessionAttempt: 3, subscription, tenant }),
+  );
+  assert.notEqual(
+    stripeCheckoutIdempotencyKey({ plan, sessionAttempt: 3, subscription, tenant }),
+    stripeCheckoutIdempotencyKey({ plan, sessionAttempt: 4, subscription, tenant }),
+  );
+  assert.notEqual(
+    stripeBillingPortalIdempotencyKey({ sessionAttempt: 3, subscription, tenant }),
+    stripeBillingPortalIdempotencyKey({ sessionAttempt: 4, subscription, tenant }),
+  );
 });
 
 test('explicit Stripe idempotency keys override derived defaults', async () => {
@@ -102,4 +119,21 @@ test('explicit Stripe idempotency keys override derived defaults', async () => {
 
   assert.equal(calls[0].init.headers['Idempotency-Key'], 'manual-checkout-key');
   assert.equal(calls[1].init.headers['Idempotency-Key'], 'manual-portal-key');
+});
+
+test('derived Stripe idempotency keys require a session attempt scope', async () => {
+  assert.throws(
+    () => stripeCheckoutIdempotencyKey({ plan, subscription, tenant }),
+    /session attempt scope is required/,
+  );
+  await assert.rejects(
+    () => createStripeCheckoutSession({
+      env,
+      fetchImpl: stripeFetchRecorder([]),
+      plan,
+      subscription,
+      tenant,
+    }),
+    /session attempt scope is required/,
+  );
 });
