@@ -7618,6 +7618,10 @@ export async function fetchProviderSandbox(signal?: AbortSignal): Promise<Provid
   return response.json() as Promise<ProviderSandboxResponse>;
 }
 
+async function readJsonPayload(response: Response) {
+  return response.json().catch(() => null);
+}
+
 export async function runProviderScheduledValidation(force = false, signal?: AbortSignal): Promise<ProviderScheduledValidationResponse> {
   const response = await fetch(`${localApiUrl}/api/integrations/scheduled`, {
     body: JSON.stringify({ force }),
@@ -7628,9 +7632,9 @@ export async function runProviderScheduledValidation(force = false, signal?: Abo
     method: 'POST',
     signal,
   });
-  const payload = await response.json();
+  const payload = await readJsonPayload(response);
   if (!response.ok) {
-    throw new Error(payload.error ?? `Signal scheduled validation API returned ${response.status}`);
+    throw new Error((payload as { error?: string } | null)?.error ?? `Signal scheduled validation API returned ${response.status}`);
   }
   return payload as ProviderScheduledValidationResponse;
 }
@@ -7645,9 +7649,9 @@ export async function mutateSignalState(action: SignalMutationAction, args: Reco
     method: 'POST',
   });
 
-  const payload = await response.json();
+  const payload = await readJsonPayload(response);
   if (!response.ok) {
-    throw new Error(payload.error ?? `Signal mutation failed with ${response.status}`);
+    throw new Error((payload as { error?: string } | null)?.error ?? `Signal mutation failed with ${response.status}`);
   }
 
   return payload as SignalMutationResult;
@@ -7663,9 +7667,9 @@ export async function registerSignalWorkspace(args: Record<string, unknown>): Pr
     method: 'POST',
   });
 
-  const payload = await response.json();
+  const payload = await readJsonPayload(response);
   if (!response.ok) {
-    throw new Error(payload.error ?? `Signal registration failed with ${response.status}`);
+    throw new Error((payload as { error?: string } | null)?.error ?? `Signal registration failed with ${response.status}`);
   }
 
   return payload as SignalMutationResult;
@@ -7681,9 +7685,9 @@ export async function claimSignalInvite(args: Record<string, unknown>): Promise<
     method: 'POST',
   });
 
-  const payload = await response.json();
+  const payload = await readJsonPayload(response);
   if (!response.ok) {
-    throw new Error(payload.error ?? `Signal invite claim failed with ${response.status}`);
+    throw new Error((payload as { error?: string } | null)?.error ?? `Signal invite claim failed with ${response.status}`);
   }
 
   return payload as SignalMutationResult;
@@ -7699,9 +7703,9 @@ export async function switchSignalSession(userId: string): Promise<SignalSession
     method: 'POST',
   });
 
-  const payload = await response.json();
+  const payload = await readJsonPayload(response);
   if (!response.ok) {
-    throw new Error(payload.error ?? `Signal session switch failed with ${response.status}`);
+    throw new Error((payload as { error?: string } | null)?.error ?? `Signal session switch failed with ${response.status}`);
   }
 
   return payload as SignalSessionResult;

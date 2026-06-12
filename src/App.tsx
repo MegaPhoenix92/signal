@@ -1684,6 +1684,17 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
   const users = data.users;
   const currentUser = users.find((user) => user.id === actorUserId) ?? users.find((user) => user.team === 'sales') ?? users[0];
   const tenant = data.tenants.find((item) => item.id === currentUser?.tenantId) ?? data.tenants[0];
+  if (!currentUser || !tenant) {
+    return (
+      <section className="workspace-shell">
+        <section className="ops-panel empty-state" data-reveal>
+          <h3>Workspace data unavailable</h3>
+          <p>The live API returned no tenant or user records for the workspace view.</p>
+          <small>Refresh after bootstrapping a tenant and active membership, or fall back to the seeded local state.</small>
+        </section>
+      </section>
+    );
+  }
   const tenantUsers = users.filter((user) => user.tenantId === tenant.id);
   const tenantMemberships = membershipsForTenant(data, tenant.id);
   const activeTenantMemberships = activeMembershipsForTenant(data, tenant.id);
@@ -2326,6 +2337,17 @@ function AdminConsole({ liveState }: { liveState: LiveState }) {
 
   const currentActor = data.users.find((user) => user.id === actorUserId) ?? data.users[0];
   const tenant = data.tenants.find((item) => item.id === currentActor?.tenantId) ?? data.tenants[0];
+  if (!currentActor || !tenant) {
+    return (
+      <section className="admin-shell">
+        <section className="ops-panel empty-state" data-reveal>
+          <h3>Admin data unavailable</h3>
+          <p>The live API returned no tenant or user records for the admin view.</p>
+          <small>Refresh after creating an admin-backed tenant, or use the local seeded state until the backend is populated.</small>
+        </section>
+      </section>
+    );
+  }
   const plan = data.plans.find((item) => item.id === tenant.planId);
   const subscription = data.subscriptions.find((item) => item.tenantId === tenant.id);
   const reauthCount = data.mailboxes.filter((mailbox) => mailbox.status === 'needs_reauth').length;
