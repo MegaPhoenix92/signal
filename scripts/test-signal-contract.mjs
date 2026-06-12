@@ -58,6 +58,19 @@ async function stopProcess(child) {
   }
 }
 
+test('frontend source guards empty live state and non-JSON POST failures', async () => {
+  const appSource = await fs.readFile(path.join(rootDir, 'src', 'App.tsx'), 'utf8');
+  const dataSource = await fs.readFile(path.join(rootDir, 'src', 'signalData.ts'), 'utf8');
+
+  assert.match(appSource, /if \(!currentUser \|\| !tenant\)/);
+  assert.match(appSource, /Workspace data unavailable/);
+  assert.match(appSource, /if \(!currentActor \|\| !tenant\)/);
+  assert.match(appSource, /Admin data unavailable/);
+  assert.match(dataSource, /async function readJsonPayload\(response: Response\)/);
+  assert.equal((dataSource.match(/await readJsonPayload\(response\)/g) ?? []).length, 5);
+  assert.equal((dataSource.match(/response\.json\(\)\.catch\(\(\) => null\)/g) ?? []).length, 1);
+});
+
 test('Signal local API, CLI, auth, flow, and subscription contract', async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-contract-'));
   const statePath = path.join(tempDir, 'signal-state.json');
