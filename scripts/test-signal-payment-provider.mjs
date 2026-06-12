@@ -1,13 +1,22 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import {
+  STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH,
   createStripeBillingPortalSession,
   createStripeCheckoutSession,
   stripeBillingPortalIdempotencyKey,
   stripeCheckoutIdempotencyKey,
 } from './signal-payment-provider.mjs';
+import {
+  bootstrapState,
+  createCheckoutSession,
+  loadState,
+} from './signal-state.mjs';
 
 const env = {
   SIGNAL_APP_BASE_URL: 'https://app.signal.test',
@@ -136,4 +145,82 @@ test('derived Stripe idempotency keys require a session attempt scope', async ()
     }),
     /session attempt scope is required/,
   );
+});
+
+test('derived Stripe idempotency keys stay within Stripe length limits', () => {
+  const longTenant = { id: `tenant_${'x'.repeat(120)}` };
+  const longPlan = { id: `plan_${'y'.repeat(120)}` };
+  const longSubscription = { id: `sub_${'z'.repeat(120)}` };
+  const key = stripeCheckoutIdempotencyKey({
+    plan: longPlan,
+    sessionAttempt: 1,
+    subscription: longSubscription,
+    tenant: longTenant,
+  });
+
+  assert(key.length <= STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH);
+  assert.match(key, /^signal-checkout-[a-f0-9]{32}$/);
+  assert.equal(key, stripeCheckoutIdempotencyKey({
+    plan: longPlan,
+    sessionAttempt: 1,
+    subscription: longSubscription,
+    tenant: longTenant,
+  }));
+});
+
+test('createCheckoutSession retries reuse the same derived Stripe idempotency key', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-checkout-idempotency-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const calls = [];
+  let failOnce = true;
+  const fetchImpl = async (url, init) => {
+    calls.push({ init, url });
+    if (failOnce) {
+      failOnce = false;
+      throw new Error('simulated Stripe timeout');
+    }
+    return new Response(JSON.stringify({
+      customer: 'cus_signal',
+      expires_at: 1780527000,
+      id: 'cs_retry_signal',
+      object: 'checkout.session',
+      url: 'https://checkout.stripe.test/retry',
+    }), { status: 200 });
+  };
+
+  await assert.rejects(
+    () => createCheckoutSession('tenant_demo', 'plan_team', {
+      actorUserId: 'usr_admin',
+      env,
+      fetchImpl,
+      livePaymentProvider: true,
+      statePath,
+    }),
+    /simulated Stripe timeout/,
+  );
+  assert.equal(calls.length, 1);
+  const firstKey = calls[0].init.headers['Idempotency-Key'];
+  assert(firstKey);
+
+  const checkout = await createCheckoutSession('tenant_demo', 'plan_team', {
+    actorUserId: 'usr_admin',
+    env,
+    fetchImpl,
+    livePaymentProvider: true,
+    statePath,
+  });
+  assert.equal(checkout.action, 'payments.checkout');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].init.headers['Idempotency-Key'], firstKey);
+
+  const state = await loadState({ statePath });
+  const billingSession = state.billingSessions.find((session) => session.providerSessionId === 'cs_retry_signal');
+  assert.equal(billingSession?.providerIdempotencyKey, firstKey);
+  const billingJob = state.jobs.find((job) => job.targetId === billingSession?.id);
+  assert.equal(billingJob?.providerIdempotencyKey, firstKey);
 });

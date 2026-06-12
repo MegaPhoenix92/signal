@@ -7131,6 +7131,7 @@ function appendJob(state, {
   providerCredentialSource,
   providerCredentialVaultRef,
   providerErrorCode,
+  providerIdempotencyKey,
   providerRequestDigest,
   providerResponseDigest,
   providerResponseStatus,
@@ -7168,6 +7169,9 @@ function appendJob(state, {
   }
   if (providerErrorCode !== undefined) {
     job.providerErrorCode = providerErrorCode;
+  }
+  if (providerIdempotencyKey !== undefined) {
+    job.providerIdempotencyKey = providerIdempotencyKey;
   }
   if (providerRequestDigest !== undefined) {
     job.providerRequestDigest = providerRequestDigest;
@@ -13270,6 +13274,7 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
         ...(providerSession?.providerCustomerId ? { providerCustomerId: providerSession.providerCustomerId } : {}),
         ...(providerSession?.providerRequestDigest ? { providerRequestDigest: providerSession.providerRequestDigest } : {}),
         ...(providerSession?.providerSessionId ? { providerSessionId: providerSession.providerSessionId } : {}),
+        ...(providerSession?.requestIdempotencyKey ? { providerIdempotencyKey: providerSession.requestIdempotencyKey } : {}),
       };
       state.billingSessions.push(session);
       if (providerSession && subscription) {
@@ -13295,6 +13300,8 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
         attempts: 1,
         maxAttempts: 5,
         message: providerSession ? `Created live Stripe checkout for ${plan.name}.` : `Prepared local checkout for ${plan.name}.`,
+        ...(providerSession?.requestIdempotencyKey ? { providerIdempotencyKey: providerSession.requestIdempotencyKey } : {}),
+        ...(providerSession?.providerRequestDigest ? { providerRequestDigest: providerSession.providerRequestDigest } : {}),
       });
       return {
         message: `${providerSession ? 'Stripe' : 'Local'} checkout ready for ${tenant.name} on ${plan.name}`,
@@ -13360,6 +13367,7 @@ export async function createBillingPortalSession(tenantId, options = {}) {
         ...(providerSession?.providerCustomerId ? { providerCustomerId: providerSession.providerCustomerId } : {}),
         ...(providerSession?.providerRequestDigest ? { providerRequestDigest: providerSession.providerRequestDigest } : {}),
         ...(providerSession?.providerSessionId ? { providerSessionId: providerSession.providerSessionId } : {}),
+        ...(providerSession?.requestIdempotencyKey ? { providerIdempotencyKey: providerSession.requestIdempotencyKey } : {}),
       };
       state.billingSessions.push(session);
       if (providerSession) {

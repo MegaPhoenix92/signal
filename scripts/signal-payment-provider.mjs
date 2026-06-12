@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 export const STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300;
 export const STRIPE_API_VERSION = '2026-02-25.clover';
 export const STRIPE_API_BASE_URL = 'https://api.stripe.com/v1';
+export const STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH = 255;
 
 export class PaymentProviderError extends Error {
   constructor(message, { code = 'PAYMENT_PROVIDER_ERROR', status = 400, details = {} } = {}) {
@@ -127,25 +128,35 @@ function idempotencyAttemptPart(sessionAttempt) {
   return normalized;
 }
 
+function finalizeStripeIdempotencyKey(prefix, parts) {
+  const key = [prefix, ...parts].join('-');
+  if (key.length <= STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH) {
+    return key;
+  }
+  const digest = crypto.createHash('sha256').update(key, 'utf8').digest('hex').slice(0, 32);
+  const compactKey = `${prefix}-${digest}`;
+  return compactKey.length <= STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH
+    ? compactKey
+    : compactKey.slice(0, STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH);
+}
+
 export function stripeCheckoutIdempotencyKey({ tenant, plan, subscription, sessionAttempt } = {}) {
-  return [
-    'signal-checkout',
+  return finalizeStripeIdempotencyKey('signal-checkout', [
     idempotencyPart(tenant?.id, 'tenant'),
     idempotencyPart(plan?.id, 'plan'),
     idempotencyPart(subscription?.id ?? subscription?.providerSubscriptionId ?? subscription?.stripeSubscriptionId, 'new'),
     idempotencyAttemptPart(sessionAttempt),
-  ].join('-');
+  ]);
 }
 
 export function stripeBillingPortalIdempotencyKey({ tenant, subscription, stripeCustomerId, sessionAttempt } = {}) {
   const customerId = safeStripeCustomerId({ fallback: stripeCustomerId, subscription, tenant });
-  return [
-    'signal-portal',
+  return finalizeStripeIdempotencyKey('signal-portal', [
     idempotencyPart(tenant?.id, 'tenant'),
     idempotencyPart(subscription?.id ?? subscription?.providerSubscriptionId ?? subscription?.stripeSubscriptionId, 'subscription'),
     idempotencyPart(customerId, 'customer'),
     idempotencyAttemptPart(sessionAttempt),
-  ].join('-');
+  ]);
 }
 
 async function parseStripeResponse(response) {
