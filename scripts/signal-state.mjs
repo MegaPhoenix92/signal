@@ -13242,7 +13242,7 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
           providerSession = await createStripeCheckoutSession({
             env: options.env ?? process.env,
             fetchImpl: options.fetchImpl,
-            idempotencyKey: options.idempotencyKey ?? `signal-checkout-${tenant.id}-${plan.id}-${Date.now()}`,
+            idempotencyKey: options.idempotencyKey,
             plan,
             stripeCustomerId: options.stripeCustomerId,
             subscription,
@@ -13332,7 +13332,7 @@ export async function createBillingPortalSession(tenantId, options = {}) {
           providerSession = await createStripeBillingPortalSession({
             env: options.env ?? process.env,
             fetchImpl: options.fetchImpl,
-            idempotencyKey: options.idempotencyKey ?? `signal-portal-${tenant.id}-${Date.now()}`,
+            idempotencyKey: options.idempotencyKey,
             stripeCustomerId: options.stripeCustomerId,
             subscription,
             tenant,
