@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 export const STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300;
 export const STRIPE_API_VERSION = '2026-02-25.clover';
 export const STRIPE_API_BASE_URL = 'https://api.stripe.com/v1';
+export const STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH = 255;
 
 export class PaymentProviderError extends Error {
   constructor(message, { code = 'PAYMENT_PROVIDER_ERROR', status = 400, details = {} } = {}) {
@@ -108,6 +109,56 @@ function digestStripeRequest(value) {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 24);
 }
 
+function idempotencyPart(value, fallback) {
+  const normalized = optionalString(value)?.replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 80);
+  return normalized || fallback;
+}
+
+function idempotencyAttemptPart(sessionAttempt) {
+  const attemptValue = typeof sessionAttempt === 'number'
+    ? (Number.isSafeInteger(sessionAttempt) && sessionAttempt > 0 ? String(sessionAttempt) : null)
+    : sessionAttempt;
+  const normalized = idempotencyPart(attemptValue, null);
+  if (!normalized) {
+    throw new PaymentProviderError('Stripe session attempt scope is required for derived idempotency keys.', {
+      code: 'PAYMENT_PROVIDER_IDEMPOTENCY_SCOPE_MISSING',
+      status: 500,
+    });
+  }
+  return normalized;
+}
+
+function finalizeStripeIdempotencyKey(prefix, parts) {
+  const key = [prefix, ...parts].join('-');
+  if (key.length <= STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH) {
+    return key;
+  }
+  const digest = crypto.createHash('sha256').update(key, 'utf8').digest('hex').slice(0, 32);
+  const compactKey = `${prefix}-${digest}`;
+  return compactKey.length <= STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH
+    ? compactKey
+    : compactKey.slice(0, STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH);
+}
+
+export function stripeCheckoutIdempotencyKey({ tenant, plan, subscription, sessionAttempt } = {}) {
+  return finalizeStripeIdempotencyKey('signal-checkout', [
+    idempotencyPart(tenant?.id, 'tenant'),
+    idempotencyPart(plan?.id, 'plan'),
+    idempotencyPart(subscription?.id ?? subscription?.providerSubscriptionId ?? subscription?.stripeSubscriptionId, 'new'),
+    idempotencyAttemptPart(sessionAttempt),
+  ]);
+}
+
+export function stripeBillingPortalIdempotencyKey({ tenant, subscription, stripeCustomerId, sessionAttempt } = {}) {
+  const customerId = safeStripeCustomerId({ fallback: stripeCustomerId, subscription, tenant });
+  return finalizeStripeIdempotencyKey('signal-portal', [
+    idempotencyPart(tenant?.id, 'tenant'),
+    idempotencyPart(subscription?.id ?? subscription?.providerSubscriptionId ?? subscription?.stripeSubscriptionId, 'subscription'),
+    idempotencyPart(customerId, 'customer'),
+    idempotencyAttemptPart(sessionAttempt),
+  ]);
+}
+
 async function parseStripeResponse(response) {
   const text = await response.text();
   if (!text) {
@@ -200,9 +251,10 @@ export function createStripeCheckoutSessionRequest({ tenant, plan, subscription,
   };
 }
 
-export async function createStripeCheckoutSession({ tenant, plan, subscription, env = process.env, fetchImpl = fetch, idempotencyKey, stripeCustomerId } = {}) {
+export async function createStripeCheckoutSession({ tenant, plan, subscription, env = process.env, fetchImpl = fetch, idempotencyKey, sessionAttempt, stripeCustomerId } = {}) {
   const request = createStripeCheckoutSessionRequest({ tenant, plan, subscription, env, stripeCustomerId });
-  const result = await postStripeForm(request.endpoint, request.params, { env, fetchImpl, idempotencyKey });
+  const requestIdempotencyKey = idempotencyKey ?? stripeCheckoutIdempotencyKey({ tenant, plan, subscription, sessionAttempt });
+  const result = await postStripeForm(request.endpoint, request.params, { env, fetchImpl, idempotencyKey: requestIdempotencyKey });
   const session = result.payload;
   return {
     expiresAt: typeof session.expires_at === 'number' ? new Date(session.expires_at * 1000).toISOString() : null,
@@ -238,9 +290,10 @@ export function createStripeBillingPortalSessionRequest({ tenant, subscription, 
   };
 }
 
-export async function createStripeBillingPortalSession({ tenant, subscription, env = process.env, fetchImpl = fetch, idempotencyKey, stripeCustomerId } = {}) {
+export async function createStripeBillingPortalSession({ tenant, subscription, env = process.env, fetchImpl = fetch, idempotencyKey, sessionAttempt, stripeCustomerId } = {}) {
   const request = createStripeBillingPortalSessionRequest({ tenant, subscription, env, stripeCustomerId });
-  const result = await postStripeForm(request.endpoint, request.params, { env, fetchImpl, idempotencyKey });
+  const requestIdempotencyKey = idempotencyKey ?? stripeBillingPortalIdempotencyKey({ tenant, subscription, sessionAttempt, stripeCustomerId });
+  const result = await postStripeForm(request.endpoint, request.params, { env, fetchImpl, idempotencyKey: requestIdempotencyKey });
   const session = result.payload;
   return {
     expiresAt: null,

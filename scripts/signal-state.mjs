@@ -7131,6 +7131,7 @@ function appendJob(state, {
   providerCredentialSource,
   providerCredentialVaultRef,
   providerErrorCode,
+  providerIdempotencyKey,
   providerRequestDigest,
   providerResponseDigest,
   providerResponseStatus,
@@ -7168,6 +7169,9 @@ function appendJob(state, {
   }
   if (providerErrorCode !== undefined) {
     job.providerErrorCode = providerErrorCode;
+  }
+  if (providerIdempotencyKey !== undefined) {
+    job.providerIdempotencyKey = providerIdempotencyKey;
   }
   if (providerRequestDigest !== undefined) {
     job.providerRequestDigest = providerRequestDigest;
@@ -13236,14 +13240,17 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
       const plan = findById(state.plans, requireArg(planId, 'plan id', 'payments checkout <tenantId> <planId>'), 'Plan');
       const livePaymentProvider = options.livePaymentProvider === true || options.paymentProviderMode === 'live' || process.env.SIGNAL_PAYMENT_PROVIDER_MODE === 'live';
       const subscription = state.subscriptions?.find((candidate) => candidate.tenantId === tenant.id);
+      state.billingSessions = state.billingSessions ?? [];
+      const sessionAttempt = state.billingSessions.filter((session) => session.tenantId === tenant.id && session.type === 'checkout').length + 1;
       let providerSession = null;
       if (livePaymentProvider) {
         try {
           providerSession = await createStripeCheckoutSession({
             env: options.env ?? process.env,
             fetchImpl: options.fetchImpl,
-            idempotencyKey: options.idempotencyKey ?? `signal-checkout-${tenant.id}-${plan.id}-${Date.now()}`,
+            idempotencyKey: options.idempotencyKey,
             plan,
+            sessionAttempt,
             stripeCustomerId: options.stripeCustomerId,
             subscription,
             tenant,
@@ -13252,7 +13259,6 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
           throw signalErrorFromProviderError(providerError);
         }
       }
-      state.billingSessions = state.billingSessions ?? [];
       const session = {
         id: makeId('bs_checkout'),
         tenantId: tenant.id,
@@ -13268,6 +13274,7 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
         ...(providerSession?.providerCustomerId ? { providerCustomerId: providerSession.providerCustomerId } : {}),
         ...(providerSession?.providerRequestDigest ? { providerRequestDigest: providerSession.providerRequestDigest } : {}),
         ...(providerSession?.providerSessionId ? { providerSessionId: providerSession.providerSessionId } : {}),
+        ...(providerSession?.requestIdempotencyKey ? { providerIdempotencyKey: providerSession.requestIdempotencyKey } : {}),
       };
       state.billingSessions.push(session);
       if (providerSession && subscription) {
@@ -13293,6 +13300,8 @@ export async function createCheckoutSession(tenantId, planId, options = {}) {
         attempts: 1,
         maxAttempts: 5,
         message: providerSession ? `Created live Stripe checkout for ${plan.name}.` : `Prepared local checkout for ${plan.name}.`,
+        ...(providerSession?.requestIdempotencyKey ? { providerIdempotencyKey: providerSession.requestIdempotencyKey } : {}),
+        ...(providerSession?.providerRequestDigest ? { providerRequestDigest: providerSession.providerRequestDigest } : {}),
       });
       return {
         message: `${providerSession ? 'Stripe' : 'Local'} checkout ready for ${tenant.name} on ${plan.name}`,
@@ -13326,13 +13335,16 @@ export async function createBillingPortalSession(tenantId, options = {}) {
         });
       }
       const livePaymentProvider = options.livePaymentProvider === true || options.paymentProviderMode === 'live' || process.env.SIGNAL_PAYMENT_PROVIDER_MODE === 'live';
+      state.billingSessions = state.billingSessions ?? [];
+      const sessionAttempt = state.billingSessions.filter((session) => session.tenantId === tenant.id && session.type === 'portal').length + 1;
       let providerSession = null;
       if (livePaymentProvider) {
         try {
           providerSession = await createStripeBillingPortalSession({
             env: options.env ?? process.env,
             fetchImpl: options.fetchImpl,
-            idempotencyKey: options.idempotencyKey ?? `signal-portal-${tenant.id}-${Date.now()}`,
+            idempotencyKey: options.idempotencyKey,
+            sessionAttempt,
             stripeCustomerId: options.stripeCustomerId,
             subscription,
             tenant,
@@ -13341,7 +13353,6 @@ export async function createBillingPortalSession(tenantId, options = {}) {
           throw signalErrorFromProviderError(providerError);
         }
       }
-      state.billingSessions = state.billingSessions ?? [];
       const session = {
         id: makeId('bs_portal'),
         tenantId: tenant.id,
@@ -13356,6 +13367,7 @@ export async function createBillingPortalSession(tenantId, options = {}) {
         ...(providerSession?.providerCustomerId ? { providerCustomerId: providerSession.providerCustomerId } : {}),
         ...(providerSession?.providerRequestDigest ? { providerRequestDigest: providerSession.providerRequestDigest } : {}),
         ...(providerSession?.providerSessionId ? { providerSessionId: providerSession.providerSessionId } : {}),
+        ...(providerSession?.requestIdempotencyKey ? { providerIdempotencyKey: providerSession.requestIdempotencyKey } : {}),
       };
       state.billingSessions.push(session);
       if (providerSession) {
