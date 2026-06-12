@@ -73,12 +73,20 @@ import {
 import {
   backendReadiness,
 } from './signal-backend-readiness.mjs';
+import {
+  createRateLimiter,
+  requestClientIp,
+} from './signal-api-rate-limit.mjs';
 
 assertApiSecurityConfig(process.env);
 
 const host = process.env.SIGNAL_API_HOST ?? '127.0.0.1';
 const port = Number(process.env.SIGNAL_API_PORT ?? 8787);
 const statePath = resolveStatePath(process.env.SIGNAL_ADMIN_STATE);
+const inviteClaimRateLimiter = createRateLimiter({
+  maxAttempts: Number(process.env.SIGNAL_INVITE_CLAIM_RATE_LIMIT ?? 5),
+  windowMs: Number(process.env.SIGNAL_INVITE_CLAIM_RATE_WINDOW_MS ?? 60 * 60 * 1000),
+});
 const corsHeaders = 'Authorization, Content-Type, Signal-Email-Signature, Stripe-Signature, X-Signal-Actor, X-Signal-Session, X-Twilio-Email-Event-Webhook-Signature, X-Twilio-Email-Event-Webhook-Timestamp';
 
 function configuredCorsOrigins() {
@@ -1127,6 +1135,16 @@ async function route(req, res) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/invites/claim') {
+    const rateLimit = inviteClaimRateLimiter.consume(`invite-claim:${requestClientIp(req)}`);
+    if (!rateLimit.allowed) {
+      throw new SignalStateError('Invite claim rate limit exceeded. Try again later.', {
+        code: 'INVITE_CLAIM_RATE_LIMITED',
+        status: 429,
+        details: {
+          retryAfterSeconds: Math.ceil(rateLimit.retryAfterMs / 1000),
+        },
+      });
+    }
     const body = await readBody(req);
     const result = await claimUserInvite(body, { statePath });
     sendJson(res, 200, {

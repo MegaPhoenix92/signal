@@ -4,7 +4,10 @@ import {
   getActor,
   validateApiSession,
 } from './signal-state.mjs';
-import { verifySessionToken } from './signal-session-token.mjs';
+import {
+  SIGNAL_MIN_SESSION_SECRET_LENGTH,
+  verifySessionToken,
+} from './signal-session-token.mjs';
 
 export const SIGNAL_SESSION_COOKIE_NAME = 'signal_session';
 
@@ -141,6 +144,12 @@ export function assertApiSecurityConfig(env = process.env) {
 
   if (signedSessionRequired(env) && !env.SIGNAL_SESSION_SECRET) {
     throw new Error('SIGNAL_REQUIRE_SIGNED_SESSION=true requires SIGNAL_SESSION_SECRET.');
+  }
+
+  if (env.SIGNAL_SESSION_SECRET && env.SIGNAL_SESSION_SECRET.length < SIGNAL_MIN_SESSION_SECRET_LENGTH) {
+    throw new Error(
+      `SIGNAL_SESSION_SECRET must be at least ${SIGNAL_MIN_SESSION_SECRET_LENGTH} characters.`,
+    );
   }
 
   if (oauthProviderConfigured(env) && !env.SIGNAL_OAUTH_STATE_KEY) {

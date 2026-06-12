@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 
 export const SIGNAL_SESSION_TOKEN_VERSION = 1;
 export const SIGNAL_SESSION_TOKEN_ALG = 'HS256';
+export const SIGNAL_MIN_SESSION_SECRET_LENGTH = 32;
 
 export class SessionTokenError extends Error {
   constructor(message, { code = 'SESSION_TOKEN_ERROR', status = 401, details = {} } = {}) {
@@ -31,6 +32,20 @@ function sessionSecret(env = process.env) {
       status: 412,
       details: { requiredEnv: 'SIGNAL_SESSION_SECRET' },
     });
+  }
+  if (value.length < SIGNAL_MIN_SESSION_SECRET_LENGTH) {
+    throw new SessionTokenError(
+      `SIGNAL_SESSION_SECRET must be at least ${SIGNAL_MIN_SESSION_SECRET_LENGTH} characters.`,
+      {
+        code: 'SESSION_SECRET_TOO_SHORT',
+        status: 412,
+        details: {
+          requiredEnv: 'SIGNAL_SESSION_SECRET',
+          minLength: SIGNAL_MIN_SESSION_SECRET_LENGTH,
+          actualLength: value.length,
+        },
+      },
+    );
   }
   return value;
 }
