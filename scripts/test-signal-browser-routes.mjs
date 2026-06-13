@@ -641,6 +641,27 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assertTextIncludes(workspaceRoute.text, 'Multi-member workspace', 'workspace QA should expose the selected organization model');
   assertTextIncludes(workspaceRoute.text, 'Onboarding readiness', 'workspace QA should expose onboarding readiness counts');
   assertTextIncludes(workspaceRoute.text, 'Invite member', 'workspace route should expose onboarding invitation action for admin sessions');
+  assertTextIncludes(workspaceRoute.text, 'Digestion pipeline', 'workspace route should render pipeline visualization');
+  assertTextIncludes(workspaceRoute.text, 'Signals by type', 'workspace route should render signal type visualization');
+  assertTextIncludes(workspaceRoute.text, 'Account health bands', 'workspace route should render account health visualization');
+  assertTextIncludes(workspaceRoute.text, 'Command', 'workspace route should expose the command palette affordance');
+  await evaluate(client, `(() => {
+    const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Command'));
+    if (!button) {
+      throw new Error('Command palette button missing');
+    }
+    button.click();
+  })()`);
+  const commandPaletteText = await waitForText(client, 'Dashboard audit');
+  assertTextIncludes(commandPaletteText, 'Open admin dashboard', 'command palette should expose admin navigation');
+  assertTextIncludes(commandPaletteText, 'Run provider validation job', 'command palette should expose local CLI commands');
+  await evaluate(client, `(() => {
+    const backdrop = document.querySelector('.command-palette-backdrop');
+    if (!backdrop) {
+      throw new Error('Command palette backdrop missing');
+    }
+    backdrop.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  })()`);
 
   const adminRoute = await navigate(client, `${baseUrl}#admin`, 'Manage users, email flows, and payments locally.');
   assert.equal(adminRoute.snapshot.hash, '#admin');
@@ -648,6 +669,8 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assertTextIncludes(adminRoute.text, 'Readiness checks', 'admin dashboard should render readiness checks');
   assertTextIncludes(adminRoute.text, 'Launch gate go/no-go', 'admin dashboard should render launch gate go/no-go banner');
   assertTextIncludes(adminRoute.text, 'Dashboard calculation audit', 'admin dashboard should render dashboard audit summary');
+  assertTextIncludes(adminRoute.text, 'Signal volume', 'admin dashboard should render signal volume visualization');
+  assertTextIncludes(adminRoute.text, 'Account health bands', 'admin dashboard should render account health visualization');
   assertTextIncludes(adminRoute.text, 'Admin console', 'admin route should render the admin console heading');
   const adminContextDefault = await evaluate(client, `(() => {
     const selector = document.querySelector('#signal-admin-context-tenant-select');
