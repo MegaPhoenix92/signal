@@ -55,6 +55,7 @@ import {
   consumeTokenBucketState,
   createRateLimiter,
   createTokenBucketRateLimiter,
+  normalizeInviteClaimRateLimitEmail,
   requestClientIp,
 } from './signal-api-rate-limit.mjs';
 
@@ -303,9 +304,22 @@ test('session token signing rejects short SIGNAL_SESSION_SECRET values', () => {
 
 test('invite claim rate limiter blocks repeated attempts per client IP', () => {
   const limiter = createRateLimiter({ maxAttempts: 2, windowMs: 60_000 });
-  const first = limiter.consume('invite-claim:127.0.0.1');
-  const second = limiter.consume('invite-claim:127.0.0.1');
-  const third = limiter.consume('invite-claim:127.0.0.1');
+  const first = limiter.consume('invite-claim:ip:127.0.0.1');
+  const second = limiter.consume('invite-claim:ip:127.0.0.1');
+  const third = limiter.consume('invite-claim:ip:127.0.0.1');
+  assert.equal(first.allowed, true);
+  assert.equal(second.allowed, true);
+  assert.equal(third.allowed, false);
+  assert(third.retryAfterMs > 0);
+});
+
+test('invite claim rate limiter blocks repeated attempts per normalized email', () => {
+  const limiter = createRateLimiter({ maxAttempts: 2, windowMs: 60_000 });
+  const email = normalizeInviteClaimRateLimitEmail('Rate.Limit@Acme.Example');
+  assert.equal(email, 'rate.limit@acme.example');
+  const first = limiter.consume(`invite-claim:email:${email}`);
+  const second = limiter.consume(`invite-claim:email:${email}`);
+  const third = limiter.consume(`invite-claim:email:${email}`);
   assert.equal(first.allowed, true);
   assert.equal(second.allowed, true);
   assert.equal(third.allowed, false);
@@ -343,12 +357,32 @@ test('shared token bucket adapter enforces API limits across limiter instances',
   assert.equal(afterRefill.allowed, true);
 });
 
-test('requestClientIp prefers the first X-Forwarded-For address', () => {
+test('requestClientIp ignores spoofed X-Forwarded-For unless the socket peer is trusted', () => {
   const ip = requestClientIp({
     headers: { 'x-forwarded-for': '203.0.113.10, 198.51.100.20' },
     socket: { remoteAddress: '127.0.0.1' },
   });
+  assert.equal(ip, '127.0.0.1');
+});
+
+test('requestClientIp uses the rightmost untrusted X-Forwarded-For hop behind trusted proxies', () => {
+  const ip = requestClientIp({
+    headers: { 'x-forwarded-for': '203.0.113.10, 198.51.100.20' },
+    socket: { remoteAddress: '10.0.0.5' },
+  }, {
+    env: { SIGNAL_TRUSTED_PROXY: '10.0.0.5,198.51.100.20' },
+  });
   assert.equal(ip, '203.0.113.10');
+});
+
+test('requestClientIp falls back to socket IP when X-Forwarded-For hop is not a valid address', () => {
+  const ip = requestClientIp({
+    headers: { 'x-forwarded-for': 'uid-rotating-bucket' },
+    socket: { remoteAddress: '10.0.0.5' },
+  }, {
+    env: { SIGNAL_TRUSTED_PROXY: '10.0.0.5' },
+  });
+  assert.equal(ip, '10.0.0.5');
 });
 
 test('assertApiSecurityConfig requires OAuth state key when provider clients are configured', () => {
@@ -1071,7 +1105,10 @@ test('API rate limiter returns 429 with Retry-After and health is exempt', async
 
   const second = await fetch(`${api.apiBaseUrl}/api/registration`, {
     body,
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Signal-Actor': 'usr_rotated_actor',
+    },
     method: 'POST',
   });
   const payload = await parseJsonResponse(second);
@@ -1729,6 +1766,47 @@ test('Outlook lifecycle webhook dedups missed and subscriptionRemoved replays', 
       assert.equal(jobs[0].providerIdempotencyKey, `outlook.lifecycle.outlook-sub-${lifecycleEvent}.${lifecycleEvent}`);
     });
   }
+});
+
+test('POST /api/invites/claim returns 429 after repeated attempts for the same email', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-invite-claim-email-rate-limit-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: {
+      SIGNAL_INVITE_CLAIM_RATE_LIMIT: '2',
+      SIGNAL_INVITE_CLAIM_RATE_WINDOW_MS: '60000',
+    },
+  });
+
+  const requestClaim = (claimCode) => fetch(`${api.apiBaseUrl}/api/invites/claim`, {
+    body: JSON.stringify({
+      claimCode,
+      email: 'rate-limit-email@acme.example',
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+
+  const first = await requestClaim('invalid-claim-code-1');
+  const second = await requestClaim('invalid-claim-code-2');
+  const third = await requestClaim('invalid-claim-code-3');
+  const thirdPayload = await parseJsonResponse(third);
+
+  assert.equal(first.status, 404);
+  assert.equal(second.status, 404);
+  assert.equal(third.status, 429);
+  assert.equal(thirdPayload.code, 'INVITE_CLAIM_RATE_LIMITED');
 });
 
 test('POST /api/invites/claim returns 429 after repeated attempts from the same IP', async (t) => {

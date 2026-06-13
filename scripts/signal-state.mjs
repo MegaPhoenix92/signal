@@ -672,7 +672,7 @@ function narrowMemberScopedState(state, scoped, actor, {
   const signalTenantIds = new Map((state.signals ?? []).map((signal) => [signal.id, signal.tenantId]));
   const userTenantIds = new Map((state.users ?? []).map((user) => [user.id, user.tenantId]));
   const isAdminTenant = (tenantId) => Boolean(tenantId && adminTenantIds.has(tenantId));
-  const isKnownScopedTenant = (tenantId) => !tenantId || tenantIds.has(tenantId);
+  const isKnownScopedTenant = (tenantId) => Boolean(tenantId) && tenantIds.has(tenantId);
   const keepTenantRecord = (tenantId, memberPredicate) => {
     if (!isKnownScopedTenant(tenantId)) {
       return false;
@@ -794,7 +794,7 @@ export function scopeStateForActor(state, actorOrUserId) {
   const adminTenantIds = adminTenantIdsForActor(state, actor, tenantIds);
   const memberTenantIds = new Set([...tenantIds].filter((tenantId) => !adminTenantIds.has(tenantId)));
   const scoped = structuredClone(state);
-  const belongsToTenant = (item) => !item?.tenantId || tenantIds.has(item.tenantId);
+  const belongsToTenant = (item) => Boolean(item?.tenantId) && tenantIds.has(item.tenantId);
   scoped.tenants = (state.tenants ?? []).filter((item) => tenantIds.has(item.id));
   scoped.users = (state.users ?? []).filter(belongsToTenant);
   const userIds = new Set(scoped.users.map((item) => item.id));
@@ -840,7 +840,7 @@ export function scopeStateForActor(state, actorOrUserId) {
   scoped.jobs = (state.jobs ?? []).filter(belongsToTenant);
   scoped.deadLetter = (state.deadLetter ?? []).filter(belongsToTenant);
   scoped.apiSessions = (state.apiSessions ?? []).filter((item) => userIds.has(item.userId));
-  scoped.webhookEvents = (state.webhookEvents ?? []).filter((item) => !item.tenantId || tenantIds.has(item.tenantId));
+  scoped.webhookEvents = (state.webhookEvents ?? []).filter((item) => Boolean(item?.tenantId) && tenantIds.has(item.tenantId));
   if (memberTenantIds.size > 0) {
     narrowMemberScopedState(state, scoped, actor, {
       adminTenantIds,
@@ -2263,8 +2263,65 @@ export function redactClientStateSecrets(state) {
   return redacted;
 }
 
+const TENANT_SCOPED_COLLECTIONS = [
+  'accountActions',
+  'accountEvents',
+  'accountProfiles',
+  'billingOverrides',
+  'billingSessions',
+  'dataRequests',
+  'deadLetter',
+  'emailDeliveryMessages',
+  'emailFlows',
+  'entitlements',
+  'flowRuns',
+  'governancePolicies',
+  'incidentNotes',
+  'invites',
+  'invoices',
+  'jobs',
+  'lifecycleNotices',
+  'mailboxConnectionSessions',
+  'mailboxes',
+  'memberships',
+  'modelGovernancePolicies',
+  'notificationDigestRuns',
+  'notificationEvents',
+  'notificationPreferences',
+  'paymentEvents',
+  'redactionRules',
+  'routingRules',
+  'signalFeedback',
+  'signalHandoffs',
+  'signalQualitySettings',
+  'signals',
+  'sourceMessages',
+  'subscriptions',
+  'suppressionRules',
+  'users',
+  'webhookEvents',
+];
+
+function tenantScopedRecordIssues(state) {
+  const tenantIds = new Set((state.tenants ?? []).map((tenant) => tenant.id));
+  const orphans = [];
+  for (const collection of TENANT_SCOPED_COLLECTIONS) {
+    for (const item of state[collection] ?? []) {
+      if (!item?.tenantId || !tenantIds.has(item.tenantId)) {
+        orphans.push({
+          collection,
+          id: item?.id ?? null,
+          tenantId: item?.tenantId ?? null,
+        });
+      }
+    }
+  }
+  return orphans;
+}
+
 export function doctor(state) {
   const sensitivePaths = sensitiveKeyPaths(state);
+  const tenantScopedOrphans = tenantScopedRecordIssues(state);
   const checks = [
     {
       id: 'active_admin',
@@ -2289,6 +2346,12 @@ export function doctor(state) {
         (state.users ?? []).some((user) => user.id === tenant.ownerUserId && user.tenantId === tenant.id) &&
         (state.users ?? []).some((user) => user.id === tenant.billingOwnerUserId && user.tenantId === tenant.id)),
       message: 'Every tenant has a workspace owner and billing owner inside the tenant.',
+    },
+    {
+      id: 'tenant_scoped_records',
+      ok: tenantScopedOrphans.length === 0,
+      message: 'Tenant-scoped collections require a valid tenantId on every record.',
+      details: tenantScopedOrphans.length > 0 ? { orphans: tenantScopedOrphans } : undefined,
     },
     {
       id: 'tenant_memberships',

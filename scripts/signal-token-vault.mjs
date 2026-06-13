@@ -191,12 +191,8 @@ function ensureVaultCryptoMeta(vault) {
   return vault;
 }
 
-function nextEncryptionIv(vault, keyId) {
-  vault.meta.encryptionCounter += 1;
-  const iv = Buffer.alloc(12);
-  crypto.createHash('sha256').update(String(keyId), 'utf8').digest().subarray(0, 4).copy(iv, 0);
-  iv.writeBigUInt64BE(BigInt(vault.meta.encryptionCounter), 4);
-  return iv;
+function nextEncryptionIv() {
+  return crypto.randomBytes(12);
 }
 
 function deriveKeyForEncryptedRecord(entry, encrypted, vaultMeta) {
@@ -234,7 +230,7 @@ function isExpiredOrNearExpiry(expiresAt, { nowMs = Date.now(), skewMs = default
 function encryptJson(value, { env = process.env, vault } = {}) {
   ensureVaultCryptoMeta(vault);
   const key = currentKey(env, vault.meta);
-  const iv = nextEncryptionIv(vault, key.id);
+  const iv = nextEncryptionIv();
   const cipher = crypto.createCipheriv(cipherAlgorithm, key.key, iv);
   const plaintext = Buffer.from(JSON.stringify(value), 'utf8');
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);

@@ -7,8 +7,10 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   bootstrapState,
+  doctor,
   loadState,
   registerTenantWorkspace,
+  saveState,
   setUserRole,
   scopeStateForActor,
   switchSession,
@@ -110,4 +112,52 @@ test('member state scope hides same-tenant peer mailbox source and signal record
   assert(adminState.sourceMessages.some((message) => message.mailboxId === 'mbx_gmail_sales'), 'admin should retain tenant-wide source visibility');
   assert(adminState.signals.some((signal) => signal.ownerUserId === 'usr_sales'), 'admin should retain tenant-wide signal visibility');
   assert.equal(adminState.users.find((user) => user.id === 'usr_sales')?.email, 'mia@acme.example');
+});
+
+test('tenant scope fails closed on records with missing tenantId and doctor reports orphans', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-tenant-scope-fail-closed-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const tenantB = await registerTenant(statePath, {
+    adminEmail: 'scope.admin@epsilon.example',
+    domain: 'epsilon.example',
+    name: 'Epsilon Labs',
+  });
+  const state = await loadState({ statePath });
+  state.webhookEvents = [
+    ...(state.webhookEvents ?? []),
+    {
+      id: 'wh_orphan_missing_tenant',
+      provider: 'stripe',
+      eventType: 'invoice.paid',
+      accepted: true,
+      receivedAt: '2026-06-03T00:07:00.000Z',
+      status: 200,
+    },
+    {
+      id: 'wh_orphan_unknown_tenant',
+      provider: 'gmail',
+      eventType: 'history',
+      accepted: false,
+      receivedAt: '2026-06-03T00:08:00.000Z',
+      status: 403,
+      tenantId: 'tenant_missing',
+    },
+  ];
+  await saveState(state, { statePath });
+
+  const scoped = scopeStateForActor(state, tenantB.actor.id);
+  assert.equal(scoped.webhookEvents.some((event) => event.id === 'wh_orphan_missing_tenant'), false);
+  assert.equal(scoped.webhookEvents.some((event) => event.id === 'wh_orphan_unknown_tenant'), false);
+  assert.equal(scoped.webhookEvents.some((event) => event.id === 'wh_seed_stripe_accepted'), false);
+
+  const report = doctor(state);
+  const tenantScopedCheck = report.checks.find((check) => check.id === 'tenant_scoped_records');
+  assert(tenantScopedCheck);
+  assert.equal(tenantScopedCheck.ok, false);
+  assert.equal(tenantScopedCheck.details?.orphans?.length, 2);
 });

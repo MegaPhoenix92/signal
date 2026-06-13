@@ -260,7 +260,6 @@ test('token vault decrypts legacy sha256-v1 records and increments hkdf encrypti
   const hkdfVault = JSON.parse(await fs.readFile(vaultPath, 'utf8'));
   assert.equal(hkdfVault.meta.kdfVersion, 'hkdf-v1');
   assert.ok(hkdfVault.meta.kdfSalt);
-  assert.equal(hkdfVault.meta.encryptionCounter, 2);
   const hkdfRecords = hkdfVault.records.filter((record) => record.encrypted.kdf === 'hkdf-v1');
   assert.equal(hkdfRecords.length, 2);
   assert.notEqual(hkdfRecords[0].encrypted.iv, hkdfRecords[1].encrypted.iv);

@@ -87,6 +87,7 @@ import {
 import {
   createApiRateLimiter,
   createRateLimiter,
+  normalizeInviteClaimRateLimitEmail,
   requestClientIp,
 } from './signal-api-rate-limit.mjs';
 
@@ -158,10 +159,10 @@ function rateLimitKind(pathname) {
 
 function rateLimitIdentity(req, kind) {
   const token = requestSessionToken(req, {});
-  const actor = req.headers['x-signal-actor']?.toString();
+  const actor = kind === 'authenticated' ? req.headers['x-signal-actor']?.toString() : '';
   return [
     kind,
-    requestClientIp(req),
+    requestClientIp(req, { env: process.env }),
     token ? `session:${token.slice(0, 32)}` : '',
     actor ? `actor:${actor}` : '',
   ].filter(Boolean).join('|');
@@ -1661,17 +1662,29 @@ async function route(req, res) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/invites/claim') {
-    const rateLimit = inviteClaimRateLimiter.consume(`invite-claim:${requestClientIp(req)}`);
-    if (!rateLimit.allowed) {
+    const body = await readBody(req);
+    const clientIp = requestClientIp(req, { env: process.env });
+    const inviteEmail = normalizeInviteClaimRateLimitEmail(body?.email);
+    const ipRateLimit = inviteClaimRateLimiter.consume(`invite-claim:ip:${clientIp}`);
+    if (!ipRateLimit.allowed) {
       throw new SignalStateError('Invite claim rate limit exceeded. Try again later.', {
         code: 'INVITE_CLAIM_RATE_LIMITED',
         status: 429,
         details: {
-          retryAfterSeconds: Math.ceil(rateLimit.retryAfterMs / 1000),
+          retryAfterSeconds: Math.ceil(ipRateLimit.retryAfterMs / 1000),
         },
       });
     }
-    const body = await readBody(req);
+    const emailRateLimit = inviteClaimRateLimiter.consume(`invite-claim:email:${inviteEmail}`);
+    if (!emailRateLimit.allowed) {
+      throw new SignalStateError('Invite claim rate limit exceeded. Try again later.', {
+        code: 'INVITE_CLAIM_RATE_LIMITED',
+        status: 429,
+        details: {
+          retryAfterSeconds: Math.ceil(emailRateLimit.retryAfterMs / 1000),
+        },
+      });
+    }
     const result = await claimUserInvite(body, { statePath });
     const payload = statePayloadForActor(result.state, result.actor.id);
     sendJson(res, 200, {
