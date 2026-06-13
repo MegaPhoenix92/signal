@@ -372,7 +372,7 @@ const commands = [
   ['quality', 'Inspect detector thresholds, suppression rules, and feedback; run: quality threshold|suppress|rule'],
   ['models', 'Inspect tenant data digestion and model-learning governance; run: models policy'],
   ['governance', 'Inspect retention, redaction, export/delete requests, and incidents; run: governance policy|redact|request|incident'],
-  ['integrations', 'Inspect Gmail, Outlook, SendGrid, and Stripe provider readiness; run: integrations validate-sandbox|evidence-export|evidence-import|run-scheduled|schedule'],
+  ['integrations', 'Inspect Gmail, Outlook, SendGrid, and Stripe provider readiness; run: integrations validate-sandbox|refresh-evidence|evidence-export|evidence-import|run-scheduled|schedule'],
   ['accounts', 'List account health, timeline events, and next actions; run: accounts review|timeline|action'],
   ['notifications', 'List alert events, delivery, and preferences, or run: notifications preference|status|digest|delivery-status|webhook|sendgrid-webhook-signed|unsubscribe|mute-account|mute-type'],
   ['signals', 'List signals, or run: signals assign|status|feedback|handoff|handoff-status'],
@@ -905,10 +905,16 @@ async function importIntegrationsEvidence() {
   );
 }
 
-async function runScheduledIntegrationsValidation() {
+async function runScheduledIntegrationsValidation({ forceRun = force } = {}) {
+  if (saveEvidencePath && dryRun) {
+    throw new SignalStateError('--save-evidence requires a recorded validation run; omit --dry-run.', {
+      code: 'ARG_INVALID',
+      details: { usage: 'integrations refresh-evidence --save-evidence <evidence.json> [--json]' },
+    });
+  }
   const state = await loadState();
   const dueSchedules = providerValidationSchedulesDue(state);
-  if (!force && dueSchedules.length === 0) {
+  if (!forceRun && dueSchedules.length === 0) {
     emit(
       wantsJson
         ? {
@@ -926,13 +932,25 @@ async function runScheduledIntegrationsValidation() {
 
   const sandbox = await validateProviderSandbox();
   const recorded = dryRun ? null : await recordProviderSandboxValidation(sandbox, mutationOptions);
+  let evidence = null;
+  if (saveEvidencePath && recorded) {
+    const exported = await exportProviderSandboxEvidence(recorded.details.id, mutationOptions);
+    const outputPath = await writeJsonFile(saveEvidencePath, exported.details.artifact, 'integrations refresh-evidence --save-evidence <evidence.json>');
+    evidence = {
+      artifactDigest: exported.details.artifactDigest,
+      path: outputPath,
+      reportDigest: exported.details.reportDigest,
+      runId: exported.details.id,
+    };
+  }
   const refreshedState = recorded?.state ?? await loadState();
   emit(
     wantsJson
       ? {
+          evidence,
           ok: sandbox.ok,
           dueSchedules,
-          forced: force,
+          forced: forceRun,
           recorded: recorded?.details ?? null,
           sandbox,
           skipped: false,
@@ -940,9 +958,10 @@ async function runScheduledIntegrationsValidation() {
         }
       : [
           `Scheduled provider validation: ${sandbox.ok ? 'PASSED' : 'INCOMPLETE'}`,
-          `Schedules: ${force ? 'forced' : `${dueSchedules.length} due`}`,
+          `Schedules: ${forceRun ? 'forced' : `${dueSchedules.length} due`}`,
           recorded ? `Recorded run: ${recorded.details.id} (${recorded.details.status})` : 'Dry run: not recorded',
-        ].join('\n'),
+          evidence ? `Evidence saved: ${evidence.path} (${evidence.artifactDigest})` : null,
+        ].filter(Boolean).join('\n'),
   );
 }
 
@@ -1297,7 +1316,7 @@ async function listBackendHandoff() {
   const backend = backendReadiness({ env, statePath });
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
-  const operations = operationsHealthReport(state, { backend, statePath });
+  const operations = operationsHealthReport(state, { backend, env, statePath });
   const productionDrill = productionOperationsDrillReport(state, {
     backend,
     env,
@@ -1344,7 +1363,7 @@ async function listBackendCutover() {
   const statePath = resolveStatePath();
   const backend = backendReadiness({ env, statePath });
   const provider = providerReadiness(env);
-  const operations = operationsHealthReport(state, { backend, statePath });
+  const operations = operationsHealthReport(state, { backend, env, statePath });
   const readiness = productReadinessReport(state, { backend, provider });
   const productionDrill = productionOperationsDrillReport(state, {
     backend,
@@ -1391,7 +1410,7 @@ async function listSchedulerHandoff() {
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
   const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
-  const operations = operationsHealthReport(state, { backend, statePath });
+  const operations = operationsHealthReport(state, { backend, env, statePath });
   const productionDrill = productionOperationsDrillReport(state, {
     backend,
     env,
@@ -1473,7 +1492,7 @@ async function listCompletionAudit() {
   const digestionPipeline = signalDigestionPipelineReport(state, { backend, statePath });
   const onboarding = onboardingReadinessReport(state, { backend, statePath });
   const tenantIsolation = tenantIsolationAuditReport(state, { backend, statePath });
-  const operations = operationsHealthReport(state, { backend, statePath });
+  const operations = operationsHealthReport(state, { backend, env, statePath });
   const lifecyclePlaybook = lifecyclePlaybookReport(state, { backend, statePath });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
   const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
@@ -1503,6 +1522,7 @@ async function listCompletionAudit() {
     backend,
     dashboardAudit,
     digestionPipeline,
+    env,
     lifecyclePlaybook,
     onboarding,
     operations,
@@ -1586,7 +1606,7 @@ async function listAgentHandoff() {
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
   const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
-  const operations = operationsHealthReport(state, { backend, statePath });
+  const operations = operationsHealthReport(state, { backend, env, statePath });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
   const productionPlan = productionSetupPlanReport(state, {
     backend,
@@ -1752,7 +1772,7 @@ async function listOperationsHealth() {
   const state = await loadState();
   const { env, source: envSource } = await readinessEnv();
   const backend = backendReadiness({ env, statePath: resolveStatePath() });
-  const operations = operationsHealthReport(state, { backend, statePath: resolveStatePath() });
+  const operations = operationsHealthReport(state, { backend, env, statePath: resolveStatePath() });
   const rows = operations.webhooks.map((row) => ({
     channel: row.channel,
     status: row.status,
@@ -1793,7 +1813,7 @@ async function listEmailHandoff() {
   const readiness = productReadinessReport(state, { backend, provider });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
   const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
-  const operations = operationsHealthReport(state, { backend, statePath });
+  const operations = operationsHealthReport(state, { backend, env, statePath });
   const lifecyclePlaybook = lifecyclePlaybookReport(state, { backend, statePath });
   const handoff = emailHandoffReport(state, {
     backend,
@@ -1913,7 +1933,7 @@ async function listProductionDrill() {
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
   const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
-  const operations = operationsHealthReport(state, { backend, statePath: resolveStatePath() });
+  const operations = operationsHealthReport(state, { backend, env, statePath: resolveStatePath() });
   const drill = productionOperationsDrillReport(state, { backend, env, launchGate, operations, provider, readiness });
   const rows = drill.rows.map((row) => ({
     area: row.area,
@@ -1944,7 +1964,7 @@ async function listProductionEnv() {
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
   const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
-  const operations = operationsHealthReport(state, { backend, statePath: resolveStatePath() });
+  const operations = operationsHealthReport(state, { backend, env, statePath: resolveStatePath() });
   const drill = productionOperationsDrillReport(state, { backend, env, launchGate, operations, provider, readiness });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
   const plan = productionSetupPlanReport(state, {
@@ -1995,7 +2015,7 @@ async function listProductionPlan() {
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
   const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
-  const operations = operationsHealthReport(state, { backend, statePath: resolveStatePath() });
+  const operations = operationsHealthReport(state, { backend, env, statePath: resolveStatePath() });
   const drill = productionOperationsDrillReport(state, { backend, env, launchGate, operations, provider, readiness });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
   const plan = productionSetupPlanReport(state, {
@@ -2103,12 +2123,13 @@ async function listQaAnswers() {
   const readiness = productReadinessReport(state, { backend, provider });
   const dashboardAudit = dashboardAuditReport(state, { backend, statePath: resolveStatePath() });
   const onboarding = onboardingReadinessReport(state, { backend, statePath: resolveStatePath() });
-  const operations = operationsHealthReport(state, { backend, statePath: resolveStatePath() });
+  const operations = operationsHealthReport(state, { backend, env, statePath: resolveStatePath() });
   const lifecyclePlaybook = lifecyclePlaybookReport(state, { backend, statePath: resolveStatePath() });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
   const qa = qaAnswersReport(state, {
     backend,
     dashboardAudit,
+    env,
     lifecyclePlaybook,
     onboarding,
     operations,
@@ -2611,6 +2632,7 @@ async function run() {
         '  npm run admin -- integrations evidence-export latest ./signal-provider-evidence.json --json',
         '  npm run admin -- integrations evidence-import ./signal-provider-evidence.json --json',
         '  npm run admin -- integrations validate-sandbox --dry-run --json',
+        '  npm run admin -- integrations refresh-evidence --save-evidence ./signal-provider-evidence.json --json',
         '  npm run admin -- integrations run-scheduled --json',
         '  npm run admin -- integrations run-scheduled --force --json',
         '  npm run admin -- integrations schedule stripe weekly --json',
@@ -3212,6 +3234,10 @@ async function run() {
       }
       if (subcommand === 'run-scheduled') {
         await runScheduledIntegrationsValidation();
+        return;
+      }
+      if (subcommand === 'refresh-evidence') {
+        await runScheduledIntegrationsValidation({ forceRun: true });
         return;
       }
       if (subcommand === 'schedule') {

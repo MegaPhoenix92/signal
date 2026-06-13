@@ -119,6 +119,12 @@ Run sandbox validation and save sanitized evidence:
 npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json
 ```
 
+Refresh scheduled sandbox evidence explicitly before launch or after a stale/blocked report:
+
+```bash
+npm run admin -- integrations refresh-evidence --save-evidence ./signal-provider-evidence.json --json
+```
+
 Import or verify evidence when moving it between environments:
 
 ```bash
@@ -130,9 +136,19 @@ Proof:
 
 ```bash
 npm run admin -- provider-launch --env-file ./.env.production --json
+npm run admin -- launch-gate --env-file ./.env.production --json
+npm run admin -- operations-health --env-file ./.env.production --json
+npm run admin -- doctor --json
 ```
 
-Expected: `launch.summary.readyProviders` is `5/5`, provider sandbox statuses are passed where required, and no raw credential values are serialized into state or evidence.
+Expected: `launch.summary.readyProviders` is `5/5`, provider sandbox statuses are passed where required, freshness blockers are empty, and no raw credential values are serialized into state or evidence.
+
+Freshness failure playbook:
+
+- `sandbox_evidence_missing`: run `integrations refresh-evidence --save-evidence`, then rerun `provider-launch` and `launch-gate`.
+- `sandbox_evidence_not_passed`: inspect the provider rows for `missingRequired` or failed checks, rotate/fix the sandbox credential, then rerun the refresh command.
+- `sandbox_evidence_stale` or `provider_validation_schedule_overdue`: run `integrations refresh-evidence --save-evidence`; if it stays overdue, verify `SIGNAL_PROVIDER_VALIDATION_SCHEDULER=signal-scheduler` and the managed scheduler heartbeat.
+- `provider_validation_latest_evidence` fails in `doctor`: the latest saved run is blocked or failed; do not package launch evidence until a passed run replaces it.
 
 ## 4a. Rehearse Stripe billing exception handling
 

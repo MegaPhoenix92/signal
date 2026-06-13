@@ -858,7 +858,9 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     titleize(row.status),
     titleize(row.owner),
     row.configurationReady ? 'Configured' : `${row.missingEnv.length} env missing`,
-    row.sandboxRequired ? titleize(row.sandboxStatus) : 'Not required',
+    row.sandboxRequired
+      ? `${titleize(row.sandboxStatus)}${row.freshnessBlockers.length ? ` · ${row.freshnessBlockers.length} freshness` : ''}`
+      : 'Not required',
     row.launchCommands[0] ?? row.evidenceCommands[0] ?? '-',
   ]) ?? [];
   const providerHandoffRows = providerHandoff?.actions.map((row) => [
@@ -2310,7 +2312,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                     row.localAgentCommand,
                   ])}
                 />
-                <CommandStrip commands={['npm run admin -- provider-handoff --json', 'npm run admin -- provider-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/provider-handoff', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations run-scheduled --force --json', 'npm run admin -- payment-lifecycle --env-file ./.env.production --json']} />
+                <CommandStrip commands={['npm run admin -- provider-handoff --json', 'npm run admin -- provider-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/provider-handoff', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'npm run admin -- integrations refresh-evidence --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations run-scheduled --force --json', 'npm run admin -- payment-lifecycle --env-file ./.env.production --json']} />
               </article>
             ) : (
               <ReportLoadingPanel icon={Radar} title="Provider handoff" wide />
@@ -2380,7 +2382,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                     ])
                   : [['No schedules', '-', '-', '-', '-']]}
               />
-              <CommandStrip commands={['npm run admin -- integrations run-scheduled --json', 'npm run admin -- integrations run-scheduled --force --json', 'npm run admin -- integrations schedule stripe weekly --json', 'curl -X POST http://127.0.0.1:8787/api/integrations/scheduled -d \'{"force":true}\'']} />
+              <CommandStrip commands={['npm run admin -- integrations run-scheduled --json', 'npm run admin -- integrations refresh-evidence --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations run-scheduled --force --json', 'npm run admin -- integrations schedule stripe weekly --json', 'curl -X POST http://127.0.0.1:8787/api/integrations/scheduled -d \'{"force":true}\'']} />
             </article>
             <article className="ops-panel">
               <PanelHead
@@ -2438,7 +2440,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                     ])
                   : [['No recorded runs', '-', '-', '-', '-']]}
               />
-              <CommandStrip commands={['npm run admin -- integrations validate-sandbox --json', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations evidence-export latest ./signal-provider-evidence.json --json', 'npm run admin -- integrations evidence-import ./signal-provider-evidence.json --json', 'curl -X POST http://127.0.0.1:8787/api/integrations/sandbox']} />
+              <CommandStrip commands={['npm run admin -- integrations validate-sandbox --json', 'npm run admin -- integrations refresh-evidence --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations evidence-export latest ./signal-provider-evidence.json --json', 'npm run admin -- integrations evidence-import ./signal-provider-evidence.json --json', 'curl -X POST http://127.0.0.1:8787/api/integrations/sandbox']} />
             </article>
           </section>
         )}
@@ -2786,7 +2788,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   row.latestEvidenceAt ? `${new Date(row.latestEvidenceAt).toLocaleString()} · ${row.latestEvidenceDigest ?? row.latestEvidenceRunId ?? 'recorded'}` : 'No saved provider evidence',
                 ])}
               />
-              <CommandStrip commands={['npm run admin -- provider-launch --json', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/provider-launch', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- mailboxes watch mbx_gmail_sales --live-provider', 'npm run admin -- notifications digest tenant_demo --live-provider', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>']} />
+              <CommandStrip commands={['npm run admin -- provider-launch --json', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/provider-launch', 'npm run admin -- integrations refresh-evidence --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- mailboxes watch mbx_gmail_sales --live-provider', 'npm run admin -- notifications digest tenant_demo --live-provider', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>']} />
             </article>
             ) : (
               <ReportLoadingPanel icon={ShieldCheck} title="Provider launch matrix" wide />
@@ -2995,6 +2997,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   <CheckItem ok={operationsHealth.ok} label={operationsHealth.ok ? 'Webhook channels, provider backoff, worker queues, lifecycle notices, outbound email, and billing events are locally monitored.' : `${operationsHealth.issues.length} operations health issue needs review.`} />
                   <CheckItem ok={operationsHealth.summary.activeBackoffs === 0} label={operationsHealth.summary.activeBackoffs === 0 ? 'No active provider retry/backoff window is blocking sync or watch processing.' : `${operationsHealth.summary.activeBackoffs} active provider retry/backoff window needs attention.`} />
                   <CheckItem ok={operationsHealth.summary.failedJobs === 0} label={operationsHealth.summary.failedJobs === 0 ? 'No worker queue has failed jobs.' : `${operationsHealth.summary.failedJobs} failed worker job needs retry or drain handling.`} />
+                  <CheckItem ok={(operationsHealth.summary.freshnessBlocked ?? 0) === 0} label={(operationsHealth.summary.freshnessBlocked ?? 0) === 0 ? 'Provider evidence freshness has no active blockers.' : `${operationsHealth.summary.freshnessBlocked} provider evidence freshness blocker${operationsHealth.summary.freshnessBlocked === 1 ? '' : 's'} need refresh.`} />
                   <CheckItem ok={operationsHealth.productionReady} label={operationsHealth.productionReady ? 'Production operations monitoring is ready.' : operationsHealth.recommendation.productionGuardrail} />
                 </div>
                 <AdminTable
@@ -3017,7 +3020,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   columns={['Lifecycle', 'Status', 'Open', 'Critical', 'Latest']}
                   rows={operationsLifecycleRows}
                 />
-                <CommandStrip commands={['npm run admin -- operations-health --json', 'curl http://127.0.0.1:8787/api/operations-health', 'npm run admin -- jobs run outbound_email --limit 1', 'npm run admin -- jobs drain billing_webhook', 'npm run admin -- integrations run-scheduled --json']} />
+                <CommandStrip commands={['npm run admin -- operations-health --json', 'curl http://127.0.0.1:8787/api/operations-health', 'npm run admin -- integrations refresh-evidence --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- jobs run outbound_email --limit 1', 'npm run admin -- jobs drain billing_webhook', 'npm run admin -- integrations run-scheduled --json']} />
               </article>
             ) : (
               <ReportLoadingPanel icon={Activity} title="Webhook and rate-limit health" />
@@ -3046,7 +3049,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   row.blocker,
                 ])}
               />
-              <CommandStrip commands={['npm run admin -- launch-gate --json', 'npm run admin -- launch-gate --env-file ./.env.production --json', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json', 'npm run admin -- launch-gate verify-package ./signal-launch-evidence.json --json', 'npm run admin -- backend --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/launch-gate', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'SIGNAL_TENANT_ISOLATION_MODE=rls npm run admin -- backend --json', 'SIGNAL_JOB_SCHEDULER=signal-scheduler npm run scheduler']} />
+              <CommandStrip commands={['npm run admin -- launch-gate --json', 'npm run admin -- launch-gate --env-file ./.env.production --json', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json', 'npm run admin -- launch-gate verify-package ./signal-launch-evidence.json --json', 'npm run admin -- backend --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/launch-gate', 'npm run admin -- integrations refresh-evidence --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'SIGNAL_TENANT_ISOLATION_MODE=rls npm run admin -- backend --json', 'SIGNAL_JOB_SCHEDULER=signal-scheduler npm run scheduler']} />
             </article>
             {productionEnv ? (
               <article className="ops-panel">

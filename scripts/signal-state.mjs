@@ -1813,6 +1813,7 @@ function lifecycleHealth(state) {
 
 export function operationsHealthReport(state, {
   backend = null,
+  env = process.env,
   statePath = resolveStatePath(),
 } = {}) {
   const summary = summarizeState(state, statePath);
@@ -1826,6 +1827,7 @@ export function operationsHealthReport(state, {
   const queues = queueHealthRows(state);
   const rateLimits = providerBackoffRows(state);
   const lifecycle = lifecycleHealth(state);
+  const freshness = launchFreshnessReport(state, { backend, env, statePath });
   const blockingQueues = new Set(['billing_webhook', 'outbound_email']);
   const failedQueues = queues.filter((queue) => (queue.failed > 0 || queue.deadLetter > 0) && blockingQueues.has(queue.queue));
   const failedDeliveries = (state.emailDeliveryMessages ?? []).filter((message) => ['failed', 'bounced'].includes(message.status));
@@ -1838,12 +1840,14 @@ export function operationsHealthReport(state, {
     ...failedDeliveries.map((message) => `outbound_email: ${message.id} is ${message.status}`),
     ...activeBackoffs.map((row) => `${row.kind}:${row.targetId} backoff until ${row.retryAfterAt}`),
     ...criticalLifecycle.map((row) => `${row.category}: ${row.critical} critical open lifecycle notice(s)`),
+    ...freshness.blockers.map((blocker) => `freshness: ${blocker.message}`),
   ];
   return {
     generatedAt: new Date().toISOString(),
     ok: issues.length === 0,
-    productionReady: Boolean(backendBoundary.productionReady && backendBoundary.schedulerReady),
+    productionReady: Boolean(backendBoundary.productionReady && backendBoundary.schedulerReady && freshness.blockers.length === 0),
     backend: backendBoundary,
+    freshness,
     issues,
     lifecycle,
     queues,
@@ -1857,12 +1861,13 @@ export function operationsHealthReport(state, {
       activeBackoffs: activeBackoffs.length,
       criticalLifecycle: criticalLifecycle.reduce((total, row) => total + row.critical, 0),
       failedDeliveries: failedDeliveries.length,
+      freshnessBlocked: freshness.blockers.length,
       failedQueues: failedQueues.length,
       failedJobs: summary.failedJobs ?? 0,
       deadLetterJobs: state.deadLetter?.length ?? 0,
       monitoredQueues: queues.length,
       openLifecycle: summary.openLifecycleNotices ?? 0,
-      productionReady: Boolean(backendBoundary.productionReady && backendBoundary.schedulerReady),
+      productionReady: Boolean(backendBoundary.productionReady && backendBoundary.schedulerReady && freshness.blockers.length === 0),
       totalWebhooks: webhooks.length,
       unhealthyWebhooks: webhooks.filter((row) => !row.localOk).length,
     },
@@ -2324,6 +2329,8 @@ function tenantScopedRecordIssues(state) {
 export function doctor(state) {
   const sensitivePaths = sensitiveKeyPaths(state);
   const tenantScopedOrphans = tenantScopedRecordIssues(state);
+  const latestProviderRun = latestProviderValidationRun(state);
+  const latestProviderEvidenceOk = !latestProviderRun || latestProviderRun.status === 'passed';
   const checks = [
     {
       id: 'active_admin',
@@ -2580,6 +2587,16 @@ export function doctor(state) {
       message: 'Provider sandbox validation evidence is recorded without raw secrets or raw reports.',
     },
     {
+      id: 'provider_validation_latest_evidence',
+      ok: latestProviderEvidenceOk,
+      message: latestProviderRun
+        ? `Latest provider sandbox validation evidence is ${latestProviderRun.status}.`
+        : 'No provider sandbox validation evidence is recorded locally; production freshness gates enforce this before launch.',
+      details: latestProviderRun && !latestProviderEvidenceOk
+        ? { recordedAt: latestProviderRun.recordedAt ?? null, runId: latestProviderRun.id ?? null, status: latestProviderRun.status }
+        : undefined,
+    },
+    {
       id: 'provider_validation_schedules_audited',
       ok: scheduledProviderIds.every((providerId) => (state.providerValidationSchedules ?? []).some((schedule) => schedule.providerId === providerId)) &&
         (state.providerValidationSchedules ?? []).every((schedule) =>
@@ -2732,6 +2749,18 @@ function freshnessBlocker(id, message, details = {}) {
   };
 }
 
+const sandboxEvidenceFreshnessBlockerIds = new Set([
+  'sandbox_evidence_missing',
+  'sandbox_evidence_not_passed',
+  'sandbox_evidence_stale',
+]);
+
+function sandboxEvidenceFreshnessMessages(freshness) {
+  return (freshness?.blockers ?? [])
+    .filter((blocker) => sandboxEvidenceFreshnessBlockerIds.has(blocker.id))
+    .map((blocker) => blocker.message);
+}
+
 function latestProviderValidationTimestamp(run) {
   return run?.recordedAt ?? run?.generatedAt ?? null;
 }
@@ -2772,6 +2801,22 @@ export function launchFreshnessReport(state, {
   const backupRehearsalAt = env.SIGNAL_STATE_RESTORE_REHEARSAL_AT ?? null;
   const backupRehearsalAgeMs = ageMsAt(backupRehearsalAt, now);
   const blockers = [];
+
+  if (applies && !latestProviderRun) {
+    blockers.push(freshnessBlocker(
+      'sandbox_evidence_missing',
+      'No provider sandbox validation evidence is recorded for this production launch context.',
+      { maxAgeMs: policy.sandboxEvidenceMaxAgeMs },
+    ));
+  }
+
+  if (applies && latestProviderRun && latestProviderRun.status !== 'passed') {
+    blockers.push(freshnessBlocker(
+      'sandbox_evidence_not_passed',
+      `Latest provider sandbox evidence is ${latestProviderRun.status}; production launch requires passed evidence.`,
+      { recordedAt: latestProviderRunAt, runId: latestProviderRun.id ?? null, status: latestProviderRun.status },
+    ));
+  }
 
   if (applies && latestProviderRun && sandboxEvidenceAgeMs !== null && sandboxEvidenceAgeMs > policy.sandboxEvidenceMaxAgeMs) {
     blockers.push(freshnessBlocker(
@@ -3079,7 +3124,7 @@ export function launchGateReport(state, {
   const providerSandboxPassed = latestProviderRun?.status === 'passed';
   const freshnessBlockersById = (id) => freshness.blockers.filter((blocker) => blocker.id === id).map((blocker) => blocker.message);
   const backupFreshnessBlockers = freshnessBlockersById('backup_rehearsal_stale');
-  const sandboxFreshnessBlockers = freshnessBlockersById('sandbox_evidence_stale');
+  const sandboxFreshnessBlockers = sandboxEvidenceFreshnessMessages(freshness);
   const scheduleFreshnessBlockers = freshness.blockers
     .filter((blocker) => blocker.id === 'provider_validation_schedule_overdue')
     .map((blocker) => blocker.message);
@@ -3303,7 +3348,13 @@ export function productionOperationsDrillReport(state, {
   const summary = summarizeState(state);
   const product = readiness ?? productReadinessReport(state, { backend, provider });
   const gate = launchGate ?? launchGateReport(state, { backend, env, provider, readiness: product, statePath: resolveStatePath() });
-  const health = operations ?? operationsHealthReport(state, { backend });
+  const health = operations ?? operationsHealthReport(state, { backend, env });
+  const nonFreshnessOperationIssues = (health.issues ?? []).filter((issue) => !issue.startsWith('freshness:'));
+  const operationsMonitoringReady = Boolean(
+    health.backend?.productionReady &&
+    health.backend?.schedulerReady &&
+    nonFreshnessOperationIssues.length === 0,
+  );
   const latestProviderRun = latestProviderValidationRun(state);
   const durableState = backendCheckById(backend, 'durable_state');
   const stateServiceStorage = backendCheckById(backend, 'state_service_storage');
@@ -3476,10 +3527,11 @@ export function productionOperationsDrillReport(state, {
       area: 'alerting_runbook',
       check: 'Operations alert destination and launch runbook are configured for failed jobs, webhooks, provider backoff, billing, and lifecycle notices.',
       owner: 'operations',
-      productionOk: Boolean(health.productionReady && runbookReady),
+      productionOk: Boolean(operationsMonitoringReady && runbookReady),
       requiredEnv: missingKeys(env, runbookEnv),
       evidence: [
-        `Operations health production-ready: ${health.productionReady ? 'yes' : 'no'}`,
+        `Operations monitoring baseline ready: ${operationsMonitoringReady ? 'yes' : 'no'}`,
+        `Provider evidence freshness blockers: ${health.summary?.freshnessBlocked ?? 0}`,
         `Alert channel configured: ${env.SIGNAL_OPERATIONS_ALERT_CHANNEL ? 'yes' : 'no'}`,
         `Runbook URL configured: ${env.SIGNAL_OPERATIONS_RUNBOOK_URL ? 'yes' : 'no'}`,
       ],
@@ -3686,9 +3738,7 @@ export function providerLaunchMatrixReport(state, {
 } = {}) {
   const signedSession = backendCheckById(backend, 'signed_session_enforced');
   const freshness = launchFreshnessReport(state, { backend, env, statePath });
-  const sandboxFreshnessBlockers = freshness.blockers
-    .filter((blocker) => blocker.id === 'sandbox_evidence_stale')
-    .map((blocker) => blocker.message);
+  const sandboxFreshnessBlockers = sandboxEvidenceFreshnessMessages(freshness);
   const schedulerFreshnessBlockers = freshness.blockers
     .filter((blocker) => blocker.id.startsWith('scheduler_') || blocker.id === 'backup_rehearsal_stale');
   const reportRows = provider.providers.map((item) => {
@@ -4977,7 +5027,7 @@ export function emailHandoffReport(state, {
   const product = readiness ?? productReadinessReport(state, { backend: currentBackend, provider });
   const launch = providerLaunch ?? providerLaunchMatrixReport(state, { backend: currentBackend, env, provider });
   const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, env, provider, readiness: product, statePath });
-  const health = operations ?? operationsHealthReport(state, { backend: currentBackend, statePath });
+  const health = operations ?? operationsHealthReport(state, { backend: currentBackend, env, statePath });
   const lifecycle = lifecyclePlaybook ?? lifecyclePlaybookReport(state, { backend: currentBackend, statePath });
   const summary = summarizeState(state, statePath);
   const emailGate = launchGateById(gate, 'email_notification_launch');
@@ -5007,6 +5057,8 @@ export function emailHandoffReport(state, {
   const emailSyncQueue = operationsQueueByName(health, 'email_sync');
   const notificationQueue = operationsQueueByName(health, 'notification_digest');
   const outboundQueue = operationsQueueByName(health, 'outbound_email');
+  const nonFreshnessOperationIssues = (health.issues ?? []).filter((issue) => !issue.startsWith('freshness:'));
+  const operationsOk = nonFreshnessOperationIssues.length === 0;
   const outboundPlaybook = lifecycle.rows?.find?.((row) => row.id === 'outbound_email_delivery') ?? null;
   const watchPlaybook = lifecycle.rows?.find?.((row) => row.id === 'provider_backoff_watch') ?? null;
   const signedDeliveryMessages = (state.emailDeliveryMessages ?? []).filter((message) => message.providerSignatureStatus === 'verified');
@@ -5275,7 +5327,7 @@ export function emailHandoffReport(state, {
     },
   };
   report.summary.secretSafe = providerLaunchUnsafePaths(report).length === 0;
-  report.ok = report.summary.secretSafe && rows.length === 8 && Boolean(health.ok);
+  report.ok = report.summary.secretSafe && rows.length === 8 && operationsOk;
   return report;
 }
 
@@ -5327,10 +5379,11 @@ export function qaAnswersReport(state, {
   backend = null,
   dashboardAudit = null,
   digestionPipeline = null,
+  env = process.env,
   lifecyclePlaybook = null,
   onboarding = null,
   operations = null,
-  provider = providerReadiness(),
+  provider = providerReadiness(env),
   providerLaunch = null,
   readiness = null,
   statePath = resolveStatePath(),
@@ -5340,9 +5393,9 @@ export function qaAnswersReport(state, {
   const dashboard = dashboardAudit ?? dashboardAuditReport(state, { backend, statePath });
   const pipeline = digestionPipeline ?? signalDigestionPipelineReport(state, { backend, statePath });
   const onboardingReport = onboarding ?? onboardingReadinessReport(state, { backend, statePath });
-  const operationsReport = operations ?? operationsHealthReport(state, { backend, statePath });
+  const operationsReport = operations ?? operationsHealthReport(state, { backend, env, statePath });
   const lifecycle = lifecyclePlaybook ?? lifecyclePlaybookReport(state, { backend, statePath });
-  const launch = providerLaunch ?? providerLaunchMatrixReport(state, { backend, provider });
+  const launch = providerLaunch ?? providerLaunchMatrixReport(state, { backend, env, provider });
   const launchRows = {
     gmail: providerLaunchById(launch, 'gmail'),
     outlook: providerLaunchById(launch, 'outlook'),
@@ -5629,7 +5682,7 @@ export function productionSetupPlanReport(state, {
 } = {}) {
   const product = readiness ?? productReadinessReport(state, { backend, provider });
   const gate = launchGate ?? launchGateReport(state, { backend, env, provider, readiness: product, statePath });
-  const operations = operationsHealthReport(state, { backend, statePath });
+  const operations = operationsHealthReport(state, { backend, env, statePath });
   const drill = productionDrill ?? productionOperationsDrillReport(state, { backend, env, launchGate: gate, operations, provider, readiness: product });
   const launch = providerLaunch ?? providerLaunchMatrixReport(state, { backend, env, provider });
   const gateRows = {
@@ -6224,7 +6277,7 @@ export function localAgentHandoffReport(state, {
 } = {}) {
   const product = readiness ?? productReadinessReport(state, { backend, provider });
   const gate = launchGate ?? launchGateReport(state, { backend, env, provider, readiness: product, statePath });
-  const operationHealth = operations ?? operationsHealthReport(state, { backend, statePath });
+  const operationHealth = operations ?? operationsHealthReport(state, { backend, env, statePath });
   const providerMatrix = providerLaunch ?? providerLaunchMatrixReport(state, { backend, env, provider });
   const plan = productionPlan ?? productionSetupPlanReport(state, {
     backend,
@@ -6236,6 +6289,8 @@ export function localAgentHandoffReport(state, {
     readiness: product,
     statePath,
   });
+  const nonFreshnessOperationIssues = (operationHealth.issues ?? []).filter((issue) => !issue.startsWith('freshness:'));
+  const operationsOk = nonFreshnessOperationIssues.length === 0;
   const summary = summarizeState(state, statePath);
   const nextActions = (gate.gates ?? [])
     .filter((row) => row.status !== 'pass')
@@ -6303,7 +6358,7 @@ export function localAgentHandoffReport(state, {
     },
   };
   report.summary.secretSafe = providerLaunchUnsafePaths(report).length === 0;
-  report.ok = report.summary.secretSafe && product.ok && operationHealth.ok;
+  report.ok = report.summary.secretSafe && product.ok && operationsOk;
   return report;
 }
 
@@ -6384,20 +6439,31 @@ export function backendHandoffReport(state, {
   statePath = resolveStatePath(),
 } = {}) {
   const currentBackend = backend ?? backendReadiness({ env, statePath });
-  const currentOperations = operations ?? operationsHealthReport(state, { backend: currentBackend, statePath });
+  const currentOperations = operations ?? operationsHealthReport(state, { backend: currentBackend, env, statePath });
   const currentReadiness = readiness ?? productReadinessReport(state, { backend: currentBackend, provider });
   const drill = productionDrill ?? productionOperationsDrillReport(state, {
     backend: currentBackend,
+    env,
     operations: currentOperations,
     provider,
     readiness: currentReadiness,
   });
+  const nonFreshnessOperationIssues = (currentOperations.issues ?? []).filter((issue) => !issue.startsWith('freshness:'));
+  const backendOperationsOk = nonFreshnessOperationIssues.length === 0;
+  const backendOperationsReady = Boolean(
+    currentOperations.backend?.productionReady &&
+    currentOperations.backend?.schedulerReady &&
+    backendOperationsOk,
+  );
+  const backendDrillRowReady = (row) => row.area === 'alerting_runbook'
+    ? Boolean(row.productionOk || (backendOperationsReady && (row.requiredEnv ?? []).length === 0))
+    : Boolean(row.productionOk);
   const backendActions = (currentBackend.checks ?? [])
     .filter((check) => !check.ok)
     .map(backendHandoffActionFromCheck);
   const drillAreas = new Set(['state_service_health', 'backup_restore_rehearsal', 'migration_rollout', 'identity_tenant_isolation', 'scheduler_daemon', 'alerting_runbook']);
   const drillActions = (drill.rows ?? [])
-    .filter((row) => drillAreas.has(row.area) && !row.productionOk)
+    .filter((row) => drillAreas.has(row.area) && !backendDrillRowReady(row))
     .map(backendHandoffActionFromDrill);
   const actions = [...backendActions, ...drillActions]
     .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
@@ -6428,7 +6494,7 @@ export function backendHandoffReport(state, {
     ok: true,
     productionReady: Boolean(currentBackend.productionReady && drill.rows
       ?.filter((row) => ['state_service_health', 'backup_restore_rehearsal', 'migration_rollout', 'identity_tenant_isolation', 'scheduler_daemon', 'alerting_runbook'].includes(row.area))
-      .every((row) => row.productionOk)),
+      .every((row) => backendDrillRowReady(row))),
     nextAction,
     actions,
     backend: {
@@ -6457,7 +6523,7 @@ export function backendHandoffReport(state, {
     },
   };
   report.summary.secretSafe = providerLaunchUnsafePaths(report).length === 0;
-  report.ok = report.summary.secretSafe && Boolean(currentBackend.ok) && Boolean(currentOperations.ok);
+  report.ok = report.summary.secretSafe && Boolean(currentBackend.ok) && backendOperationsOk;
   return report;
 }
 
@@ -6762,7 +6828,7 @@ export function schedulerHandoffReport(state, {
   const currentBackend = backend ?? backendReadiness({ env, statePath });
   const product = readiness ?? productReadinessReport(state, { backend: currentBackend, provider });
   const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, env, provider, readiness: product, statePath });
-  const health = operations ?? operationsHealthReport(state, { backend: currentBackend, statePath });
+  const health = operations ?? operationsHealthReport(state, { backend: currentBackend, env, statePath });
   const drill = productionDrill ?? productionOperationsDrillReport(state, {
     backend: currentBackend,
     env,
@@ -6783,10 +6849,20 @@ export function schedulerHandoffReport(state, {
   const singleRunnerEnv = ['SIGNAL_SCHEDULER_LOCK_POLICY'];
   const alertingEnv = ['SIGNAL_OPERATIONS_RUNBOOK_URL', 'SIGNAL_OPERATIONS_ALERT_CHANNEL'];
   const backendEnv = ['SIGNAL_BACKEND_MODE', 'SIGNAL_STATE_SERVICE_URL', 'SIGNAL_STATE_SERVICE_TOKEN', 'SIGNAL_TENANT_ISOLATION_MODE'];
+  const nonFreshnessOperationIssues = (health.issues ?? []).filter((issue) => !issue.startsWith('freshness:'));
+  const schedulerOperationsOk = nonFreshnessOperationIssues.length === 0;
+  const schedulerOperationsProductionReady = Boolean(
+    health.backend?.productionReady &&
+    health.backend?.schedulerReady &&
+    schedulerOperationsOk,
+  );
   const schedulerEnvReady = Boolean(scheduler?.ok && missingKeys(env, singleRunnerEnv).length === 0);
-  const cleanQueuesReady = Boolean(health.ok && failedJobs === 0);
+  const cleanQueuesReady = Boolean(schedulerOperationsOk && failedJobs === 0);
   const schedulesReady = activeProviderSchedules >= 4;
-  const alertingReady = Boolean(drillRows.alerting_runbook?.productionOk && missingKeys(env, alertingEnv).length === 0);
+  const alertingReady = Boolean(
+    (drillRows.alerting_runbook?.productionOk || schedulerOperationsProductionReady) &&
+    missingKeys(env, alertingEnv).length === 0,
+  );
   const schedulerProductionReady = Boolean(
     schedulerEnvReady &&
     cleanQueuesReady &&
@@ -6823,7 +6899,7 @@ export function schedulerHandoffReport(state, {
       requiredEnv: schedulerEnv,
       evidence: [
         `${failedJobs}/${summary.jobs} failed job(s)`,
-        `Operations health: ${health.ok ? 'local ready' : 'attention'}`,
+        `Operations health: ${schedulerOperationsOk ? 'local ready' : 'attention'}`,
       ],
       blocker: scheduler?.ok && cleanQueuesReady ? 'None' : 'Dry-run proof is blocked by scheduler env or failed worker jobs.',
       command: 'npm run scheduler -- --once --dry-run --json',
@@ -6989,7 +7065,7 @@ export function schedulerHandoffReport(state, {
     },
   };
   report.summary.secretSafe = providerLaunchUnsafePaths(report).length === 0;
-  report.ok = report.summary.secretSafe && Boolean(currentBackend.ok) && Boolean(health.ok);
+  report.ok = report.summary.secretSafe && Boolean(currentBackend.ok) && schedulerOperationsOk;
   return report;
 }
 
@@ -7052,7 +7128,7 @@ export function completionAuditReport(state, {
   const pipeline = digestionPipeline ?? signalDigestionPipelineReport(state, { backend: currentBackend, statePath });
   const onboardingReport = onboarding ?? onboardingReadinessReport(state, { backend: currentBackend, statePath });
   const isolation = tenantIsolation ?? tenantIsolationAuditReport(state, { backend: currentBackend, statePath });
-  const health = operations ?? operationsHealthReport(state, { backend: currentBackend, statePath });
+  const health = operations ?? operationsHealthReport(state, { backend: currentBackend, env, statePath });
   const lifecycle = lifecyclePlaybook ?? lifecyclePlaybookReport(state, { backend: currentBackend, statePath });
   const launch = providerLaunch ?? providerLaunchMatrixReport(state, { backend: currentBackend, env, provider: currentProvider });
   const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, env, provider: currentProvider, readiness: product, statePath });
@@ -7082,6 +7158,7 @@ export function completionAuditReport(state, {
     backend: currentBackend,
     dashboardAudit: dashboard,
     digestionPipeline: pipeline,
+    env,
     lifecyclePlaybook: lifecycle,
     onboarding: onboardingReport,
     operations: health,
