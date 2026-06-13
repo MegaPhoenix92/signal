@@ -454,6 +454,10 @@ test('Signal state service postgres RLS mode creates and verifies policies', asy
   await store.init();
   assert(pool.queries.some((query) => query.sql.includes('ALTER TABLE "signal_state_rls_current" ENABLE ROW LEVEL SECURITY')), 'RLS mode should enable RLS on current state table');
   assert(pool.queries.some((query) => query.sql.includes('CREATE POLICY "signal_state_rls_current_service_role_policy"')), 'RLS mode should create current table policy');
+  assert.deepEqual([...pool.rlsTables].sort(), ['signal_state_rls_backups', 'signal_state_rls_current'], 'RLS mode should protect both monolithic state tables');
+  const serviceRolePolicyQueries = pool.queries.filter((query) => query.sql.includes('CREATE POLICY') && query.sql.includes('service_role_policy'));
+  assert.equal(serviceRolePolicyQueries.length, 2, 'RLS mode should create one service-role policy per monolithic state table');
+  assert(serviceRolePolicyQueries.every((query) => query.sql.includes('USING (true) WITH CHECK (true)')), 'state-service RLS policies are table-boundary service-role policies');
   assert(pool.queries.some((query) => query.sql.includes('FROM pg_policies')), 'RLS mode should verify policies through pg_policies');
   const meta = await store.meta();
   assert.equal(meta.rls.ok, true);

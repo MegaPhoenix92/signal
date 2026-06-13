@@ -66,10 +66,12 @@ SIGNAL_STATE_SERVICE_BACKEND=postgres
 
 Apply state-service migrations on startup or with the managed deploy process. In RLS mode, the state service enables row-level security on its current and backup tables, creates service-role policies, and verifies `pg_policies` plus `relrowsecurity` before accepting traffic. Startup must fail if those policies are missing.
 
+The state service currently stores one monolithic JSON state document plus backups. Postgres RLS protects those durable state-service tables and service-role access at the database boundary. Per-tenant record filtering inside the JSON document remains application-level and must continue to flow through `scopeStateForActor`, tenant membership, owner/team routing, and doctor/audit coverage.
+
 Multi-tenant deployment notes:
 
 - Use one shared production state-service boundary only after RLS startup verification passes.
-- Tenant membership and role decisions remain application-level, while Postgres RLS protects the durable state tables from accidental cross-tenant reads/writes at the database boundary.
+- Tenant membership, role, and per-record JSON decisions remain application-level, while Postgres RLS protects the durable state tables from accidental cross-tenant reads/writes at the database boundary.
 - Do not launch multiple customer organizations on the shared backend if `SIGNAL_TENANT_ISOLATION_MODE` is not `rls` or if `SIGNAL_STATE_SERVICE_RLS` is not true.
 - Keep migrations and `pg_policies` verification in the deploy checklist for every schema change that touches state-service tables.
 
@@ -77,10 +79,11 @@ Proof:
 
 ```bash
 npm run test:tenant-isolation
+npm run test:state-service
 npm run admin -- tenant-isolation --env-file ./.env.production --json
 ```
 
-Expected: tenant-isolation tests pass and the report shows `productionOk`.
+Expected: tenant-isolation tests pass, state-service RLS policy verification passes, and the report shows `productionOk`.
 
 ## 4. Load live provider secrets and save sandbox evidence
 
