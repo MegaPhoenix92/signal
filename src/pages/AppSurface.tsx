@@ -178,6 +178,7 @@ import {
   PanelHead,
   ProductHeader,
   resolveTeamCheckoutPlanId,
+  SeedReadOnlyCallout,
   SignalRow,
   StateBanner,
   tenantTeamUser,
@@ -1513,13 +1514,22 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
   const tenant = data.tenants.find((item) => item.id === currentUser?.tenantId) ?? data.tenants[0];
   if (!currentUser || !tenant) {
     return (
-      <section className="workspace-shell">
-        <section className="ops-panel empty-state" data-reveal>
-          <h3>Workspace data unavailable</h3>
-          <p>The live API returned no tenant or user records for the workspace view.</p>
-          <small>Refresh after bootstrapping a tenant and active membership, or fall back to the seeded local state.</small>
-        </section>
-      </section>
+      <div className="product-shell">
+        <ProductHeader active="workspace" />
+        <main className="product-main">
+          <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+          {source === 'seed' && <SeedReadOnlyCallout area="workspace" />}
+          <section className="ops-panel empty-state" data-reveal>
+            <h3>Workspace data unavailable</h3>
+            <p>The live API returned no tenant or user records for the workspace view.</p>
+            <small>Refresh after bootstrapping a tenant and active membership, or fall back to the seeded local state.</small>
+            <div className="button-row">
+              <a className="inline-action" href="#register">Register workspace</a>
+              <a className="inline-action" href="#top">Return to public site</a>
+            </div>
+          </section>
+        </main>
+      </div>
     );
   }
   const tenantUsers = users.filter((user) => user.tenantId === tenant.id);
@@ -1681,6 +1691,7 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
       <ProductHeader active="workspace" />
       <main className="product-main">
         <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+        {source === 'seed' && <SeedReadOnlyCallout area="workspace" />}
         <section className="product-hero-panel workspace-hero" data-reveal>
           <div>
             <p className="kicker">
@@ -1776,6 +1787,13 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
                   openActions={(data.accountActions ?? []).filter((action) => action.account === account.name && action.status === 'open').length}
                 />
               ))}
+              {accounts.length === 0 && (
+                <div className="empty-state">
+                  <strong>No accounts match this session.</strong>
+                  <small>{currentRole === 'admin' ? 'Create account profiles or connect tenant sources so relationship health can populate.' : 'Ask an admin to assign accounts or connect your mailbox source so relationship health can populate.'}</small>
+                  <a className="inline-action" href={currentRole === 'admin' ? '#admin' : '#register'}>{currentRole === 'admin' ? 'Review admin setup' : 'Review onboarding'}</a>
+                </div>
+              )}
             </div>
           </article>
 
@@ -1815,7 +1833,7 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
                 <div>
                   <h3>Next actions</h3>
                   <div className="account-action-stack">
-                    {accountActions.map((action) => {
+                    {accountActions.length ? accountActions.map((action) => {
                       const canChangeAction = currentRole === 'admin' || action.ownerUserId === currentUser.id;
                       return (
                         <AccountActionCard
@@ -1826,7 +1844,13 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
                           owner={ownerName(users, action.ownerUserId)}
                         />
                       );
-                    })}
+                    }) : (
+                      <div className="empty-state">
+                        <strong>No account actions yet.</strong>
+                        <small>{currentRole === 'admin' ? 'Route signals or create account reviews to seed follow-up work for this account.' : 'No follow-up work is assigned to your session for this account.'}</small>
+                        <a className="inline-action" href={currentRole === 'admin' ? '#admin/email' : '#workspace'}>{currentRole === 'admin' ? 'Review signal flows' : 'Review signal queue'}</a>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div>
@@ -1850,9 +1874,15 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
                 <div>
                   <h3>Timeline</h3>
                   <div className="account-event-stack">
-                    {accountEvents.map((event) => (
+                    {accountEvents.length ? accountEvents.map((event) => (
                       <AccountEventRow event={event} key={event.id} />
-                    ))}
+                    )) : (
+                      <div className="empty-state">
+                        <strong>No account events yet.</strong>
+                        <small>{currentRole === 'admin' ? 'Run detector flows or mailbox sync to attach customer activity to this account.' : 'Customer activity will appear here after a visible source syncs for your account.'}</small>
+                        <a className="inline-action" href={currentRole === 'admin' ? '#admin/email' : '#workspace'}>{currentRole === 'admin' ? 'Review email flows' : 'Review mailbox sources'}</a>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div>
@@ -2023,6 +2053,13 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
                   }
                 />
               ))}
+              {assignedSignals.length === 0 && (
+                <div className="empty-state">
+                  <strong>No signals match this session.</strong>
+                  <small>{currentRole === 'admin' ? 'Run detector flows or connect tenant mailboxes so the queue has routeable work.' : 'Connect your mailbox source or ask an admin to route signals to your team.'}</small>
+                  <a className="inline-action" href={currentRole === 'admin' ? '#admin/email' : '#register'}>{currentRole === 'admin' ? 'Open email flows' : 'Review onboarding'}</a>
+                </div>
+              )}
             </div>
           </article>
 
@@ -2102,6 +2139,15 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
                   />
                 );
               })}
+              {visibleMailboxes.length === 0 && (
+                <div className="empty-state">
+                  <strong>No mailbox sources are visible.</strong>
+                  <small>{currentRole === 'admin' ? 'Connect a tenant source so signals, events, and notifications can be generated.' : 'Connect your mailbox source or ask an admin to grant access to an existing source.'}</small>
+                  <button className="inline-action" disabled={!canStartMailboxAuth} type="button" onClick={() => mutate('mailboxes.connect-url', { ownerUserId: currentUser.id, provider: 'gmail', tenantId: tenant.id })}>
+                    Create Gmail auth
+                  </button>
+                </div>
+              )}
             </div>
           </article>
 

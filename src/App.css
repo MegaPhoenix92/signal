@@ -4,6 +4,7 @@
   color-scheme: light;
   --ink: #111411;
   --ink-soft: #30372e;
+  --muted: rgba(17, 20, 17, 0.62);
   --paper: #f4f1e7;
   --paper-deep: #e5dfcf;
   --white: #fffdf7;
@@ -921,6 +922,7 @@ h3 {
     linear-gradient(0deg, rgba(255, 253, 247, 0.05) 1px, transparent 1px),
     var(--ink);
   color: var(--white);
+  --muted: rgba(255, 253, 247, 0.66);
 }
 
 .product-header {
@@ -1166,6 +1168,72 @@ h3 {
 
 .state-banner.seed {
   border-left: 7px solid var(--gold);
+}
+
+.seed-mode-callout {
+  align-items: center;
+  border-left: 7px solid var(--gold);
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.seed-mode-copy {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+}
+
+.seed-mode-copy svg {
+  color: var(--gold);
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.seed-mode-copy span {
+  color: var(--muted);
+  display: block;
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.seed-mode-copy strong,
+.seed-mode-copy small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.seed-mode-copy small {
+  color: var(--muted);
+  font-weight: 700;
+  line-height: 1.45;
+  margin-top: 4px;
+}
+
+.seed-mode-command-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.seed-mode-command-row code {
+  background: rgba(17, 20, 17, 0.06);
+  border: 1px solid rgba(17, 20, 17, 0.1);
+  border-radius: 6px;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 800;
+  padding: 8px 10px;
+}
+
+.admin-shell .seed-mode-command-row code {
+  background: rgba(255, 253, 247, 0.08);
+  border-color: rgba(255, 253, 247, 0.14);
+  color: var(--gold);
 }
 
 .billing-gate-panel {
