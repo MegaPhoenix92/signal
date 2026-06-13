@@ -223,6 +223,17 @@ function AdminTabPanel({ activeTab, children, tab }: { activeTab: AdminTab; chil
   );
 }
 
+function ReportLoadingPanel({ icon, title, wide = false }: { icon: LucideIcon; title: string; wide?: boolean }) {
+  return (
+    <article className={`ops-panel${wide ? ' wide-panel' : ''}`}>
+      <PanelHead icon={icon} title={title} action="Loading..." />
+      <div className="empty-state">
+        <strong>Loading report...</strong>
+      </div>
+    </article>
+  );
+}
+
 function modelEvidenceForTenant(data: SignalAppData, tenantId: string) {
   const tenantFlows = data.emailFlows.filter((flow) => flow.tenantId === tenantId);
   const tenantRoutingRules = (data.routingRules ?? []).filter((rule) => rule.tenantId === tenantId);
@@ -435,6 +446,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     isValidatingSandbox,
     lifecyclePlaybook,
     lastMutation,
+    loadAdminSection,
     mutate,
     onboardingReadiness,
     tenantIsolation,
@@ -452,6 +464,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     providerSandbox,
     refresh,
     runScheduledValidation,
+    sectionLoading,
     setActorUserId,
     source,
     summary,
@@ -485,6 +498,10 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
   const [selectedDeadLetterIds, setSelectedDeadLetterIds] = useState<string[]>([]);
   const mutationFeedback = useMutationFeedback(mutate);
   useRevealObserver([activeTab, activeRoute.sub ?? '']);
+
+  useEffect(() => {
+    void loadAdminSection(activeTab);
+  }, [activeTab, data, loadAdminSection]);
 
   useEffect(() => {
     const syncAdminRoute = () => {
@@ -784,50 +801,50 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     ]);
   const productReadiness = productReadinessForAdmin(data, summary, backendReadiness, providerReadiness);
   const launchGate = launchGateForAdmin(data, summary, backendReadiness, providerReadiness, productReadiness);
-  const operationsWebhookRows = operationsHealth.webhooks.map((row) => [
+  const operationsWebhookRows = operationsHealth?.webhooks.map((row) => [
     titleize(row.channel),
     titleize(row.status),
     row.path,
     row.evidence.join(' | '),
     row.latestAt ? new Date(row.latestAt).toLocaleString() : '-',
-  ]);
-  const operationsQueueRows = operationsHealth.queues.map((row) => [
+  ]) ?? [];
+  const operationsQueueRows = operationsHealth?.queues.map((row) => [
     row.queue,
     titleize(row.status),
     `${row.total} total`,
     `${row.queued} queued / ${row.running} running`,
     `${row.failed} failed / ${row.deadLetter ?? 0} DLQ`,
-  ]);
-  const activeBackoffRows = operationsHealth.rateLimits.filter((row) => row.active).map((row) => [
+  ]) ?? [];
+  const activeBackoffRows = operationsHealth?.rateLimits.filter((row) => row.active).map((row) => [
     row.provider,
     row.kind,
     row.targetId,
     row.retryAfterAt ? new Date(row.retryAfterAt).toLocaleString() : '-',
     row.reason,
-  ]);
-  const operationsLifecycleRows = operationsHealth.lifecycle.categories.map((row) => [
+  ]) ?? [];
+  const operationsLifecycleRows = operationsHealth?.lifecycle.categories.map((row) => [
     titleize(row.category),
     titleize(row.status),
     `${row.open} open`,
     `${row.critical} critical`,
     row.latestAt ? new Date(row.latestAt).toLocaleString() : '-',
-  ]);
-  const productionDrillRows = productionDrill.rows.map((row) => [
+  ]) ?? [];
+  const productionDrillRows = productionDrill?.rows.map((row) => [
     titleize(row.area),
     titleize(row.status),
     titleize(row.owner),
     row.requiredEnv.length ? row.requiredEnv.slice(0, 4).join(', ') : '-',
     row.commands[0] ?? '-',
-  ]);
-  const productionPlanRows = productionPlan.rows.map((row) => [
+  ]) ?? [];
+  const productionPlanRows = productionPlan?.rows.map((row) => [
     row.phase,
     titleize(row.status),
     titleize(row.owner),
     row.requiredEnv.length ? row.requiredEnv.slice(0, 4).join(', ') : '-',
     row.blockers[0] ?? row.completionCriteria[0] ?? '-',
     row.commands[0] ?? '-',
-  ]);
-  const productionEnvRows = productionEnv.rows.map((row) => [
+  ]) ?? [];
+  const productionEnvRows = productionEnv?.rows.map((row) => [
     row.label,
     titleize(row.status),
     titleize(row.owner),
@@ -835,16 +852,16 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     row.missingRequired.length ? row.missingRequired.slice(0, 4).join(', ') : '-',
     row.templateMissing.length ? row.templateMissing.slice(0, 4).join(', ') : 'Covered',
     row.commands[0] ?? '-',
-  ]);
-  const providerLaunchRows = providerLaunch.rows.map((row) => [
+  ]) ?? [];
+  const providerLaunchRows = providerLaunch?.rows.map((row) => [
     row.label,
     titleize(row.status),
     titleize(row.owner),
     row.configurationReady ? 'Configured' : `${row.missingEnv.length} env missing`,
     row.sandboxRequired ? titleize(row.sandboxStatus) : 'Not required',
     row.launchCommands[0] ?? row.evidenceCommands[0] ?? '-',
-  ]);
-  const providerHandoffRows = providerHandoff.actions.map((row) => [
+  ]) ?? [];
+  const providerHandoffRows = providerHandoff?.actions.map((row) => [
     String(row.priority),
     row.providerId,
     row.label,
@@ -852,16 +869,16 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     titleize(row.owner),
     row.requiredEnv.length ? row.requiredEnv.slice(0, 4).join(', ') : '-',
     row.command,
-  ]);
-  const lifecyclePlaybookRows = lifecyclePlaybook.rows.map((row) => [
+  ]) ?? [];
+  const lifecyclePlaybookRows = lifecyclePlaybook?.rows.map((row) => [
     row.label,
     titleize(row.status),
     titleize(row.owner),
     `${row.open} open / ${row.critical} critical`,
     row.adminAction,
     row.commands[0] ?? '-',
-  ]);
-  const emailHandoffRows = emailHandoff.rows.map((row) => [
+  ]) ?? [];
+  const emailHandoffRows = emailHandoff?.rows.map((row) => [
     String(row.priority),
     row.label,
     titleize(row.status),
@@ -870,8 +887,8 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     row.blocker,
     row.command,
     row.rollbackCommand ?? '-',
-  ]);
-  const paymentHandoffRows = paymentHandoff.rows.map((row) => [
+  ]) ?? [];
+  const paymentHandoffRows = paymentHandoff?.rows.map((row) => [
     String(row.priority),
     row.label,
     titleize(row.status),
@@ -880,16 +897,16 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     row.blocker,
     row.command,
     row.rollbackCommand ?? '-',
-  ]);
-  const qaAnswerRows = qaAnswers.rows.map((row) => [
+  ]) ?? [];
+  const qaAnswerRows = qaAnswers?.rows.map((row) => [
     row.question,
     titleize(row.status),
     titleize(row.owner),
     row.localOk ? 'Ready' : 'Attention',
     row.productionOk ? 'Ready' : row.productionCaveat,
     row.commands[0] ?? '-',
-  ]);
-  const completionAuditRows = completionAudit.rows.map((row) => [
+  ]) ?? [];
+  const completionAuditRows = completionAudit?.rows.map((row) => [
     row.label,
     titleize(row.status),
     titleize(row.owner),
@@ -897,8 +914,8 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     row.productionOk ? 'Ready' : 'Needs proof',
     row.blockers[0] ?? '-',
     row.commands[0] ?? '-',
-  ]);
-  const localAgentHandoffRows = (agentHandoff.nextActions.length ? agentHandoff.nextActions : [agentHandoff.nextAction]).map((row) => [
+  ]) ?? [];
+  const localAgentHandoffRows = agentHandoff ? (agentHandoff.nextActions.length ? agentHandoff.nextActions : [agentHandoff.nextAction]).map((row) => [
     String(row.priority),
     row.label,
     titleize(row.status),
@@ -906,8 +923,8 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     row.requiredEnv.length ? row.requiredEnv.slice(0, 4).join(', ') : '-',
     row.blocker,
     row.command,
-  ]);
-  const backendHandoffRows = (backendHandoff.actions.length ? backendHandoff.actions : [backendHandoff.nextAction]).map((row) => [
+  ]) : [];
+  const backendHandoffRows = backendHandoff ? (backendHandoff.actions.length ? backendHandoff.actions : [backendHandoff.nextAction]).map((row) => [
     String(row.priority),
     row.label,
     titleize(row.status),
@@ -915,8 +932,8 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     row.requiredEnv.length ? row.requiredEnv.slice(0, 4).join(', ') : '-',
     row.blocker,
     row.command,
-  ]);
-  const backendCutoverRows = backendCutover.rows.map((row) => [
+  ]) : [];
+  const backendCutoverRows = backendCutover?.rows.map((row) => [
     String(row.priority),
     row.label,
     titleize(row.status),
@@ -924,8 +941,8 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     row.missingEnv.length ? row.missingEnv.slice(0, 4).join(', ') : '-',
     row.command,
     row.rollbackCommand ?? '-',
-  ]);
-  const schedulerHandoffRows = schedulerHandoff.rows.map((row) => [
+  ]) ?? [];
+  const schedulerHandoffRows = schedulerHandoff?.rows.map((row) => [
     String(row.priority),
     row.label,
     titleize(row.status),
@@ -934,7 +951,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     row.blocker,
     row.command,
     row.rollbackCommand ?? '-',
-  ]);
+  ]) ?? [];
 
   if (currentActor?.role !== 'admin') {
     return (
@@ -1303,7 +1320,11 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
             <MetricCard icon={AlertTriangle} label="Lifecycle notices" value={String(summary.openLifecycleNotices ?? openLifecycleNotices.length)} detail={`${summary.criticalLifecycleNotices ?? openLifecycleNotices.filter((notice) => notice.severity === 'critical').length} critical`} accent="coral" />
             <MetricCard icon={Fingerprint} label="API sessions" value={String(summary.activeApiSessions ?? activeApiSessions.length)} detail={`${summary.revokedApiSessions ?? revokedApiSessions.length} revoked · digest-only`} accent="cyan" />
             <MetricCard icon={Plug} label="Provider readiness" value={`${providerReadiness.summary.readyProviders}/${providerReadiness.summary.totalProviders}`} detail={`${providerReadiness.summary.missingRequired} env vars missing`} accent="gold" />
-            <MetricCard icon={ShieldCheck} label="Provider launch" value={`${providerLaunch.summary.launchReady}/${providerLaunch.summary.total}`} detail={`${providerLaunch.summary.sandboxPassed}/${providerLaunch.summary.sandboxRequired} sandbox proofs`} accent={providerLaunch.productionReady ? 'lime' : 'gold'} />
+            {providerLaunch ? (
+              <MetricCard icon={ShieldCheck} label="Provider launch" value={`${providerLaunch.summary.launchReady}/${providerLaunch.summary.total}`} detail={`${providerLaunch.summary.sandboxPassed}/${providerLaunch.summary.sandboxRequired} sandbox proofs`} accent={providerLaunch.productionReady ? 'lime' : 'gold'} />
+            ) : (
+              <MetricCard icon={ShieldCheck} label="Provider launch" value={`${providerReadiness.summary.readyProviders}/${providerReadiness.summary.totalProviders}`} detail={sectionLoading.launch ? 'Loading launch matrix' : 'Proof matrix pending'} accent={providerReadiness.ok ? 'lime' : 'gold'} />
+            )}
             <MetricCard icon={RefreshCw} label="Sandbox runs" value={String(summary.providerValidationRuns ?? providerValidationRuns.length)} detail={summary.latestProviderValidationStatus ? `${titleize(summary.latestProviderValidationStatus)} latest` : 'Not recorded'} accent="lime" />
             <MetricCard icon={RefreshCw} label="Validation schedules" value={`${summary.activeProviderValidationSchedules ?? providerValidationSchedules.filter((schedule) => schedule.status === 'active').length}/${summary.providerValidationSchedules ?? providerValidationSchedules.length}`} detail={`${summary.dueProviderValidationSchedules ?? dueProviderValidationSchedules.length} due`} accent="cyan" />
             <MetricCard icon={Database} label="Backend mode" value={titleize(backendReadiness.mode)} detail={backendReadiness.productionReady ? 'Production ready' : `${backendReadiness.summary.readyChecks}/${backendReadiness.summary.totalChecks} production checks ready`} accent={backendReadiness.productionReady ? 'lime' : 'gold'} />
@@ -1461,39 +1482,43 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               </div>
               <CommandStrip commands={['npm run admin -- users invite tenant_demo rowan@acme.example member success', 'npm run admin -- users accept inv_rowan_success Rowan_Lee', 'npm run admin -- users revoke <inviteId>']} />
             </article>
-            <article className="ops-panel wide-panel">
-              <PanelHead
-                icon={ShieldCheck}
-                title="Onboarding, RBAC, and privacy readiness"
-                action={`${onboardingReadiness.summary.localReady}/${onboardingReadiness.summary.total} local checks`}
-              />
-              <div className="check-list">
-                <CheckItem ok={onboardingReadiness.ok} label="Workspace creation, member invitation, membership RBAC, user focus controls, and privacy evidence pass locally." />
-                <CheckItem ok={onboardingReadiness.recommendation.decision === 'support_multi_member_orgs'} label={onboardingReadiness.recommendation.summary} />
-                <CheckItem ok={onboardingReadiness.productionReady} label={onboardingReadiness.productionReady ? 'Production multi-org guardrails are ready.' : onboardingReadiness.recommendation.productionGuardrail} />
-                <CheckItem ok label={onboardingReadiness.recommendation.perTenantModelDefault} />
-              </div>
-              <AdminTable
-                columns={['Area', 'Local', 'Production', 'Evidence', 'Recommendation']}
-                rows={onboardingReadiness.rows.map((row) => [
-                  titleize(row.area),
-                  row.localOk ? 'Ready' : 'Attention',
-                  row.productionOk ? 'Ready' : 'Not ready',
-                  row.evidence.join(' · '),
-                  row.recommendation,
-                ])}
-              />
-              <AdminTable
-                columns={['Role', 'Data access', 'Actions', 'Guardrails']}
-                rows={onboardingReadiness.roleMatrix.map((role) => [
-                  titleize(role.role),
-                  role.dataAccess,
-                  role.allowedActions.map(titleize).join(', '),
-                  role.guardrails.map(titleize).join(', '),
-                ])}
-              />
-              <CommandStrip commands={['npm run admin -- onboarding-readiness --json', 'curl http://127.0.0.1:8787/api/onboarding-readiness', 'npm run admin -- users --json', 'npm run admin -- session token usr_admin --json']} />
-            </article>
+            {onboardingReadiness ? (
+              <article className="ops-panel wide-panel">
+                <PanelHead
+                  icon={ShieldCheck}
+                  title="Onboarding, RBAC, and privacy readiness"
+                  action={`${onboardingReadiness.summary.localReady}/${onboardingReadiness.summary.total} local checks`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={onboardingReadiness.ok} label="Workspace creation, member invitation, membership RBAC, user focus controls, and privacy evidence pass locally." />
+                  <CheckItem ok={onboardingReadiness.recommendation.decision === 'support_multi_member_orgs'} label={onboardingReadiness.recommendation.summary} />
+                  <CheckItem ok={onboardingReadiness.productionReady} label={onboardingReadiness.productionReady ? 'Production multi-org guardrails are ready.' : onboardingReadiness.recommendation.productionGuardrail} />
+                  <CheckItem ok label={onboardingReadiness.recommendation.perTenantModelDefault} />
+                </div>
+                <AdminTable
+                  columns={['Area', 'Local', 'Production', 'Evidence', 'Recommendation']}
+                  rows={onboardingReadiness.rows.map((row) => [
+                    titleize(row.area),
+                    row.localOk ? 'Ready' : 'Attention',
+                    row.productionOk ? 'Ready' : 'Not ready',
+                    row.evidence.join(' · '),
+                    row.recommendation,
+                  ])}
+                />
+                <AdminTable
+                  columns={['Role', 'Data access', 'Actions', 'Guardrails']}
+                  rows={onboardingReadiness.roleMatrix.map((role) => [
+                    titleize(role.role),
+                    role.dataAccess,
+                    role.allowedActions.map(titleize).join(', '),
+                    role.guardrails.map(titleize).join(', '),
+                  ])}
+                />
+                <CommandStrip commands={['npm run admin -- onboarding-readiness --json', 'curl http://127.0.0.1:8787/api/onboarding-readiness', 'npm run admin -- users --json', 'npm run admin -- session token usr_admin --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={ShieldCheck} title="Onboarding, RBAC, and privacy readiness" wide />
+            )}
           </section>
         )}
 
@@ -1628,26 +1653,30 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- mailboxes connect-url tenant_demo outlook usr_admin mbx_outlook_success', 'npm run admin -- mailboxes callback outlook <code> <state>', 'npm run admin -- mailboxes watch mbx_gmail_sales', 'npm run admin -- mailboxes renew-watch watch_gmail_mbx_gmail_sales', 'curl -X POST http://127.0.0.1:8787/api/webhooks/gmail', 'npm run admin -- mailboxes sync mbx_gmail_sales', 'npm run admin -- mailboxes replay mbx_gmail_sales']} />
             </article>
+            {emailHandoff ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={MailCheck}
+                  title="Email launch handoff"
+                  action={emailHandoff.productionReady ? 'Production ready' : `${emailHandoff.summary.blocked} steps need proof`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={emailHandoff.ok} label="Email launch handoff is secret-safe and ranks Gmail, Outlook, outbound digest email, watches, signed delivery webhooks, sandbox evidence, monitoring, and rollback." />
+                  <CheckItem ok={emailHandoff.productionReady} label={emailHandoff.productionReady ? 'Email launch proof is complete.' : `Next email step: ${emailHandoff.nextStep.label} owned by ${titleize(emailHandoff.nextStep.owner)}.`} />
+                  <CheckItem ok={emailHandoff.summary.secretSafe} label="Email handoff commands expose environment variable names and placeholders only; credential values stay out of the report." />
+                  <CheckItem ok={emailHandoff.email.failedEmailDeliveries === 0} label={`${emailHandoff.email.activeEmailWatchSubscriptions}/${emailHandoff.email.emailWatchSubscriptions} active provider watch subscriptions and ${emailHandoff.email.failedEmailDeliveries} failed delivery records.`} />
+                </div>
+                <AdminTable
+                  columns={['Priority', 'Step', 'Status', 'Owner', 'Missing env', 'Blocker', 'Command', 'Rollback']}
+                  rows={emailHandoffRows}
+                />
+                <CommandStrip commands={['npm run admin -- email-handoff --json', 'npm run admin -- email-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/email-handoff', 'npm run admin -- mailboxes watch mbx_gmail_sales --live-provider', 'npm run admin -- mailboxes renew-watch watch_outlook_mbx_outlook_success --live-provider', 'npm run admin -- notifications digest tenant_demo --live-provider', 'SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET=<email-webhook-secret> npm run admin -- notifications webhook-signed ./email-event.json <Signal-Email-Signature>', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={MailCheck} title="Email launch handoff" />
+            )}
             <article className="ops-panel">
-              <PanelHead
-                icon={MailCheck}
-                title="Email launch handoff"
-                action={emailHandoff.productionReady ? 'Production ready' : `${emailHandoff.summary.blocked} steps need proof`}
-              />
-              <div className="check-list">
-                <CheckItem ok={emailHandoff.ok} label="Email launch handoff is secret-safe and ranks Gmail, Outlook, outbound digest email, watches, signed delivery webhooks, sandbox evidence, monitoring, and rollback." />
-                <CheckItem ok={emailHandoff.productionReady} label={emailHandoff.productionReady ? 'Email launch proof is complete.' : `Next email step: ${emailHandoff.nextStep.label} owned by ${titleize(emailHandoff.nextStep.owner)}.`} />
-                <CheckItem ok={emailHandoff.summary.secretSafe} label="Email handoff commands expose environment variable names and placeholders only; credential values stay out of the report." />
-                <CheckItem ok={emailHandoff.email.failedEmailDeliveries === 0} label={`${emailHandoff.email.activeEmailWatchSubscriptions}/${emailHandoff.email.emailWatchSubscriptions} active provider watch subscriptions and ${emailHandoff.email.failedEmailDeliveries} failed delivery records.`} />
-              </div>
-              <AdminTable
-                columns={['Priority', 'Step', 'Status', 'Owner', 'Missing env', 'Blocker', 'Command', 'Rollback']}
-                rows={emailHandoffRows}
-              />
-              <CommandStrip commands={['npm run admin -- email-handoff --json', 'npm run admin -- email-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/email-handoff', 'npm run admin -- mailboxes watch mbx_gmail_sales --live-provider', 'npm run admin -- mailboxes renew-watch watch_outlook_mbx_outlook_success --live-provider', 'npm run admin -- notifications digest tenant_demo --live-provider', 'SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET=<email-webhook-secret> npm run admin -- notifications webhook-signed ./email-event.json <Signal-Email-Signature>', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json']} />
-            </article>
-            <article className="ops-panel">
-              <PanelHead icon={Workflow} title="Detector and routing rules" action="Email flow controls" />
+              <PanelHead icon={Workflow} title={digestionPipeline ? 'Detector and routing rules' : 'Loading detector reports'} action="Email flow controls" />
               <div className="button-row">
                 <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('email-flows.run', {})}>
                   Run enabled flows
@@ -1794,33 +1823,41 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                     : [['Policy', 'Missing']]}
                 />
               </div>
-              <div className="quality-control-stack">
-                <div className="quality-card">
-                  <div>
-                    <span>Digestion pipeline audit</span>
-                    <strong>{digestionPipeline.summary.localReady}/{digestionPipeline.summary.total} local stages</strong>
-                    <small>{digestionPipeline.recommendation.summary}</small>
+              {digestionPipeline ? (
+                <div className="quality-control-stack">
+                  <div className="quality-card">
+                    <div>
+                      <span>Digestion pipeline audit</span>
+                      <strong>{digestionPipeline.summary.localReady}/{digestionPipeline.summary.total} local stages</strong>
+                      <small>{digestionPipeline.recommendation.summary}</small>
+                    </div>
+                    <div className="status-pill">{digestionPipeline.productionReady ? 'Production ready' : 'Production gated'}</div>
                   </div>
-                  <div className="status-pill">{digestionPipeline.productionReady ? 'Production ready' : 'Production gated'}</div>
+                  <div className="check-list">
+                    <CheckItem ok={digestionPipeline.ok} label="Source ingestion, detector execution, quality feedback, routing outcomes, and model policy have local evidence." />
+                    <CheckItem ok={digestionPipeline.summary.perTenantModels === 0} label="No per-org trained model is enabled by default." />
+                    <CheckItem ok={digestionPipeline.productionReady} label={digestionPipeline.productionReady ? 'Production pipeline controls are ready.' : digestionPipeline.recommendation.productionGuardrail} />
+                  </div>
+                  <AdminTable
+                    columns={['Stage', 'Status', 'Local', 'Production', 'Evidence', 'Env', 'Command']}
+                    rows={digestionPipeline.rows.map((row) => [
+                      titleize(row.area),
+                      titleize(row.status),
+                      row.localOk ? 'Ready' : 'Attention',
+                      row.productionOk ? 'Ready' : 'Gated',
+                      row.evidence.join(' | '),
+                      row.requiredEnv.join(', ') || '-',
+                      row.commands[0] ?? '-',
+                    ])}
+                  />
                 </div>
-                <div className="check-list">
-                  <CheckItem ok={digestionPipeline.ok} label="Source ingestion, detector execution, quality feedback, routing outcomes, and model policy have local evidence." />
-                  <CheckItem ok={digestionPipeline.summary.perTenantModels === 0} label="No per-org trained model is enabled by default." />
-                  <CheckItem ok={digestionPipeline.productionReady} label={digestionPipeline.productionReady ? 'Production pipeline controls are ready.' : digestionPipeline.recommendation.productionGuardrail} />
+              ) : (
+                <div className="quality-control-stack">
+                  <div className="empty-state">
+                    <strong>Loading report...</strong>
+                  </div>
                 </div>
-                <AdminTable
-                  columns={['Stage', 'Status', 'Local', 'Production', 'Evidence', 'Env', 'Command']}
-                  rows={digestionPipeline.rows.map((row) => [
-                    titleize(row.area),
-                    titleize(row.status),
-                    row.localOk ? 'Ready' : 'Attention',
-                    row.productionOk ? 'Ready' : 'Gated',
-                    row.evidence.join(' | '),
-                    row.requiredEnv.join(', ') || '-',
-                    row.commands[0] ?? '-',
-                  ])}
-                />
-              </div>
+              )}
               <CommandStrip commands={['npm run admin -- email-flows run', 'npm run admin -- email-flows route flow_buying_intent founder usr_admin Founder_review', 'npm run admin -- email-flows route flow_product_ideas crm usr_sales CRM_followup', 'npm run admin -- signals handoff sig_product_001 crm CRM_followup', 'npm run admin -- quality threshold tenant_demo 0.85', 'npm run admin -- quality suppress tenant_demo domain internal.example', 'npm run admin -- digestion-pipeline --json', 'curl http://127.0.0.1:8787/api/digestion-pipeline', 'npm run admin -- models --json', 'npm run admin -- models policy tenant_demo opt_in_tuning Governance_reviewed', 'npm run admin -- signals feedback sig_risk_001 useful']} />
             </article>
           </section>
@@ -2245,35 +2282,39 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- integrations', 'npm run admin -- integrations --json', 'curl http://127.0.0.1:8787/api/integrations']} />
             </article>
-            <article className="ops-panel wide-panel">
-              <PanelHead
-                icon={Radar}
-                title="Provider handoff"
-                action={providerHandoff.productionReady ? 'Ready for evidence' : `${providerHandoff.summary.blocked} blocked`}
-              />
-              <div className="check-list">
-                <CheckItem ok={providerHandoff.ok} label="Provider handoff ranks signed-session, Gmail, Outlook, SendGrid/outbound email, and Stripe launch work for the local agent." />
-                <CheckItem ok={providerHandoff.summary.secretSafe} label="Provider handoff is secret-safe and only shows env names, placeholders, commands, digests, and request IDs." />
-                <CheckItem ok={providerHandoff.productionReady} label={providerHandoff.productionReady ? 'Provider launch rows are production-ready.' : providerHandoff.recommendation.productionGuardrail} />
-                <CheckItem ok={providerHandoff.nextAction.id === 'provider_launch_evidence' || providerHandoff.nextAction.command.length > 0} label={`Next provider action: ${providerHandoff.nextAction.label} owned by ${titleize(providerHandoff.nextAction.owner)}.`} />
-              </div>
-              <AdminTable
-                columns={['Priority', 'Provider', 'Action', 'Status', 'Owner', 'Env', 'Command']}
-                rows={providerHandoffRows.length ? providerHandoffRows : [['-', 'all', 'Provider launch evidence package', 'Ready For Proof', 'Integrations', '-', providerHandoff.nextAction.command]]}
-              />
-              <AdminTable
-                columns={['Provider', 'Status', 'Config', 'Sandbox', 'Schedule', 'Command']}
-                rows={providerHandoff.providerRows.map((row) => [
-                  row.label,
-                  titleize(row.status),
-                  row.configurationReady ? 'Configured' : `${row.missingEnv.length} env missing`,
-                  titleize(row.sandboxStatus),
-                  row.scheduleReady ? 'Active' : 'Needs schedule',
-                  row.localAgentCommand,
-                ])}
-              />
-              <CommandStrip commands={['npm run admin -- provider-handoff --json', 'npm run admin -- provider-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/provider-handoff', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations run-scheduled --force --json', 'npm run admin -- payment-lifecycle --env-file ./.env.production --json']} />
-            </article>
+            {providerHandoff ? (
+              <article className="ops-panel wide-panel">
+                <PanelHead
+                  icon={Radar}
+                  title="Provider handoff"
+                  action={providerHandoff.productionReady ? 'Ready for evidence' : `${providerHandoff.summary.blocked} blocked`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={providerHandoff.ok} label="Provider handoff ranks signed-session, Gmail, Outlook, SendGrid/outbound email, and Stripe launch work for the local agent." />
+                  <CheckItem ok={providerHandoff.summary.secretSafe} label="Provider handoff is secret-safe and only shows env names, placeholders, commands, digests, and request IDs." />
+                  <CheckItem ok={providerHandoff.productionReady} label={providerHandoff.productionReady ? 'Provider launch rows are production-ready.' : providerHandoff.recommendation.productionGuardrail} />
+                  <CheckItem ok={providerHandoff.nextAction.id === 'provider_launch_evidence' || providerHandoff.nextAction.command.length > 0} label={`Next provider action: ${providerHandoff.nextAction.label} owned by ${titleize(providerHandoff.nextAction.owner)}.`} />
+                </div>
+                <AdminTable
+                  columns={['Priority', 'Provider', 'Action', 'Status', 'Owner', 'Env', 'Command']}
+                  rows={providerHandoffRows.length ? providerHandoffRows : [['-', 'all', 'Provider launch evidence package', 'Ready For Proof', 'Integrations', '-', providerHandoff.nextAction.command]]}
+                />
+                <AdminTable
+                  columns={['Provider', 'Status', 'Config', 'Sandbox', 'Schedule', 'Command']}
+                  rows={providerHandoff.providerRows.map((row) => [
+                    row.label,
+                    titleize(row.status),
+                    row.configurationReady ? 'Configured' : `${row.missingEnv.length} env missing`,
+                    titleize(row.sandboxStatus),
+                    row.scheduleReady ? 'Active' : 'Needs schedule',
+                    row.localAgentCommand,
+                  ])}
+                />
+                <CommandStrip commands={['npm run admin -- provider-handoff --json', 'npm run admin -- provider-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/provider-handoff', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations run-scheduled --force --json', 'npm run admin -- payment-lifecycle --env-file ./.env.production --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={Radar} title="Provider handoff" wide />
+            )}
             <article className="ops-panel">
               <PanelHead
                 icon={RefreshCw}
@@ -2344,7 +2385,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
             <article className="ops-panel">
               <PanelHead
                 icon={RefreshCw}
-                title="Provider sandbox validation"
+                title={providerHandoff ? 'Provider sandbox validation' : 'Loading provider reports'}
                 action={providerSandbox ? `${providerSandbox.summary.passed}/${providerSandbox.summary.total} passed` : 'Run on demand'}
               />
               <div className="check-list">
@@ -2620,71 +2661,83 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               <InlineError message={mutationFeedback.errorFor('admin-payment-checkout', 'admin-payment-portal', 'admin-payment-sync', 'admin-payment-beta-comp', 'admin-payment-webhook-failed', 'admin-payment-webhook-paid', 'admin-payment-cancel')} />
               <CommandStrip commands={['npm run admin -- payments sync tenant_demo', 'npm run admin -- payments checkout tenant_demo plan_team', 'npm run admin -- payments checkout tenant_demo plan_team --live-provider', 'npm run admin -- payments portal tenant_demo --live-provider', 'npm run admin -- payments override tenant_demo beta_access Beta_extension plan_beta', 'npm run admin -- payments webhook invoice.payment_failed sub_demo', 'npm run admin -- payments webhook subscription.updated sub_demo past_due', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments cancel sub_demo']} />
             </article>
-            <article className="ops-panel">
-              <PanelHead
-                icon={WalletCards}
-                title="Payment launch handoff"
-                action={paymentHandoff.productionReady ? 'Production ready' : `${paymentHandoff.summary.blocked} steps need proof`}
-              />
-              <div className="check-list">
-                <CheckItem ok={paymentHandoff.ok} label="Payment launch handoff is secret-safe and ranks Stripe env, Checkout/Portal, signed webhooks, failed-payment recovery, cancellation/resubscription, entitlements, sandbox evidence, and rollback." />
-                <CheckItem ok={paymentHandoff.productionReady} label={paymentHandoff.productionReady ? 'Payment launch proof is complete.' : `Next payment step: ${paymentHandoff.nextStep.label} owned by ${titleize(paymentHandoff.nextStep.owner)}.`} />
-                <CheckItem ok={paymentHandoff.summary.secretSafe} label="Payment handoff commands expose environment variable names and placeholders only; credential values stay out of the report." />
-                <CheckItem ok={paymentHandoff.payment.signedWebhookEvents > 0} label={`${paymentHandoff.payment.signedWebhookEvents} signed Stripe-style webhook event(s) are available for launch evidence.`} />
-              </div>
-              <AdminTable
-                columns={['Priority', 'Step', 'Status', 'Owner', 'Missing env', 'Blocker', 'Command', 'Rollback']}
-                rows={paymentHandoffRows}
-              />
-              <CommandStrip commands={['npm run admin -- payment-handoff --json', 'npm run admin -- payment-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/payment-handoff', 'npm run admin -- payments checkout tenant_demo plan_team --live-provider', 'npm run admin -- payments portal tenant_demo --live-provider', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json']} />
-            </article>
-            <article className="ops-panel">
-              <PanelHead
-                icon={CreditCard}
-                title="Payment lifecycle audit"
-                action={`${paymentLifecycle.summary.localReady}/${paymentLifecycle.summary.total} local checks`}
-              />
-              <div className="check-list">
-                <CheckItem ok={paymentLifecycle.ok} label="Subscription start, Checkout/Portal, failed payment recovery, cancellation, entitlements, and signed webhook replay pass locally." />
-                <CheckItem ok={paymentLifecycle.productionReady} label={paymentLifecycle.productionReady ? 'Payment lifecycle is production-ready.' : paymentLifecycle.recommendation.productionGuardrail} />
-                <CheckItem ok={paymentLifecycle.summary.signedWebhookEvents > 0} label={`${paymentLifecycle.summary.signedWebhookEvents} verified Stripe-style webhook event(s) are recorded without exposing raw secrets.`} />
-              </div>
-              <AdminTable
-                columns={['Area', 'Local', 'Production', 'Evidence', 'Command']}
-                rows={paymentLifecycle.rows.map((row) => [
-                  titleize(row.area),
-                  row.localOk ? 'Ready' : 'Attention',
-                  row.productionOk ? 'Ready' : 'Needs live provider',
-                  row.evidence.join(' · '),
-                  row.commands[0] ?? '-',
-                ])}
-              />
-              <CommandStrip commands={['npm run admin -- payment-lifecycle --json', 'curl http://127.0.0.1:8787/api/payment-lifecycle', 'npm run admin -- payment-lifecycle --env-file ./.env.production --json', 'npm run admin -- provider-launch --env-file ./.env.production --json']} />
-            </article>
-            <article className="ops-panel">
-              <PanelHead
-                icon={Workflow}
-                title="Lifecycle playbook"
-                action={`${lifecyclePlaybook.summary.ready}/${lifecyclePlaybook.summary.total} ready`}
-              />
-              <div className="check-list">
-                <CheckItem ok={lifecyclePlaybook.ok} label={lifecyclePlaybook.ok ? 'Onboarding, RBAC/privacy, source, notification, and billing lifecycle handling is locally mapped.' : `${lifecyclePlaybook.summary.attention} lifecycle playbook row needs attention.`} />
-                <CheckItem ok={lifecyclePlaybook.summary.secretSafe} label="Lifecycle playbook commands use environment variable names and placeholders without credential values." />
-                <CheckItem ok={lifecyclePlaybook.rows.some((row) => row.id === 'failed_payment_recovery' && row.commands.some((command) => command.includes('payments recover')))} label="Failed payment recovery uses Billing recovery sessions and signed Stripe webhook replay." />
-                <CheckItem ok={lifecyclePlaybook.rows.some((row) => row.id === 'multi_member_rbac_privacy')} label="Multi-member org support is governed by membership, role, owner/team scope, and tenant-isolated data boundaries." />
-              </div>
-              <AdminTable
-                columns={['Flow', 'Status', 'Owner', 'Notices', 'Admin action', 'Command']}
-                rows={lifecyclePlaybookRows}
-              />
-              <CommandStrip commands={['npm run admin -- lifecycle-playbook --json', 'curl http://127.0.0.1:8787/api/lifecycle-playbook', 'npm run admin -- onboarding-readiness --json', 'npm run admin -- mailboxes disconnect <mailboxId>', 'npm run admin -- notifications digest tenant_demo', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments checkout tenant_demo plan_team', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>']} />
-            </article>
+            {paymentHandoff ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={WalletCards}
+                  title="Payment launch handoff"
+                  action={paymentHandoff.productionReady ? 'Production ready' : `${paymentHandoff.summary.blocked} steps need proof`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={paymentHandoff.ok} label="Payment launch handoff is secret-safe and ranks Stripe env, Checkout/Portal, signed webhooks, failed-payment recovery, cancellation/resubscription, entitlements, sandbox evidence, and rollback." />
+                  <CheckItem ok={paymentHandoff.productionReady} label={paymentHandoff.productionReady ? 'Payment launch proof is complete.' : `Next payment step: ${paymentHandoff.nextStep.label} owned by ${titleize(paymentHandoff.nextStep.owner)}.`} />
+                  <CheckItem ok={paymentHandoff.summary.secretSafe} label="Payment handoff commands expose environment variable names and placeholders only; credential values stay out of the report." />
+                  <CheckItem ok={paymentHandoff.payment.signedWebhookEvents > 0} label={`${paymentHandoff.payment.signedWebhookEvents} signed Stripe-style webhook event(s) are available for launch evidence.`} />
+                </div>
+                <AdminTable
+                  columns={['Priority', 'Step', 'Status', 'Owner', 'Missing env', 'Blocker', 'Command', 'Rollback']}
+                  rows={paymentHandoffRows}
+                />
+                <CommandStrip commands={['npm run admin -- payment-handoff --json', 'npm run admin -- payment-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/payment-handoff', 'npm run admin -- payments checkout tenant_demo plan_team --live-provider', 'npm run admin -- payments portal tenant_demo --live-provider', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={WalletCards} title="Payment launch handoff" />
+            )}
+            {paymentLifecycle ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={CreditCard}
+                  title="Payment lifecycle audit"
+                  action={`${paymentLifecycle.summary.localReady}/${paymentLifecycle.summary.total} local checks`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={paymentLifecycle.ok} label="Subscription start, Checkout/Portal, failed payment recovery, cancellation, entitlements, and signed webhook replay pass locally." />
+                  <CheckItem ok={paymentLifecycle.productionReady} label={paymentLifecycle.productionReady ? 'Payment lifecycle is production-ready.' : paymentLifecycle.recommendation.productionGuardrail} />
+                  <CheckItem ok={paymentLifecycle.summary.signedWebhookEvents > 0} label={`${paymentLifecycle.summary.signedWebhookEvents} verified Stripe-style webhook event(s) are recorded without exposing raw secrets.`} />
+                </div>
+                <AdminTable
+                  columns={['Area', 'Local', 'Production', 'Evidence', 'Command']}
+                  rows={paymentLifecycle.rows.map((row) => [
+                    titleize(row.area),
+                    row.localOk ? 'Ready' : 'Attention',
+                    row.productionOk ? 'Ready' : 'Needs live provider',
+                    row.evidence.join(' · '),
+                    row.commands[0] ?? '-',
+                  ])}
+                />
+                <CommandStrip commands={['npm run admin -- payment-lifecycle --json', 'curl http://127.0.0.1:8787/api/payment-lifecycle', 'npm run admin -- payment-lifecycle --env-file ./.env.production --json', 'npm run admin -- provider-launch --env-file ./.env.production --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={CreditCard} title="Payment lifecycle audit" />
+            )}
+            {lifecyclePlaybook ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={Workflow}
+                  title="Lifecycle playbook"
+                  action={`${lifecyclePlaybook.summary.ready}/${lifecyclePlaybook.summary.total} ready`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={lifecyclePlaybook.ok} label={lifecyclePlaybook.ok ? 'Onboarding, RBAC/privacy, source, notification, and billing lifecycle handling is locally mapped.' : `${lifecyclePlaybook.summary.attention} lifecycle playbook row needs attention.`} />
+                  <CheckItem ok={lifecyclePlaybook.summary.secretSafe} label="Lifecycle playbook commands use environment variable names and placeholders without credential values." />
+                  <CheckItem ok={lifecyclePlaybook.rows.some((row) => row.id === 'failed_payment_recovery' && row.commands.some((command) => command.includes('payments recover')))} label="Failed payment recovery uses Billing recovery sessions and signed Stripe webhook replay." />
+                  <CheckItem ok={lifecyclePlaybook.rows.some((row) => row.id === 'multi_member_rbac_privacy')} label="Multi-member org support is governed by membership, role, owner/team scope, and tenant-isolated data boundaries." />
+                </div>
+                <AdminTable
+                  columns={['Flow', 'Status', 'Owner', 'Notices', 'Admin action', 'Command']}
+                  rows={lifecyclePlaybookRows}
+                />
+                <CommandStrip commands={['npm run admin -- lifecycle-playbook --json', 'curl http://127.0.0.1:8787/api/lifecycle-playbook', 'npm run admin -- onboarding-readiness --json', 'npm run admin -- mailboxes disconnect <mailboxId>', 'npm run admin -- notifications digest tenant_demo', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments checkout tenant_demo plan_team', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={Workflow} title="Lifecycle playbook" />
+            )}
           </section>
         )}
 
         {(activeTab === 'launch' || (activeTab === 'platform' && platformSubRoute === 'governance')) && (
           <section className="admin-two-column is-visible" data-reveal>
-            {activeTab === 'launch' && (
+            {activeTab === 'launch' && (agentHandoff ? (
             <article className="ops-panel">
               <PanelHead
                 icon={TerminalSquare}
@@ -2703,8 +2756,11 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- agent-handoff --json', 'npm run admin -- agent-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/agent-handoff', 'npm run admin -- launch-gate --json', 'npm run admin -- production-plan --json']} />
             </article>
+            ) : (
+              <ReportLoadingPanel icon={TerminalSquare} title="Local agent handoff" />
+            )
             )}
-            {activeTab === 'launch' && (
+            {activeTab === 'launch' && (providerLaunch ? (
             <article className="ops-panel wide-panel">
               <PanelHead
                 icon={ShieldCheck}
@@ -2732,8 +2788,11 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- provider-launch --json', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/provider-launch', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- mailboxes watch mbx_gmail_sales --live-provider', 'npm run admin -- notifications digest tenant_demo --live-provider', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>']} />
             </article>
+            ) : (
+              <ReportLoadingPanel icon={ShieldCheck} title="Provider launch matrix" wide />
+            )
             )}
-            {activeTab === 'platform' && (
+            {activeTab === 'platform' && (backendHandoff ? (
             <article className="ops-panel">
               <PanelHead
                 icon={Database}
@@ -2752,8 +2811,11 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- backend-handoff --json', 'npm run admin -- backend-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/backend-handoff', 'npm run admin -- backend --env-file ./.env.production --json', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- health --json', 'npm run test:state-service', 'npm run test:jwks-auth', 'npm run scheduler -- --once --dry-run --json']} />
             </article>
+            ) : (
+              <ReportLoadingPanel icon={Database} title="Production backend handoff" />
+            )
             )}
-            {activeTab === 'launch' && (
+            {activeTab === 'launch' && (backendCutover ? (
             <article className="ops-panel wide-panel">
               <PanelHead
                 icon={Route}
@@ -2772,8 +2834,11 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- backend-cutover --json', 'npm run admin -- backend-cutover --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/backend-cutover', 'SIGNAL_STATE_SERVICE_BACKEND=postgres DATABASE_URL=postgres://... SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- health --json', 'SIGNAL_BACKEND_MODE=external-service SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run api', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json']} />
             </article>
+            ) : (
+              <ReportLoadingPanel icon={Route} title="Backend cutover drill" wide />
+            )
             )}
-            {activeTab === 'platform' && (
+            {activeTab === 'platform' && (schedulerHandoff ? (
             <article className="ops-panel wide-panel">
               <PanelHead
                 icon={RefreshCw}
@@ -2792,26 +2857,33 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- scheduler-handoff --json', 'npm run admin -- scheduler-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/scheduler-handoff', 'npm run scheduler -- --once --dry-run --json', 'SIGNAL_JOB_SCHEDULER=signal-scheduler SIGNAL_PROVIDER_VALIDATION_SCHEDULER=signal-scheduler npm run scheduler -- --once --json', 'npm run admin -- operations-health --json', 'npm run admin -- jobs retry <jobId>', 'npm run admin -- jobs drain billing_webhook', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json']} />
             </article>
+            ) : (
+              <ReportLoadingPanel icon={RefreshCw} title="Scheduler operations handoff" wide />
+            )
             )}
             {activeTab === 'launch' && (
             <>
-            <article className="ops-panel wide-panel">
-              <PanelHead
-                icon={CheckCircle2}
-                title="Completion audit"
-                action={`${completionAudit.summary.localReady}/${completionAudit.summary.total} local · ${completionAudit.summary.productionReady}/${completionAudit.summary.total} production`}
-              />
-              <div className="check-list">
-                <CheckItem ok={completionAudit.localComplete} label="The local SaaS slice covers public entry, onboarding, user workspace, admin operations, local-agent CLI, email flow management, and payment architecture." />
-                <CheckItem ok={completionAudit.productionReady} label={completionAudit.productionReady ? 'Production launch evidence is complete.' : completionAudit.recommendation.productionGuardrail} />
-                <CheckItem ok={completionAudit.summary.secretSafe} label="Completion audit exposes evidence, commands, API routes, and environment names without credential values." />
-              </div>
-              <AdminTable
-                columns={['Area', 'Status', 'Owner', 'Local', 'Production', 'Blocker', 'Command']}
-                rows={completionAuditRows}
-              />
-              <CommandStrip commands={['npm run admin -- completion-audit --json', 'npm run admin -- completion-audit --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/completion-audit', 'npm run test:local', 'npm run admin -- agent-handoff --json', 'npm run admin -- launch-gate --env-file ./.env.production --json']} />
-            </article>
+            {completionAudit ? (
+              <article className="ops-panel wide-panel">
+                <PanelHead
+                  icon={CheckCircle2}
+                  title="Completion audit"
+                  action={`${completionAudit.summary.localReady}/${completionAudit.summary.total} local · ${completionAudit.summary.productionReady}/${completionAudit.summary.total} production`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={completionAudit.localComplete} label="The local SaaS slice covers public entry, onboarding, user workspace, admin operations, local-agent CLI, email flow management, and payment architecture." />
+                  <CheckItem ok={completionAudit.productionReady} label={completionAudit.productionReady ? 'Production launch evidence is complete.' : completionAudit.recommendation.productionGuardrail} />
+                  <CheckItem ok={completionAudit.summary.secretSafe} label="Completion audit exposes evidence, commands, API routes, and environment names without credential values." />
+                </div>
+                <AdminTable
+                  columns={['Area', 'Status', 'Owner', 'Local', 'Production', 'Blocker', 'Command']}
+                  rows={completionAuditRows}
+                />
+                <CommandStrip commands={['npm run admin -- completion-audit --json', 'npm run admin -- completion-audit --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/completion-audit', 'npm run test:local', 'npm run admin -- agent-handoff --json', 'npm run admin -- launch-gate --env-file ./.env.production --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={CheckCircle2} title="Completion audit" wide />
+            )}
             <article className="ops-panel">
               <PanelHead
                 icon={Gauge}
@@ -2834,106 +2906,122 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- readiness --json', 'curl http://127.0.0.1:8787/api/readiness', 'npm run admin -- doctor', 'npm run admin -- backend --json', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json']} />
             </article>
-            <article className="ops-panel">
-              <PanelHead
-                icon={Lightbulb}
-                title="Stakeholder QA answers"
-                action={`${qaAnswers.summary.localReady}/${qaAnswers.summary.total} local · ${qaAnswers.summary.productionReady}/${qaAnswers.summary.total} production`}
-              />
-              <div className="check-list">
-                <CheckItem ok={qaAnswers.summary.localReady === qaAnswers.summary.total} label="Dashboard calculations, model boundary, multi-user org, onboarding, notifications, relationship strategy, email flow, and payment lifecycle answers have local evidence." />
-                <CheckItem ok={qaAnswers.productionReady} label={qaAnswers.productionReady ? 'All QA answers are production-ready.' : qaAnswers.recommendation.productionGuardrail} />
-                <CheckItem ok={qaAnswers.summary.secretSafe} label="QA answers expose commands, environment variable names, and evidence counts without credential values." />
-              </div>
-              <AdminTable
-                columns={['Question', 'Status', 'Owner', 'Local', 'Production caveat', 'Command']}
-                rows={qaAnswerRows}
-              />
-              <CommandStrip commands={['npm run admin -- qa-answers --json', 'npm run admin -- qa-answers --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/qa-answers', 'npm run admin -- dashboard-audit --json', 'npm run admin -- onboarding-readiness --json', 'npm run admin -- lifecycle-playbook --json', 'npm run admin -- provider-launch --env-file ./.env.production --json']} />
-            </article>
+            {qaAnswers ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={Lightbulb}
+                  title="Stakeholder QA answers"
+                  action={`${qaAnswers.summary.localReady}/${qaAnswers.summary.total} local · ${qaAnswers.summary.productionReady}/${qaAnswers.summary.total} production`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={qaAnswers.summary.localReady === qaAnswers.summary.total} label="Dashboard calculations, model boundary, multi-user org, onboarding, notifications, relationship strategy, email flow, and payment lifecycle answers have local evidence." />
+                  <CheckItem ok={qaAnswers.productionReady} label={qaAnswers.productionReady ? 'All QA answers are production-ready.' : qaAnswers.recommendation.productionGuardrail} />
+                  <CheckItem ok={qaAnswers.summary.secretSafe} label="QA answers expose commands, environment variable names, and evidence counts without credential values." />
+                </div>
+                <AdminTable
+                  columns={['Question', 'Status', 'Owner', 'Local', 'Production caveat', 'Command']}
+                  rows={qaAnswerRows}
+                />
+                <CommandStrip commands={['npm run admin -- qa-answers --json', 'npm run admin -- qa-answers --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/qa-answers', 'npm run admin -- dashboard-audit --json', 'npm run admin -- onboarding-readiness --json', 'npm run admin -- lifecycle-playbook --json', 'npm run admin -- provider-launch --env-file ./.env.production --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={Lightbulb} title="Stakeholder QA answers" />
+            )}
             </>
             )}
             {activeTab === 'platform' && (
             <>
-            <article className="ops-panel">
-              <PanelHead
-                icon={Users}
-                title="Onboarding and RBAC readiness"
-                action={`${onboardingReadiness.summary.activeAdmins} admin · ${onboardingReadiness.summary.activeMembers} members`}
-              />
-              <div className="check-list">
-                <CheckItem ok={onboardingReadiness.ok} label="Registration, invite acceptance, membership, role, notification focus, and privacy rows pass locally." />
-                <CheckItem ok={onboardingReadiness.productionReady} label={onboardingReadiness.productionReady ? 'Production onboarding controls are ready.' : onboardingReadiness.recommendation.productionGuardrail} />
-                <CheckItem ok={onboardingReadiness.backend.tenantIsolationReady} label={onboardingReadiness.backend.tenantIsolationReady ? 'Tenant isolation is production-configured.' : 'Tenant isolation remains a production backend blocker.'} />
-              </div>
-              <AdminTable
-                columns={['Area', 'Status', 'Local', 'Production']}
-                rows={onboardingReadiness.rows.map((row) => [
-                  titleize(row.area),
-                  titleize(row.status),
-                  row.localOk ? 'Ready' : 'Attention',
-                  row.productionOk ? 'Ready' : 'Not ready',
-                ])}
-              />
-              <CommandStrip commands={['npm run admin -- onboarding-readiness --json', 'curl http://127.0.0.1:8787/api/onboarding-readiness', 'npm run admin -- onboarding-readiness --env-file ./.env.production --json']} />
-            </article>
-            <article className="ops-panel">
-              <PanelHead
-                icon={LockKeyhole}
-                title="Tenant isolation audit"
-                action={`${tenantIsolation.summary.localReady}/${tenantIsolation.summary.total} local checks`}
-              />
-              <div className="check-list">
-                <CheckItem ok={tenantIsolation.ok} label="Tenant membership, owner/team routing, admin gates, and actor-scoped visibility pass locally." />
-                <CheckItem ok={tenantIsolation.productionReady} label={tenantIsolation.productionReady ? 'Production tenant isolation is ready.' : tenantIsolation.recommendation.productionGuardrail} />
-                <CheckItem ok={tenantIsolation.rows.some((row) => row.area === 'actor_scoped_visibility' && row.localOk)} label="Actor-scoped visibility keeps member workspace counts inside the tenant boundary." />
-              </div>
-              <AdminTable
-                columns={['Area', 'Local', 'Production', 'Evidence', 'Command']}
-                rows={tenantIsolation.rows.map((row) => [
-                  titleize(row.area),
-                  row.localOk ? 'Ready' : 'Attention',
-                  row.productionOk ? 'Ready' : 'Not ready',
-                  row.evidence.join(' · '),
-                  row.commands[0] ?? '-',
-                ])}
-              />
-              <CommandStrip commands={['npm run admin -- tenant-isolation --json', 'curl http://127.0.0.1:8787/api/tenant-isolation', 'npm run admin -- backend --env-file ./.env.production --json', 'npm run admin -- production-plan --json']} />
-            </article>
-            <article className="ops-panel">
-              <PanelHead
-                icon={Activity}
-                title="Webhook and rate-limit health"
-                action={operationsHealth.ok ? 'Local ready' : 'Attention'}
-              />
-              <div className="check-list">
-                <CheckItem ok={operationsHealth.ok} label={operationsHealth.ok ? 'Webhook channels, provider backoff, worker queues, lifecycle notices, outbound email, and billing events are locally monitored.' : `${operationsHealth.issues.length} operations health issue needs review.`} />
-                <CheckItem ok={operationsHealth.summary.activeBackoffs === 0} label={operationsHealth.summary.activeBackoffs === 0 ? 'No active provider retry/backoff window is blocking sync or watch processing.' : `${operationsHealth.summary.activeBackoffs} active provider retry/backoff window needs attention.`} />
-                <CheckItem ok={operationsHealth.summary.failedJobs === 0} label={operationsHealth.summary.failedJobs === 0 ? 'No worker queue has failed jobs.' : `${operationsHealth.summary.failedJobs} failed worker job needs retry or drain handling.`} />
-                <CheckItem ok={operationsHealth.productionReady} label={operationsHealth.productionReady ? 'Production operations monitoring is ready.' : operationsHealth.recommendation.productionGuardrail} />
-              </div>
-              <AdminTable
-                columns={['Channel', 'Status', 'Webhook path', 'Evidence', 'Latest']}
-                rows={operationsWebhookRows}
-              />
-              <AdminTable
-                columns={['Provider', 'Result', 'Event', 'HTTP', 'Reason', 'Received']}
-                rows={webhookOutcomeRows.length ? webhookOutcomeRows : [['No webhook outcomes recorded', '-', '-', '-', '-', '-']]}
-              />
-              <AdminTable
-                columns={['Queue', 'Status', 'Jobs', 'Active', 'Failed']}
-                rows={operationsQueueRows}
-              />
-              <AdminTable
-                columns={['Provider', 'Kind', 'Target', 'Retry after', 'Reason']}
-                rows={activeBackoffRows.length ? activeBackoffRows : [['No active provider backoff', '-', '-', '-', '-']]}
-              />
-              <AdminTable
-                columns={['Lifecycle', 'Status', 'Open', 'Critical', 'Latest']}
-                rows={operationsLifecycleRows}
-              />
-              <CommandStrip commands={['npm run admin -- operations-health --json', 'curl http://127.0.0.1:8787/api/operations-health', 'npm run admin -- jobs run outbound_email --limit 1', 'npm run admin -- jobs drain billing_webhook', 'npm run admin -- integrations run-scheduled --json']} />
-            </article>
+            {onboardingReadiness ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={Users}
+                  title="Onboarding and RBAC readiness"
+                  action={`${onboardingReadiness.summary.activeAdmins} admin · ${onboardingReadiness.summary.activeMembers} members`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={onboardingReadiness.ok} label="Registration, invite acceptance, membership, role, notification focus, and privacy rows pass locally." />
+                  <CheckItem ok={onboardingReadiness.productionReady} label={onboardingReadiness.productionReady ? 'Production onboarding controls are ready.' : onboardingReadiness.recommendation.productionGuardrail} />
+                  <CheckItem ok={onboardingReadiness.backend.tenantIsolationReady} label={onboardingReadiness.backend.tenantIsolationReady ? 'Tenant isolation is production-configured.' : 'Tenant isolation remains a production backend blocker.'} />
+                </div>
+                <AdminTable
+                  columns={['Area', 'Status', 'Local', 'Production']}
+                  rows={onboardingReadiness.rows.map((row) => [
+                    titleize(row.area),
+                    titleize(row.status),
+                    row.localOk ? 'Ready' : 'Attention',
+                    row.productionOk ? 'Ready' : 'Not ready',
+                  ])}
+                />
+                <CommandStrip commands={['npm run admin -- onboarding-readiness --json', 'curl http://127.0.0.1:8787/api/onboarding-readiness', 'npm run admin -- onboarding-readiness --env-file ./.env.production --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={Users} title="Onboarding and RBAC readiness" />
+            )}
+            {tenantIsolation ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={LockKeyhole}
+                  title="Tenant isolation audit"
+                  action={`${tenantIsolation.summary.localReady}/${tenantIsolation.summary.total} local checks`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={tenantIsolation.ok} label="Tenant membership, owner/team routing, admin gates, and actor-scoped visibility pass locally." />
+                  <CheckItem ok={tenantIsolation.productionReady} label={tenantIsolation.productionReady ? 'Production tenant isolation is ready.' : tenantIsolation.recommendation.productionGuardrail} />
+                  <CheckItem ok={tenantIsolation.rows.some((row) => row.area === 'actor_scoped_visibility' && row.localOk)} label="Actor-scoped visibility keeps member workspace counts inside the tenant boundary." />
+                </div>
+                <AdminTable
+                  columns={['Area', 'Local', 'Production', 'Evidence', 'Command']}
+                  rows={tenantIsolation.rows.map((row) => [
+                    titleize(row.area),
+                    row.localOk ? 'Ready' : 'Attention',
+                    row.productionOk ? 'Ready' : 'Not ready',
+                    row.evidence.join(' · '),
+                    row.commands[0] ?? '-',
+                  ])}
+                />
+                <CommandStrip commands={['npm run admin -- tenant-isolation --json', 'curl http://127.0.0.1:8787/api/tenant-isolation', 'npm run admin -- backend --env-file ./.env.production --json', 'npm run admin -- production-plan --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={LockKeyhole} title="Tenant isolation audit" />
+            )}
+            {operationsHealth ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={Activity}
+                  title="Webhook and rate-limit health"
+                  action={operationsHealth.ok ? 'Local ready' : 'Attention'}
+                />
+                <div className="check-list">
+                  <CheckItem ok={operationsHealth.ok} label={operationsHealth.ok ? 'Webhook channels, provider backoff, worker queues, lifecycle notices, outbound email, and billing events are locally monitored.' : `${operationsHealth.issues.length} operations health issue needs review.`} />
+                  <CheckItem ok={operationsHealth.summary.activeBackoffs === 0} label={operationsHealth.summary.activeBackoffs === 0 ? 'No active provider retry/backoff window is blocking sync or watch processing.' : `${operationsHealth.summary.activeBackoffs} active provider retry/backoff window needs attention.`} />
+                  <CheckItem ok={operationsHealth.summary.failedJobs === 0} label={operationsHealth.summary.failedJobs === 0 ? 'No worker queue has failed jobs.' : `${operationsHealth.summary.failedJobs} failed worker job needs retry or drain handling.`} />
+                  <CheckItem ok={operationsHealth.productionReady} label={operationsHealth.productionReady ? 'Production operations monitoring is ready.' : operationsHealth.recommendation.productionGuardrail} />
+                </div>
+                <AdminTable
+                  columns={['Channel', 'Status', 'Webhook path', 'Evidence', 'Latest']}
+                  rows={operationsWebhookRows}
+                />
+                <AdminTable
+                  columns={['Provider', 'Result', 'Event', 'HTTP', 'Reason', 'Received']}
+                  rows={webhookOutcomeRows.length ? webhookOutcomeRows : [['No webhook outcomes recorded', '-', '-', '-', '-', '-']]}
+                />
+                <AdminTable
+                  columns={['Queue', 'Status', 'Jobs', 'Active', 'Failed']}
+                  rows={operationsQueueRows}
+                />
+                <AdminTable
+                  columns={['Provider', 'Kind', 'Target', 'Retry after', 'Reason']}
+                  rows={activeBackoffRows.length ? activeBackoffRows : [['No active provider backoff', '-', '-', '-', '-']]}
+                />
+                <AdminTable
+                  columns={['Lifecycle', 'Status', 'Open', 'Critical', 'Latest']}
+                  rows={operationsLifecycleRows}
+                />
+                <CommandStrip commands={['npm run admin -- operations-health --json', 'curl http://127.0.0.1:8787/api/operations-health', 'npm run admin -- jobs run outbound_email --limit 1', 'npm run admin -- jobs drain billing_webhook', 'npm run admin -- integrations run-scheduled --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={Activity} title="Webhook and rate-limit health" />
+            )}
             </>
             )}
             {activeTab === 'launch' && (
@@ -2960,60 +3048,72 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- launch-gate --json', 'npm run admin -- launch-gate --env-file ./.env.production --json', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json', 'npm run admin -- launch-gate verify-package ./signal-launch-evidence.json --json', 'npm run admin -- backend --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/launch-gate', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'SIGNAL_TENANT_ISOLATION_MODE=rls npm run admin -- backend --json', 'SIGNAL_JOB_SCHEDULER=signal-scheduler npm run scheduler']} />
             </article>
-            <article className="ops-panel">
-              <PanelHead
-                icon={Settings2}
-                title="Production env audit"
-                action={`${productionEnv.summary.configuredRequired}/${productionEnv.summary.requiredEnv} configured`}
-              />
-              <div className="check-list">
-                <CheckItem ok={productionEnv.ok} label="The production env audit is secret-safe and reports names only." />
-                <CheckItem ok={productionEnv.templateReady} label={productionEnv.templateReady ? '.env.production.example covers every required production setup name.' : `${productionEnv.summary.templateMissingRequired} required env name(s) are missing from the template.`} />
-                <CheckItem ok={productionEnv.envReady} label={productionEnv.envReady ? 'Selected production env source has every required value configured.' : `${productionEnv.summary.missingRequired} required production env value(s) remain missing or placeholder-only.`} />
-                <CheckItem ok={productionEnv.summary.secretSafe} label="No environment values, provider tokens, webhook secrets, or database passwords are serialized in this report." />
-              </div>
-              <AdminTable
-                columns={['Section', 'Status', 'Owner', 'Configured', 'Missing values', 'Template', 'Command']}
-                rows={productionEnvRows}
-              />
-              <CommandStrip commands={['npm run admin -- production-env --json', 'npm run admin -- production-env --env-file ./.env.production --json', 'npm run admin -- production-env --template ./.env.production.example --json', 'curl http://127.0.0.1:8787/api/production-env', 'npm run admin -- production-plan --env-file ./.env.production --json', 'npm run admin -- launch-gate --env-file ./.env.production --json']} />
-            </article>
-            <article className="ops-panel">
-              <PanelHead
-                icon={Route}
-                title="Production setup plan"
-                action={`${productionPlan.summary.complete}/${productionPlan.summary.total} complete`}
-              />
-              <div className="check-list">
-                <CheckItem ok={productionPlan.ok} label="The local agent can inspect the ordered production setup map without reading credential values." />
-                <CheckItem ok={productionPlan.productionReady} label={productionPlan.productionReady ? 'Every production setup phase has proof.' : productionPlan.recommendation.productionGuardrail} />
-                <CheckItem ok={productionPlan.summary.secretSafe} label="Production setup rows list environment variable names, owner areas, blockers, and proof commands without secret values." />
-                <CheckItem ok={!productionPlan.summary.nextPhaseId} label={productionPlan.summary.nextPhaseId ? `Next phase: ${titleize(productionPlan.summary.nextPhaseId)}` : 'No remaining production setup phase.'} />
-              </div>
-              <AdminTable
-                columns={['Phase', 'Status', 'Owner', 'Missing env', 'Blocker/proof', 'Command']}
-                rows={productionPlanRows}
-              />
-              <CommandStrip commands={['npm run admin -- production-plan --json', 'npm run admin -- production-plan --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/production-plan', 'npm run admin -- launch-gate --env-file ./.env.production --json', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json']} />
-            </article>
-            <article className="ops-panel">
-              <PanelHead
-                icon={Workflow}
-                title="Production operations drill"
-                action={`${productionDrill.summary.productionReady}/${productionDrill.summary.total} ready`}
-              />
-              <div className="check-list">
-                <CheckItem ok={productionDrill.ok} label="The local agent can inspect production drill rows without requiring secret values in app state." />
-                <CheckItem ok={productionDrill.productionReady} label={productionDrill.productionReady ? 'All production rehearsal rows have current external proof.' : productionDrill.recommendation.productionGuardrail} />
-                <CheckItem ok={productionDrill.rows.some((row) => row.area === 'backup_restore_rehearsal')} label="Backup policy, backup digest verification, and restore rehearsal are explicit launch drills." />
-                <CheckItem ok={productionDrill.rows.some((row) => row.area === 'alerting_runbook')} label="Operations alert channel and runbook proof are tracked before production traffic." />
-              </div>
-              <AdminTable
-                columns={['Drill', 'Status', 'Owner', 'Missing env/proof', 'Proof command']}
-                rows={productionDrillRows}
-              />
-              <CommandStrip commands={['npm run admin -- production-drill --json', 'npm run admin -- production-drill --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/production-drill', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- backup ./signal-prod-backup.json --json', 'npm run state-service:admin -- verify ./signal-prod-backup.json --json', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- restore ./signal-prod-backup.json --dry-run --json', 'npm run scheduler -- --once --dry-run --json']} />
-            </article>
+            {productionEnv ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={Settings2}
+                  title="Production env audit"
+                  action={`${productionEnv.summary.configuredRequired}/${productionEnv.summary.requiredEnv} configured`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={productionEnv.ok} label="The production env audit is secret-safe and reports names only." />
+                  <CheckItem ok={productionEnv.templateReady} label={productionEnv.templateReady ? '.env.production.example covers every required production setup name.' : `${productionEnv.summary.templateMissingRequired} required env name(s) are missing from the template.`} />
+                  <CheckItem ok={productionEnv.envReady} label={productionEnv.envReady ? 'Selected production env source has every required value configured.' : `${productionEnv.summary.missingRequired} required production env value(s) remain missing or placeholder-only.`} />
+                  <CheckItem ok={productionEnv.summary.secretSafe} label="No environment values, provider tokens, webhook secrets, or database passwords are serialized in this report." />
+                </div>
+                <AdminTable
+                  columns={['Section', 'Status', 'Owner', 'Configured', 'Missing values', 'Template', 'Command']}
+                  rows={productionEnvRows}
+                />
+                <CommandStrip commands={['npm run admin -- production-env --json', 'npm run admin -- production-env --env-file ./.env.production --json', 'npm run admin -- production-env --template ./.env.production.example --json', 'curl http://127.0.0.1:8787/api/production-env', 'npm run admin -- production-plan --env-file ./.env.production --json', 'npm run admin -- launch-gate --env-file ./.env.production --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={Settings2} title="Production env audit" />
+            )}
+            {productionPlan ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={Route}
+                  title="Production setup plan"
+                  action={`${productionPlan.summary.complete}/${productionPlan.summary.total} complete`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={productionPlan.ok} label="The local agent can inspect the ordered production setup map without reading credential values." />
+                  <CheckItem ok={productionPlan.productionReady} label={productionPlan.productionReady ? 'Every production setup phase has proof.' : productionPlan.recommendation.productionGuardrail} />
+                  <CheckItem ok={productionPlan.summary.secretSafe} label="Production setup rows list environment variable names, owner areas, blockers, and proof commands without secret values." />
+                  <CheckItem ok={!productionPlan.summary.nextPhaseId} label={productionPlan.summary.nextPhaseId ? `Next phase: ${titleize(productionPlan.summary.nextPhaseId)}` : 'No remaining production setup phase.'} />
+                </div>
+                <AdminTable
+                  columns={['Phase', 'Status', 'Owner', 'Missing env', 'Blocker/proof', 'Command']}
+                  rows={productionPlanRows}
+                />
+                <CommandStrip commands={['npm run admin -- production-plan --json', 'npm run admin -- production-plan --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/production-plan', 'npm run admin -- launch-gate --env-file ./.env.production --json', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={Route} title="Production setup plan" />
+            )}
+            {productionDrill ? (
+              <article className="ops-panel">
+                <PanelHead
+                  icon={Workflow}
+                  title="Production operations drill"
+                  action={`${productionDrill.summary.productionReady}/${productionDrill.summary.total} ready`}
+                />
+                <div className="check-list">
+                  <CheckItem ok={productionDrill.ok} label="The local agent can inspect production drill rows without requiring secret values in app state." />
+                  <CheckItem ok={productionDrill.productionReady} label={productionDrill.productionReady ? 'All production rehearsal rows have current external proof.' : productionDrill.recommendation.productionGuardrail} />
+                  <CheckItem ok={productionDrill.rows.some((row) => row.area === 'backup_restore_rehearsal')} label="Backup policy, backup digest verification, and restore rehearsal are explicit launch drills." />
+                  <CheckItem ok={productionDrill.rows.some((row) => row.area === 'alerting_runbook')} label="Operations alert channel and runbook proof are tracked before production traffic." />
+                </div>
+                <AdminTable
+                  columns={['Drill', 'Status', 'Owner', 'Missing env/proof', 'Proof command']}
+                  rows={productionDrillRows}
+                />
+                <CommandStrip commands={['npm run admin -- production-drill --json', 'npm run admin -- production-drill --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/production-drill', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- backup ./signal-prod-backup.json --json', 'npm run state-service:admin -- verify ./signal-prod-backup.json --json', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- restore ./signal-prod-backup.json --dry-run --json', 'npm run scheduler -- --once --dry-run --json']} />
+              </article>
+            ) : (
+              <ReportLoadingPanel icon={Workflow} title="Production operations drill" />
+            )}
             </>
             )}
             {activeTab === 'platform' && (

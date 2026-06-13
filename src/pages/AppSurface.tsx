@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -148,6 +148,7 @@ import {
   type SignalAppData,
   type SignalHandoff,
   type SignalMutationAction,
+  type SignalStateResponse,
   type SourceMessage,
   type StateSummary,
   type SuppressionRule,
@@ -155,7 +156,7 @@ import {
   type User,
   type UserInvite,
 } from '../signalData';
-import type { Accent, AppMode, DataSource, LiveState, RegistrationFormErrors } from './appTypes';
+import type { Accent, AdminReportSection, AppMode, DataSource, LiveState, RegistrationFormErrors } from './appTypes';
 import {
   AccountActionCard,
   AccountEventRow,
@@ -584,7 +585,104 @@ async function completionAuditForResponse(response: ReturnType<typeof fallbackSt
   );
 }
 
+type AdminReportPatch = Partial<Pick<
+  SignalStateResponse,
+  | 'agentHandoff'
+  | 'completionAudit'
+  | 'backendHandoff'
+  | 'backendCutover'
+  | 'schedulerHandoff'
+  | 'digestionPipeline'
+  | 'lifecyclePlaybook'
+  | 'onboardingReadiness'
+  | 'tenantIsolation'
+  | 'operationsHealth'
+  | 'emailHandoff'
+  | 'paymentHandoff'
+  | 'paymentLifecycle'
+  | 'providerHandoff'
+  | 'providerLaunch'
+  | 'productionEnv'
+  | 'productionPlan'
+  | 'productionDrill'
+  | 'qaAnswers'
+>>;
+
+type AdminReportKey = keyof AdminReportPatch;
+type AdminReportLoader = (response: SignalStateResponse, mode: AppMode, signal?: AbortSignal) => Promise<AdminReportPatch>;
+
+const adminSectionReportKeys: Record<AdminReportSection, AdminReportKey[]> = {
+  dashboard: [],
+  organization: ['onboardingReadiness'],
+  email: ['emailHandoff', 'digestionPipeline'],
+  billing: ['paymentHandoff', 'paymentLifecycle', 'lifecyclePlaybook'],
+  integrations: ['providerHandoff'],
+  platform: ['backendHandoff', 'schedulerHandoff', 'onboardingReadiness', 'tenantIsolation', 'operationsHealth'],
+  launch: ['agentHandoff', 'completionAudit', 'backendCutover', 'providerLaunch', 'productionEnv', 'productionPlan', 'productionDrill', 'qaAnswers'],
+  audit: [],
+  cli: [],
+};
+
+const adminSectionReportLoaders: Partial<Record<AdminReportSection, AdminReportLoader>> = {
+  organization: async (response, mode, signal) => ({
+    onboardingReadiness: await onboardingReadinessForResponse(response, mode, signal),
+  }),
+  email: async (response, mode, signal) => {
+    const [emailHandoff, digestionPipeline] = await Promise.all([
+      emailHandoffForResponse(response, mode, signal),
+      digestionPipelineForResponse(response, mode, signal),
+    ]);
+    return { emailHandoff, digestionPipeline };
+  },
+  billing: async (response, mode, signal) => {
+    const [paymentHandoff, paymentLifecycle, lifecyclePlaybook] = await Promise.all([
+      paymentHandoffForResponse(response, mode, signal),
+      paymentLifecycleForResponse(response, mode, signal),
+      lifecyclePlaybookForResponse(response, mode, signal),
+    ]);
+    return { paymentHandoff, paymentLifecycle, lifecyclePlaybook };
+  },
+  integrations: async (response, mode, signal) => ({
+    providerHandoff: await providerHandoffForResponse(response, mode, signal),
+  }),
+  platform: async (response, mode, signal) => {
+    const [backendHandoff, schedulerHandoff, onboardingReadiness, tenantIsolation, operationsHealth] = await Promise.all([
+      backendHandoffForResponse(response, mode, signal),
+      schedulerHandoffForResponse(response, mode, signal),
+      onboardingReadinessForResponse(response, mode, signal),
+      tenantIsolationForResponse(response, mode, signal),
+      operationsHealthForResponse(response, mode, signal),
+    ]);
+    return { backendHandoff, schedulerHandoff, onboardingReadiness, tenantIsolation, operationsHealth };
+  },
+  launch: async (response, mode, signal) => {
+    const [agentHandoff, completionAudit, backendCutover, providerLaunch, productionEnv, productionPlan, productionDrill, qaAnswers] = await Promise.all([
+      agentHandoffForResponse(response, mode, signal),
+      completionAuditForResponse(response, mode, signal),
+      backendCutoverForResponse(response, mode, signal),
+      providerLaunchForResponse(response, mode, signal),
+      productionEnvForResponse(response, mode, signal),
+      productionPlanForResponse(response, mode, signal),
+      productionDrillForResponse(response, mode, signal),
+      qaAnswersForResponse(response, mode, signal),
+    ]);
+    return { agentHandoff, completionAudit, backendCutover, providerLaunch, productionEnv, productionPlan, productionDrill, qaAnswers };
+  },
+};
+
+function adminSectionHasReports(response: SignalStateResponse, section: AdminReportSection) {
+  return adminSectionReportKeys[section].every((key) => Boolean(response[key]));
+}
+
 async function enrichStateResponse(response: ReturnType<typeof fallbackStateResponse>, mode: AppMode, signal?: AbortSignal) {
+  const dashboardAudit = await dashboardAuditForResponse(response, mode, signal);
+  return {
+    ...response,
+    dashboardAudit,
+  };
+}
+
+async function enrichFullStateResponse(response: ReturnType<typeof fallbackStateResponse>, mode: AppMode, signal?: AbortSignal) {
   const [agentHandoff, completionAudit, backendHandoff, backendCutover, schedulerHandoff, dashboardAudit, digestionPipeline, lifecyclePlaybook, onboardingReadiness, tenantIsolation, operationsHealth, emailHandoff, paymentLifecycle, paymentHandoff, productionDrill, productionEnv, productionPlan, providerHandoff, providerLaunch, qaAnswers] = await Promise.all([
     agentHandoffForResponse(response, mode, signal),
     completionAuditForResponse(response, mode, signal),
@@ -637,7 +735,9 @@ async function fetchLiveStateBundle(mode: AppMode, signal?: AbortSignal) {
     fetchSignalState(signal),
     fetchProviderReadiness(signal),
   ]);
-  const response = await enrichStateResponse(stateResponse, mode, signal);
+  const response = mode === 'admin'
+    ? await enrichStateResponse(stateResponse, mode, signal)
+    : await enrichFullStateResponse(stateResponse, mode, signal);
   return {
     readiness: readinessResponse.readiness,
     response,
@@ -964,7 +1064,8 @@ function MarketingPage() {
 }
 
 function RegistrationOnboarding({ liveState }: { liveState: LiveState }) {
-  const { actorUserId, claimInvite, data, error, isLoading, isMutating, lastMutation, mutate, onboardingReadiness, refresh, registerWorkspace, setActorUserId, source, summary } = liveState;
+  const { actorUserId, backendReadiness, claimInvite, data, error, isLoading, isMutating, lastMutation, mutate, onboardingReadiness: loadedOnboardingReadiness, refresh, registerWorkspace, setActorUserId, source, summary } = liveState;
+  const onboardingReadiness = loadedOnboardingReadiness ?? fallbackOnboardingReadiness(data, backendReadiness);
   const currentActor = data.users.find((user) => user.id === actorUserId) ?? data.users[0];
   const tenant = data.tenants.find((item) => item.id === currentActor?.tenantId) ?? data.tenants[0];
   const currentMembership = membershipForUser(data, currentActor?.id, tenant?.id);
@@ -1537,7 +1638,8 @@ function prioritySortValue(priority: 'critical' | 'high' | 'medium' | 'low') {
 
 
 function UserWorkspace({ liveState }: { liveState: LiveState }) {
-  const { actorUserId, data, error, isLoading, isMutating, lastMutation, mutate, onboardingReadiness, refresh, setActorUserId, source, summary } = liveState;
+  const { actorUserId, backendReadiness, data, error, isLoading, isMutating, lastMutation, mutate, onboardingReadiness: loadedOnboardingReadiness, refresh, setActorUserId, source, summary } = liveState;
+  const onboardingReadiness = loadedOnboardingReadiness ?? fallbackOnboardingReadiness(data, backendReadiness);
   const users = data.users;
   const currentUser = users.find((user) => user.id === actorUserId) ?? users.find((user) => user.team === 'sales') ?? users[0];
   const tenant = data.tenants.find((item) => item.id === currentUser?.tenantId) ?? data.tenants[0];
@@ -2333,6 +2435,24 @@ function useSignalAppState(mode: AppMode) {
   const [isValidatingSandbox, setIsValidatingSandbox] = useState(false);
   const [lastMutation, setLastMutation] = useState<string | null>(null);
   const [actorUserId, setActorUserIdState] = useState<string>(() => activeUserIdFromResponse(fallbackStateResponse()));
+  const [sectionLoading, setSectionLoading] = useState<Partial<Record<AdminReportSection, boolean>>>({});
+  const responseRef = useRef(response);
+  const loadedSectionsRef = useRef<Set<AdminReportSection>>(new Set());
+  const sectionRequestsRef = useRef<Partial<Record<AdminReportSection, Promise<void>>>>({});
+  const sectionCacheVersionRef = useRef(0);
+
+  useEffect(() => {
+    responseRef.current = response;
+  }, [response]);
+
+  function resetAdminSectionCache(nextResponse?: SignalStateResponse) {
+    sectionCacheVersionRef.current += 1;
+    sectionRequestsRef.current = {};
+    loadedSectionsRef.current = new Set(
+      (Object.keys(adminSectionReportKeys) as AdminReportSection[]).filter((section) => nextResponse && adminSectionHasReports(nextResponse, section)),
+    );
+    setSectionLoading({});
+  }
 
   async function refresh() {
     setIsLoading(true);
@@ -2340,6 +2460,8 @@ function useSignalAppState(mode: AppMode) {
     try {
       const next = await fetchLiveStateBundle(mode);
       setResponse(next.response);
+      responseRef.current = next.response;
+      resetAdminSectionCache(next.response);
       setProviderReadiness(next.readiness);
       setActorUserIdState(activeUserIdFromResponse(next.response));
       setSource('api');
@@ -2347,6 +2469,8 @@ function useSignalAppState(mode: AppMode) {
       const fallback = fallbackStateResponse();
       setSource('seed');
       setResponse(fallback);
+      responseRef.current = fallback;
+      resetAdminSectionCache(fallback);
       setProviderReadiness(fallbackProviderReadiness());
       setProviderSandbox(null);
       setActorUserIdState(activeUserIdFromResponse(fallback));
@@ -2370,6 +2494,8 @@ function useSignalAppState(mode: AppMode) {
         summary: result.summary,
       }, mode);
       setResponse(nextResponse);
+      responseRef.current = nextResponse;
+      resetAdminSectionCache(nextResponse);
       setActorUserIdState(activeUserIdFromResponse({ state: result.state, summary: result.summary }));
       try {
         const readiness = await fetchProviderReadiness();
@@ -2403,6 +2529,8 @@ function useSignalAppState(mode: AppMode) {
         summary: result.summary,
       }, mode);
       setResponse(nextResponse);
+      responseRef.current = nextResponse;
+      resetAdminSectionCache(nextResponse);
       setActorUserIdState(activeUserIdFromResponse({ state: result.state, summary: result.summary }));
       try {
         const readiness = await fetchProviderReadiness();
@@ -2436,6 +2564,8 @@ function useSignalAppState(mode: AppMode) {
         summary: result.summary,
       }, mode);
       setResponse(nextResponse);
+      responseRef.current = nextResponse;
+      resetAdminSectionCache(nextResponse);
       setActorUserIdState(activeUserIdFromResponse({ state: result.state, summary: result.summary }));
       try {
         const readiness = await fetchProviderReadiness();
@@ -2476,6 +2606,8 @@ function useSignalAppState(mode: AppMode) {
         summary: result.summary,
       }, mode);
       setResponse(nextResponse);
+      responseRef.current = nextResponse;
+      resetAdminSectionCache(nextResponse);
       setActorUserIdState(activeUserIdFromResponse({ state: result.state, summary: result.summary }));
       try {
         const readiness = await fetchProviderReadiness();
@@ -2500,13 +2632,16 @@ function useSignalAppState(mode: AppMode) {
       setProviderSandbox(result.sandbox);
       if (result.state && result.summary) {
         const backend = response.backend ?? fallbackBackendReadiness();
-        setResponse(await enrichStateResponse({
+        const nextResponse = await enrichStateResponse({
           backend,
           doctor: result.doctor ?? doctorLocalState(result.state),
           ok: true,
           state: result.state,
           summary: result.summary,
-        }, mode));
+        }, mode);
+        setResponse(nextResponse);
+        responseRef.current = nextResponse;
+        resetAdminSectionCache(nextResponse);
         setActorUserIdState(activeUserIdFromResponse({ state: result.state, summary: result.summary }));
       }
       setLastMutation(
@@ -2531,13 +2666,16 @@ function useSignalAppState(mode: AppMode) {
       }
       if (result.state && result.summary) {
         const backend = response.backend ?? fallbackBackendReadiness();
-        setResponse(await enrichStateResponse({
+        const nextResponse = await enrichStateResponse({
           backend,
           doctor: result.doctor ?? doctorLocalState(result.state),
           ok: true,
           state: result.state,
           summary: result.summary,
-        }, mode));
+        }, mode);
+        setResponse(nextResponse);
+        responseRef.current = nextResponse;
+        resetAdminSectionCache(nextResponse);
         setActorUserIdState(activeUserIdFromResponse({ state: result.state, summary: result.summary }));
       }
       try {
@@ -2572,6 +2710,8 @@ function useSignalAppState(mode: AppMode) {
     fetchLiveStateBundle(mode, abortController.signal)
       .then((next) => {
         setResponse(next.response);
+        responseRef.current = next.response;
+        resetAdminSectionCache(next.response);
         setProviderReadiness(next.readiness);
         setActorUserIdState(activeUserIdFromResponse(next.response));
         setSource('api');
@@ -2582,6 +2722,8 @@ function useSignalAppState(mode: AppMode) {
         }
         const fallback = fallbackStateResponse();
         setResponse(fallback);
+        responseRef.current = fallback;
+        resetAdminSectionCache(fallback);
         setProviderReadiness(fallbackProviderReadiness());
         setProviderSandbox(null);
         setActorUserIdState(activeUserIdFromResponse(fallback));
@@ -2597,26 +2739,70 @@ function useSignalAppState(mode: AppMode) {
     return () => abortController.abort();
   }, [mode]);
 
+  const loadAdminSection = useCallback(async (section: AdminReportSection) => {
+    if (mode !== 'admin' || source === 'seed') {
+      loadedSectionsRef.current.add(section);
+      return;
+    }
+
+    if (loadedSectionsRef.current.has(section)) {
+      return;
+    }
+
+    const currentResponse = responseRef.current;
+    if (adminSectionHasReports(currentResponse, section)) {
+      loadedSectionsRef.current.add(section);
+      return;
+    }
+
+    const loader = adminSectionReportLoaders[section];
+    if (!loader) {
+      loadedSectionsRef.current.add(section);
+      return;
+    }
+
+    const inFlight = sectionRequestsRef.current[section];
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const requestVersion = sectionCacheVersionRef.current;
+    setSectionLoading((current) => ({ ...current, [section]: true }));
+
+    const request = loader(currentResponse, mode)
+      .then((patch) => {
+        if (sectionCacheVersionRef.current !== requestVersion) {
+          return;
+        }
+        loadedSectionsRef.current.add(section);
+        setResponse((current) => {
+          const next = { ...current, ...patch };
+          responseRef.current = next;
+          return next;
+        });
+      })
+      .catch((sectionError) => {
+        if (sectionCacheVersionRef.current === requestVersion) {
+          setError(sectionError instanceof Error ? sectionError.message : String(sectionError));
+        }
+      })
+      .finally(() => {
+        if (sectionCacheVersionRef.current === requestVersion) {
+          delete sectionRequestsRef.current[section];
+          setSectionLoading((current) => ({ ...current, [section]: false }));
+        }
+      });
+
+    sectionRequestsRef.current[section] = request;
+    return request;
+  }, [mode, source]);
+
   return {
-    agentHandoff: response.agentHandoff ?? fallbackLocalAgentHandoff(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-    completionAudit: response.completionAudit ?? fallbackCompletionAudit(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-    backendHandoff: response.backendHandoff ?? fallbackBackendHandoff(
-      response.state,
-      response.backend ?? fallbackBackendReadiness(),
-      response.operationsHealth ?? fallbackOperationsHealth(response.state, response.backend ?? fallbackBackendReadiness()),
-      response.productionDrill ?? fallbackProductionDrill(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-    ),
-    backendCutover: response.backendCutover ?? fallbackBackendCutover(
-      response.state,
-      response.backend ?? fallbackBackendReadiness(),
-      response.productionDrill ?? fallbackProductionDrill(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-    ),
-    schedulerHandoff: response.schedulerHandoff ?? fallbackSchedulerHandoff(
-      response.state,
-      response.backend ?? fallbackBackendReadiness(),
-      response.operationsHealth ?? fallbackOperationsHealth(response.state, response.backend ?? fallbackBackendReadiness()),
-      response.productionDrill ?? fallbackProductionDrill(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-    ),
+    agentHandoff: response.agentHandoff,
+    completionAudit: response.completionAudit,
+    backendHandoff: response.backendHandoff,
+    backendCutover: response.backendCutover,
+    schedulerHandoff: response.schedulerHandoff,
     backendReadiness: response.backend ?? fallbackBackendReadiness(),
     data: response.state,
     dashboardAudit: response.dashboardAudit ?? fallbackDashboardAudit(response.state, response.backend ?? fallbackBackendReadiness()),
@@ -2626,40 +2812,30 @@ function useSignalAppState(mode: AppMode) {
     isMutating,
     isValidatingSandbox,
     claimInvite,
-    lifecyclePlaybook: response.lifecyclePlaybook ?? fallbackLifecyclePlaybook(response.state, response.backend ?? fallbackBackendReadiness()),
-    digestionPipeline: response.digestionPipeline ?? fallbackSignalDigestionPipeline(response.state, response.backend ?? fallbackBackendReadiness()),
+    lifecyclePlaybook: response.lifecyclePlaybook,
+    digestionPipeline: response.digestionPipeline,
     lastMutation,
+    loadAdminSection,
     mutate,
-    onboardingReadiness: response.onboardingReadiness ?? fallbackOnboardingReadiness(response.state, response.backend ?? fallbackBackendReadiness()),
-    tenantIsolation: response.tenantIsolation ?? fallbackTenantIsolationAudit(response.state, response.backend ?? fallbackBackendReadiness()),
-    operationsHealth: response.operationsHealth ?? fallbackOperationsHealth(response.state, response.backend ?? fallbackBackendReadiness()),
-    emailHandoff: response.emailHandoff ?? fallbackEmailHandoff(
-      response.state,
-      response.backend ?? fallbackBackendReadiness(),
-      providerReadiness,
-      response.providerLaunch ?? fallbackProviderLaunchMatrix(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-      response.operationsHealth ?? fallbackOperationsHealth(response.state, response.backend ?? fallbackBackendReadiness()),
-    ),
-    paymentHandoff: response.paymentHandoff ?? fallbackPaymentHandoff(
-      response.state,
-      response.backend ?? fallbackBackendReadiness(),
-      providerReadiness,
-      response.providerLaunch ?? fallbackProviderLaunchMatrix(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-      response.paymentLifecycle ?? fallbackPaymentLifecycleAudit(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-    ),
-    paymentLifecycle: response.paymentLifecycle ?? fallbackPaymentLifecycleAudit(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-    providerHandoff: response.providerHandoff ?? fallbackProviderHandoff(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness, response.providerLaunch ?? fallbackProviderLaunchMatrix(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness)),
-    providerLaunch: response.providerLaunch ?? fallbackProviderLaunchMatrix(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-    productionEnv: response.productionEnv ?? fallbackProductionEnvAudit(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-    productionPlan: response.productionPlan ?? fallbackProductionPlan(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
-    productionDrill: response.productionDrill ?? fallbackProductionDrill(response.state, response.backend ?? fallbackBackendReadiness()),
-    qaAnswers: response.qaAnswers ?? fallbackQaAnswers(response.state, response.backend ?? fallbackBackendReadiness(), providerReadiness),
+    onboardingReadiness: response.onboardingReadiness,
+    tenantIsolation: response.tenantIsolation,
+    operationsHealth: response.operationsHealth,
+    emailHandoff: response.emailHandoff,
+    paymentHandoff: response.paymentHandoff,
+    paymentLifecycle: response.paymentLifecycle,
+    providerHandoff: response.providerHandoff,
+    providerLaunch: response.providerLaunch,
+    productionEnv: response.productionEnv,
+    productionPlan: response.productionPlan,
+    productionDrill: response.productionDrill,
+    qaAnswers: response.qaAnswers,
     providerReadiness,
     providerSandbox,
     registerWorkspace,
     refresh,
     actorUserId,
     runScheduledValidation,
+    sectionLoading,
     setActorUserId,
     validateSandbox,
     source,
