@@ -52,7 +52,9 @@ import {
   createSessionToken,
 } from './signal-session-token.mjs';
 import {
+  consumeTokenBucketState,
   createRateLimiter,
+  createTokenBucketRateLimiter,
   requestClientIp,
 } from './signal-api-rate-limit.mjs';
 
@@ -308,6 +310,37 @@ test('invite claim rate limiter blocks repeated attempts per client IP', () => {
   assert.equal(second.allowed, true);
   assert.equal(third.allowed, false);
   assert(third.retryAfterMs > 0);
+});
+
+test('shared token bucket adapter enforces API limits across limiter instances', async () => {
+  let now = 1_000;
+  const buckets = new Map();
+  const sharedStore = {
+    kind: 'fake-shared',
+    async consumeTokenBucket(key, config, timestamp) {
+      const result = consumeTokenBucketState(buckets.get(key), config, timestamp);
+      buckets.set(key, result.bucket);
+      return {
+        allowed: result.allowed,
+        retryAfterSeconds: result.retryAfterSeconds,
+      };
+    },
+    reset() {
+      buckets.clear();
+    },
+  };
+  const firstReplica = createTokenBucketRateLimiter({ now: () => now, store: sharedStore });
+  const secondReplica = createTokenBucketRateLimiter({ now: () => now, store: sharedStore });
+
+  const first = await firstReplica.consume('authenticated|203.0.113.10', { burst: 1, rps: 0.01 });
+  const second = await secondReplica.consume('authenticated|203.0.113.10', { burst: 1, rps: 0.01 });
+  now += 100_000;
+  const afterRefill = await secondReplica.consume('authenticated|203.0.113.10', { burst: 1, rps: 0.01 });
+
+  assert.equal(first.allowed, true);
+  assert.equal(second.allowed, false);
+  assert.equal(second.retryAfterSeconds, 100);
+  assert.equal(afterRefill.allowed, true);
 });
 
 test('requestClientIp prefers the first X-Forwarded-For address', () => {
@@ -1501,6 +1534,68 @@ test('Outlook webhook accepts notifications with matching clientState', async (t
   const payload = await parseJsonResponse(response);
   assert.equal(response.status, 200, JSON.stringify(payload));
   assert.equal(payload.action, 'mailboxes.watch-notification');
+});
+
+test('Outlook lifecycle webhook validates clientState and queues watch renewal', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-outlook-lifecycle-valid-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const state = await loadState({ statePath });
+  const mailboxId = 'mbx_outlook_success';
+  const clientState = createProviderWatchSecret('outlook', mailboxId, { local: true });
+  state.emailWatchSubscriptions = state.emailWatchSubscriptions ?? [];
+  state.emailWatchSubscriptions.push({
+    clientStateDigest: digestClientState(clientState),
+    expirationAt: new Date(Date.now() + 86_400_000).toISOString(),
+    id: 'watch_outlook_lifecycle_test',
+    mailboxId,
+    notificationUrl: `http://127.0.0.1:${port}/api/webhooks/outlook`,
+    provider: 'outlook',
+    providerWatchId: 'outlook-sub-lifecycle-test',
+    status: 'active',
+  });
+  await saveState(state, { statePath });
+
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: { SIGNAL_WEBHOOK_ACTOR: 'usr_admin' },
+  });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/webhooks/outlook/lifecycle`, {
+    body: JSON.stringify({
+      value: [
+        {
+          clientState,
+          lifecycleEvent: 'reauthorizationRequired',
+          subscriptionId: 'outlook-sub-lifecycle-test',
+        },
+      ],
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.equal(payload.action, 'mailboxes.watch-lifecycle');
+  assert.deepEqual(payload.details.lifecycleEvents, ['reauthorizationRequired']);
+
+  const updated = await loadState({ statePath });
+  const watch = updated.emailWatchSubscriptions.find((candidate) => candidate.id === 'watch_outlook_lifecycle_test');
+  assert.equal(watch.status, 'expired');
+  assert.equal(watch.providerLastErrorCode, 'OUTLOOK_LIFECYCLE_REAUTHORIZATION_REQUIRED');
+  assert.equal(watch.clientStateDigest, digestClientState(clientState));
+  assert(!JSON.stringify(watch).includes(clientState), 'raw Outlook clientState must not be stored on lifecycle intake');
+  assert(updated.jobs.some((job) => job.type === 'mailbox.watch.renew' && job.targetId === mailboxId && job.status === 'queued'));
+  assert(updated.lifecycleNotices.some((notice) => notice.trigger === 'provider_watch_attention' && notice.sourceIds?.watchId === watch.id));
 });
 
 test('POST /api/invites/claim returns 429 after repeated attempts from the same IP', async (t) => {

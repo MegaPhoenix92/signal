@@ -19,6 +19,7 @@ import {
   handleSignedEmailDeliveryWebhook,
   handleSignedSendGridEmailDeliveryWebhook,
   handleSignedStripePaymentWebhook,
+  handleOutlookLifecycleNotification,
   handleProviderWatchNotification,
   issueSessionToken,
   launchGateReport,
@@ -41,6 +42,7 @@ import {
   productReadinessReport,
   recordWebhookIngestOutcome,
   recordProviderSandboxValidation,
+  reconcileBillingReturn,
   registerTenantWorkspace,
   redactClientStateSecrets,
   resolveStatePath,
@@ -83,6 +85,7 @@ import {
   createLogger,
 } from './signal-logger.mjs';
 import {
+  createApiRateLimiter,
   createRateLimiter,
   requestClientIp,
 } from './signal-api-rate-limit.mjs';
@@ -97,7 +100,7 @@ const inviteClaimRateLimiter = createRateLimiter({
   windowMs: Number(process.env.SIGNAL_INVITE_CLAIM_RATE_WINDOW_MS ?? 60 * 60 * 1000),
 });
 const corsHeaders = 'Authorization, Content-Type, Signal-Email-Signature, Stripe-Signature, X-Signal-Actor, X-Signal-Session, X-Twilio-Email-Event-Webhook-Signature, X-Twilio-Email-Event-Webhook-Timestamp';
-const rateBuckets = new Map();
+const apiRateLimiter = createApiRateLimiter({ env: process.env });
 const logger = createLogger({ service: 'signal-api' });
 
 function positiveNumber(value, fallback) {
@@ -133,11 +136,6 @@ function rateLimitConfig(kind) {
   };
 }
 
-function clientAddress(req) {
-  const forwardedFor = req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim();
-  return forwardedFor || req.socket.remoteAddress || 'unknown';
-}
-
 function rateLimitKind(pathname) {
   if (pathname === '/api/health') {
     return 'exempt';
@@ -149,6 +147,7 @@ function rateLimitKind(pathname) {
     pathname === '/api/registration'
     || pathname === '/api/invites/claim'
     || pathname === '/api/session/token'
+    || pathname === '/api/billing/return'
     || pathname.startsWith('/api/oauth/')
     || pathname.startsWith('/api/email/unsubscribe/')
   ) {
@@ -162,35 +161,27 @@ function rateLimitIdentity(req, kind) {
   const actor = req.headers['x-signal-actor']?.toString();
   return [
     kind,
-    clientAddress(req),
+    requestClientIp(req),
     token ? `session:${token.slice(0, 32)}` : '',
     actor ? `actor:${actor}` : '',
   ].filter(Boolean).join('|');
 }
 
-function enforceRateLimit(req, pathname) {
+async function enforceRateLimit(req, pathname) {
   const kind = rateLimitKind(pathname);
   if (kind === 'exempt') {
     return;
   }
   const config = rateLimitConfig(kind);
   const key = rateLimitIdentity(req, kind);
-  const now = Date.now();
-  const bucket = rateBuckets.get(key) ?? { tokens: config.burst, updatedAt: now };
-  const elapsedSeconds = Math.max(0, (now - bucket.updatedAt) / 1000);
-  bucket.tokens = Math.min(config.burst, bucket.tokens + elapsedSeconds * config.rps);
-  bucket.updatedAt = now;
-  if (bucket.tokens < 1) {
-    const retryAfterSeconds = Math.max(1, Math.ceil((1 - bucket.tokens) / config.rps));
-    rateBuckets.set(key, bucket);
+  const result = await apiRateLimiter.consume(key, config);
+  if (!result.allowed) {
     throw new SignalStateError('Rate limit exceeded.', {
       code: 'RATE_LIMITED',
       status: 429,
-      details: { kind, retryAfterSeconds },
+      details: { kind, retryAfterSeconds: result.retryAfterSeconds },
     });
   }
-  bucket.tokens -= 1;
-  rateBuckets.set(key, bucket);
 }
 
 function configuredCorsOrigins() {
@@ -269,6 +260,14 @@ function sendText(res, statusCode, text, contentType = 'text/plain; charset=utf-
   res.end(text);
 }
 
+function sendRedirect(res, statusCode, location) {
+  res.writeHead(statusCode, securityHeaders({
+    'Cache-Control': 'no-store',
+    Location: location,
+  }));
+  res.end();
+}
+
 function notFound(res) {
   sendJson(res, 404, { ok: false, error: 'Not found' });
 }
@@ -338,6 +337,228 @@ function statePayloadForActor(state, actorOrUserId) {
   };
 }
 
+function paginationParameter(url, name, fallback, { max = null } = {}) {
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw === '') {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new SignalStateError('Invalid pagination parameter.', {
+      code: 'INVALID_PAGINATION',
+      status: 400,
+      details: { max, min: 1, parameter: name },
+    });
+  }
+  return max ? Math.min(parsed, max) : parsed;
+}
+
+function paginationForUrl(url) {
+  const page = paginationParameter(url, 'page', 1);
+  const pageSize = paginationParameter(url, 'pageSize', 25, { max: 100 });
+  const offset = (page - 1) * pageSize;
+  return { offset, page, pageSize };
+}
+
+function paginatedItems(items, url) {
+  const pagination = paginationForUrl(url);
+  const total = items.length;
+  const pageItems = items.slice(pagination.offset, pagination.offset + pagination.pageSize);
+  return {
+    items: pageItems,
+    pagination: {
+      hasNextPage: pagination.offset + pagination.pageSize < total,
+      hasPreviousPage: pagination.page > 1,
+      page: pagination.page,
+      pageSize: pagination.pageSize,
+      total,
+      totalPages: Math.ceil(total / pagination.pageSize),
+    },
+  };
+}
+
+function projectSignal(signal) {
+  return {
+    id: signal.id,
+    tenantId: signal.tenantId,
+    account: signal.account,
+    type: signal.type,
+    severity: signal.severity,
+    confidence: signal.confidence,
+    summary: signal.summary,
+    ownerUserId: signal.ownerUserId,
+    status: signal.status,
+    sourceMessageId: signal.sourceMessageId,
+    flowId: signal.flowId,
+    routeTo: signal.routeTo,
+    routingRuleId: signal.routingRuleId,
+    latestHandoffId: signal.latestHandoffId,
+    latestHandoffStatus: signal.latestHandoffStatus,
+    receivedAt: signal.receivedAt,
+    feedbackCount: signal.feedbackCount,
+    lastFeedbackLabel: signal.lastFeedbackLabel,
+    lastFeedbackAt: signal.lastFeedbackAt,
+  };
+}
+
+function projectMailbox(mailbox) {
+  return {
+    id: mailbox.id,
+    tenantId: mailbox.tenantId,
+    ownerUserId: mailbox.ownerUserId,
+    provider: mailbox.provider,
+    status: mailbox.status,
+    selectedScopes: mailbox.selectedScopes ?? [],
+    syncPolicy: mailbox.syncPolicy ? { ...mailbox.syncPolicy } : undefined,
+    credentialStatus: mailbox.credentialStatus,
+    credentialExpiresAt: mailbox.credentialExpiresAt,
+    credentialStoredAt: mailbox.credentialStoredAt,
+    createdAt: mailbox.createdAt,
+    updatedAt: mailbox.updatedAt,
+  };
+}
+
+function projectJob(job) {
+  return {
+    id: job.id,
+    deadLetterId: job.deadLetterId,
+    originalJobId: job.originalJobId,
+    tenantId: job.tenantId,
+    queue: job.queue,
+    type: job.type,
+    targetId: job.targetId,
+    status: job.status,
+    attempts: job.attempts,
+    maxAttempts: job.maxAttempts,
+    lastRunAt: job.lastRunAt,
+    nextRunAt: job.nextRunAt,
+    message: job.message,
+    providerRetryAfterAt: job.providerRetryAfterAt,
+    providerValidationRunId: job.providerValidationRunId,
+    providerValidationStatus: job.providerValidationStatus,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  };
+}
+
+function paymentRows(state) {
+  return [
+    ...(state.subscriptions ?? []).map((subscription) => ({
+      kind: 'subscription',
+      id: subscription.id,
+      tenantId: subscription.tenantId,
+      provider: subscription.provider,
+      planId: subscription.planId,
+      status: subscription.status,
+      trialEndsAt: subscription.trialEndsAt,
+      currentPeriodEndAt: subscription.currentPeriodEndAt,
+      billingOverrideId: subscription.billingOverrideId,
+      createdAt: subscription.createdAt,
+      updatedAt: subscription.updatedAt,
+    })),
+    ...(state.entitlements ?? []).map((entitlement) => ({
+      kind: 'entitlement',
+      id: entitlement.id,
+      tenantId: entitlement.tenantId,
+      subscriptionId: entitlement.subscriptionId,
+      source: entitlement.source,
+      status: entitlement.status,
+      seatLimit: entitlement.seatLimit,
+      mailboxLimit: entitlement.mailboxLimit,
+      signalLimit: entitlement.signalLimit,
+      retentionDays: entitlement.retentionDays,
+      adminControls: entitlement.adminControls,
+      updatedAt: entitlement.updatedAt,
+    })),
+    ...(state.billingSessions ?? []).map((session) => ({
+      kind: 'billing_session',
+      id: session.id,
+      tenantId: session.tenantId,
+      provider: session.provider,
+      type: session.type,
+      status: session.status,
+      planId: session.planId,
+      subscriptionId: session.subscriptionId,
+      invoiceId: session.invoiceId,
+      createdAt: session.createdAt,
+      expiresAt: session.expiresAt,
+      completedAt: session.completedAt,
+    })),
+    ...(state.invoices ?? []).map((invoice) => ({
+      kind: 'invoice',
+      id: invoice.id,
+      tenantId: invoice.tenantId,
+      subscriptionId: invoice.subscriptionId,
+      provider: invoice.provider,
+      status: invoice.status,
+      amountDueCents: invoice.amountDueCents,
+      currency: invoice.currency,
+      createdAt: invoice.createdAt,
+      dueAt: invoice.dueAt,
+      paidAt: invoice.paidAt,
+      retryCount: invoice.retryCount,
+      nextPaymentAttemptAt: invoice.nextPaymentAttemptAt,
+    })),
+    ...(state.billingOverrides ?? []).map((override) => ({
+      kind: 'billing_override',
+      id: override.id,
+      tenantId: override.tenantId,
+      subscriptionId: override.subscriptionId,
+      type: override.type,
+      status: override.status,
+      planId: override.planId,
+      amountCents: override.amountCents,
+      createdAt: override.createdAt,
+      expiresAt: override.expiresAt,
+      revokedAt: override.revokedAt,
+    })),
+    ...(state.paymentEvents ?? []).map((event) => ({
+      kind: 'payment_event',
+      id: event.id,
+      tenantId: event.tenantId,
+      provider: event.provider,
+      type: event.type,
+      status: event.status,
+      appliedType: event.appliedType,
+      createdAt: event.createdAt,
+      providerEventType: event.providerEventType,
+      providerStatus: event.providerStatus,
+      amountCents: event.amountCents,
+      subscriptionId: event.subscriptionId,
+      invoiceId: event.invoiceId,
+      sessionId: event.sessionId,
+      billingOverrideId: event.billingOverrideId,
+      signatureStatus: event.signatureStatus,
+      signatureVerifiedAt: event.signatureVerifiedAt,
+    })),
+  ];
+}
+
+function paymentSummary(state, total) {
+  return {
+    total,
+    subscriptions: state.subscriptions?.length ?? 0,
+    entitlements: state.entitlements?.length ?? 0,
+    billingSessions: state.billingSessions?.length ?? 0,
+    invoices: state.invoices?.length ?? 0,
+    billingOverrides: state.billingOverrides?.length ?? 0,
+    paymentEvents: state.paymentEvents?.length ?? 0,
+  };
+}
+
+async function sendDomainReadList(req, res, url, { collection, items, summary = null }) {
+  const { auth, state } = await authenticatedState(req);
+  const payload = statePayloadForActor(state, auth.actorUserId);
+  const rows = items(payload.state);
+  const paged = paginatedItems(rows, url);
+  sendJson(res, 200, {
+    ok: true,
+    [collection]: paged.items,
+    pagination: paged.pagination,
+    ...(summary ? { summary: summary(payload.state, rows.length) } : {}),
+  });
+}
+
 async function noteWebhookOutcome(provider, { accepted, eventType = 'unknown', reason = null, status = null, tenantId = null } = {}) {
   try {
     await recordWebhookIngestOutcome({ accepted, eventType, provider, reason, status, tenantId }, { statePath });
@@ -362,7 +583,41 @@ function webhookProviderForPath(pathname) {
   if (pathname === '/api/webhooks/outlook') {
     return 'outlook';
   }
+  if (pathname === '/api/webhooks/outlook/lifecycle') {
+    return 'outlook';
+  }
   return null;
+}
+
+function appBaseUrl() {
+  return (process.env.SIGNAL_APP_BASE_URL ?? process.env.SIGNAL_PUBLIC_APP_URL ?? 'http://127.0.0.1:5173').replace(/\/+$/, '');
+}
+
+function billingReturnResultFromQuery(url) {
+  if (url.searchParams.get('canceled') === 'true' || url.searchParams.get('cancelled') === 'true') {
+    return 'cancel';
+  }
+  return url.searchParams.get('result')
+    ?? url.searchParams.get('status')
+    ?? url.searchParams.get('billing')
+    ?? (url.searchParams.has('portal') ? 'portal_return' : null);
+}
+
+function billingReturnRedirect(details = {}) {
+  const status = details.redirectStatus === 'cancel'
+    ? 'cancel'
+    : details.redirectStatus === 'portal_return' || details.sessionType === 'portal'
+      ? 'portal_return'
+      : 'success';
+  const route = status === 'portal_return' ? 'admin' : 'workspace';
+  const params = new URLSearchParams({ billing: status });
+  if (details.tenantId) {
+    params.set('tenantId', details.tenantId);
+  }
+  if (details.sessionId) {
+    params.set('billingSessionId', details.sessionId);
+  }
+  return `${appBaseUrl()}/#${route}?${params.toString()}`;
 }
 
 function errorPayload(error) {
@@ -389,7 +644,7 @@ function errorPayload(error) {
 }
 
 async function preflightRequest(req, url) {
-  enforceRateLimit(req, url.pathname);
+  await enforceRateLimit(req, url.pathname);
   const contentLength = req.headers['content-length'];
   if (contentLength && Number(contentLength) > bodyLimitBytes()) {
     throw new SignalStateError('Request body is too large.', {
@@ -1196,6 +1451,39 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/signals') {
+    await sendDomainReadList(req, res, url, {
+      collection: 'signals',
+      items: (state) => (state.signals ?? []).map(projectSignal),
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/mailboxes') {
+    await sendDomainReadList(req, res, url, {
+      collection: 'mailboxes',
+      items: (state) => (state.mailboxes ?? []).map(projectMailbox),
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/jobs') {
+    await sendDomainReadList(req, res, url, {
+      collection: 'jobs',
+      items: (state) => (state.jobs ?? []).map(projectJob),
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/payments') {
+    await sendDomainReadList(req, res, url, {
+      collection: 'payments',
+      items: paymentRows,
+      summary: paymentSummary,
+    });
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/state') {
     const { auth, state } = await authenticatedState(req);
     const payload = statePayloadForActor(state, auth.actorUserId);
@@ -1339,6 +1627,22 @@ async function route(req, res) {
       summary: result.summary,
       doctor: doctor(result.state),
     });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/billing/return') {
+    const auth = await requestStateAuth(req);
+    const result = await reconcileBillingReturn({
+      billingSessionId: url.searchParams.get('billingSessionId') ?? url.searchParams.get('billing_session_id'),
+      providerSessionId: url.searchParams.get('providerSessionId') ?? url.searchParams.get('provider_session_id') ?? url.searchParams.get('session_id'),
+      result: billingReturnResultFromQuery(url),
+      sessionId: url.searchParams.get('sessionId') ?? url.searchParams.get('session_id'),
+      tenantId: url.searchParams.get('tenantId') ?? url.searchParams.get('tenant_id'),
+    }, {
+      actorUserId: auth.actorUserId,
+      statePath,
+    });
+    sendRedirect(res, 303, billingReturnRedirect(result.details));
     return;
   }
 
@@ -1498,6 +1802,34 @@ async function route(req, res) {
       accepted: true,
       eventType: body?.message?.attributes?.eventType ?? body?.eventType ?? result.action,
       tenantId: result.details?.tenantId ?? null,
+      status: 200,
+    });
+    sendJson(res, 200, {
+      ok: true,
+      action: result.action,
+      details: result.details,
+      summary: result.summary,
+      doctor: doctor(result.state),
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/webhooks/outlook/lifecycle') {
+    const validationToken = url.searchParams.get('validationToken');
+    if (validationToken) {
+      sendText(res, 200, validationToken);
+      return;
+    }
+    const body = await readBody(req);
+    const webhookActorUserId = requireWebhookActor(resolveWebhookActor(req));
+    const result = await handleOutlookLifecycleNotification(body, {
+      actorUserId: webhookActorUserId,
+      statePath,
+    });
+    await noteWebhookOutcome('outlook', {
+      accepted: true,
+      eventType: body?.value?.[0]?.lifecycleEvent ?? result.action,
+      tenantId: result.details?.tenantIds?.[0] ?? null,
       status: 200,
     });
     sendJson(res, 200, {

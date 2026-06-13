@@ -603,6 +603,7 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
   assert.equal(cliProviderLaunch.launch.summary.total, 5);
   assert.equal(cliProviderLaunch.launch.summary.secretSafe, true);
   assert(cliProviderLaunch.launch.rows.some((row) => row.id === 'gmail' && row.webhookPath === '/api/webhooks/gmail' && row.evidenceCommands.some((command) => command.includes('validate-sandbox'))));
+  assert(cliProviderLaunch.launch.rows.some((row) => row.id === 'outlook' && row.lifecycleWebhookPath === '/api/webhooks/outlook/lifecycle'));
   assert(cliProviderLaunch.launch.rows.some((row) => row.id === 'outbound-email' && row.label.includes('SendGrid') && row.signedReplayCommand.includes('notifications webhook-signed')));
   assert(cliProviderLaunch.launch.rows.some((row) => row.id === 'stripe' && row.launchCommands.some((command) => command.includes('payments checkout'))));
   assert(!JSON.stringify(cliProviderLaunch.launch).includes(sessionSecret), 'provider launch matrix must not serialize local session secrets');
@@ -767,6 +768,50 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(state.payload.state.providerValidationRuns[0].status, 'blocked');
     assert(state.payload.state.providerValidationSchedules.some((schedule) => schedule.providerId === 'stripe' && schedule.cadence === 'weekly'));
     assert(!JSON.stringify(state.payload.state.providerValidationRuns).includes(sessionSecret), 'provider validation evidence should not expose local session secret');
+
+    const pagedSignals = await requestApi('/api/signals?pageSize=2', { token: adminToken });
+    assert.equal(pagedSignals.status, 200);
+    assert.equal(pagedSignals.payload.pagination.page, 1);
+    assert.equal(pagedSignals.payload.pagination.pageSize, 2);
+    assert.equal(pagedSignals.payload.pagination.total, state.payload.state.signals.length);
+    assert.equal(pagedSignals.payload.pagination.hasNextPage, true);
+    assert.equal(pagedSignals.payload.signals.length, 2);
+
+    const clampedJobs = await requestApi('/api/jobs?pageSize=500', { token: adminToken });
+    assert.equal(clampedJobs.status, 200);
+    assert.equal(clampedJobs.payload.pagination.pageSize, 100);
+    assert.equal(clampedJobs.payload.pagination.total, state.payload.state.jobs.length);
+
+    const payments = await requestApi('/api/payments', { token: adminToken });
+    assert.equal(payments.status, 200);
+    assert(payments.payload.payments.some((row) => row.kind === 'subscription' && row.id === 'sub_demo'));
+    assert(payments.payload.payments.some((row) => row.kind === 'invoice' && row.id === 'inv_demo_paid'));
+    assert.equal(payments.payload.summary.subscriptions, state.payload.state.subscriptions.length);
+    assert.equal(payments.payload.pagination.total, payments.payload.summary.total);
+
+    const invalidPageSize = await requestApi('/api/signals?pageSize=0', { token: adminToken });
+    assert.equal(invalidPageSize.status, 400);
+    assert.equal(invalidPageSize.payload.code, 'INVALID_PAGINATION');
+    assert.equal(invalidPageSize.payload.details.parameter, 'pageSize');
+
+    const memberScopedState = await requestApi('/api/state', { token: memberToken });
+    assert.equal(memberScopedState.status, 200);
+    assert.deepEqual(memberScopedState.payload.state.signals.map((signal) => signal.id).sort(), ['sig_product_001']);
+    assert.deepEqual(memberScopedState.payload.state.mailboxes.map((mailbox) => mailbox.id).sort(), ['mbx_gmail_product']);
+
+    const memberSignals = await requestApi('/api/signals', { token: memberToken });
+    assert.equal(memberSignals.status, 200);
+    assert.deepEqual(memberSignals.payload.signals.map((signal) => signal.id).sort(), ['sig_product_001']);
+    assert.equal(memberSignals.payload.signals.some((signal) => signal.ownerUserId === 'usr_sales'), false);
+    assert.equal(JSON.stringify(memberSignals.payload.signals).includes('sig_expansion_001'), false);
+    assert.equal(Object.hasOwn(memberSignals.payload.signals[0], 'sourceSnippet'), false);
+
+    const memberMailboxes = await requestApi('/api/mailboxes', { token: memberToken });
+    assert.equal(memberMailboxes.status, 200);
+    assert.deepEqual(memberMailboxes.payload.mailboxes.map((mailbox) => mailbox.id).sort(), ['mbx_gmail_product']);
+    assert.equal(memberMailboxes.payload.mailboxes.some((mailbox) => mailbox.ownerUserId === 'usr_sales'), false);
+    assert.equal(JSON.stringify(memberMailboxes.payload.mailboxes).includes('mbx_gmail_sales'), false);
+    assert.equal(Object.hasOwn(memberMailboxes.payload.mailboxes[0], 'credentialDigest'), false);
 
     const integrations = await requestApi('/api/integrations', { token: adminToken });
     assert.equal(integrations.status, 200);
@@ -1954,6 +1999,25 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(syncedEntitlement.seatLimit, 10);
     assert.equal(syncedState.payload.state.subscriptions.find((item) => item.id === expiredOverrideSubscription.id).status, 'canceled');
     assert(syncedState.payload.state.paymentEvents.some((event) => event.type === 'billing.sync.completed' && event.tenantId === 'tenant_demo'));
+
+    const returnCheckout = await mutate(adminToken, 'payments.checkout', {
+      planId: 'plan_team',
+      tenantId: 'tenant_demo',
+    });
+    assert.equal(returnCheckout.status, 200);
+    const billingReturn = await fetch(`${apiBaseUrl}/api/billing/return?session_id=${encodeURIComponent(returnCheckout.payload.details.sessionId)}&result=success`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+      redirect: 'manual',
+    });
+    assert.equal(billingReturn.status, 303);
+    assert.match(billingReturn.headers.get('location'), /^http:\/\/127\.0\.0\.1:5173\/#workspace\?billing=success/);
+
+    const returnedState = await requestApi('/api/state', { token: adminToken });
+    const returnedSession = returnedState.payload.state.billingSessions.find((item) => item.id === returnCheckout.payload.details.sessionId);
+    assert.equal(returnedSession.status, 'returned');
+    assert.equal(returnedSession.returnResult, 'success');
+    assert(returnedState.payload.state.paymentEvents.some((event) => event.type === 'billing.return.success' && event.sessionId === returnedSession.id));
+    assert(returnedState.payload.state.jobs.some((job) => job.type === 'payment.return.success' && job.targetId === returnedSession.id && job.status === 'succeeded'));
 
     const cliSync = await runCli(['payments', 'sync', 'tenant_demo', '--json'], { SIGNAL_ADMIN_ACTOR: 'usr_admin' });
     assert.equal(cliSync.action, 'payments.sync');
