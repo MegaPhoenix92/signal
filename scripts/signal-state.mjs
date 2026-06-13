@@ -4073,6 +4073,7 @@ export function lifecyclePlaybookReport(state, {
       actionReady: rows.filter((row) => row.status === 'action_ready').length,
       attention: rows.filter((row) => row.status === 'attention').length,
       criticalNotices: rows.reduce((total, row) => total + row.critical, 0),
+      localReady: rows.filter((row) => row.localOk).length,
       observed: rows.filter((row) => row.observed > 0).length,
       openNotices: rows.reduce((total, row) => total + row.open, 0),
       ready: rows.filter((row) => row.status === 'ready' || row.status === 'observed').length,
