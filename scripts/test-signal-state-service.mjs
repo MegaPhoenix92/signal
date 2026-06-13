@@ -311,6 +311,33 @@ class FakePgPool {
   }
 }
 
+const stateServiceDatabaseRequirement = 'DATABASE_URL or SIGNAL_STATE_SERVICE_DATABASE_URL';
+
+function productionBackendEnv(databaseEnv = {}) {
+  return {
+    ...databaseEnv,
+    SIGNAL_API_CORS_ORIGINS: 'https://signal.example',
+    SIGNAL_AUTH_JWKS_URL: 'https://idp.example/.well-known/jwks.json',
+    SIGNAL_AUTH_PROVIDER: 'jwks',
+    SIGNAL_BACKEND_MODE: 'external-service',
+    SIGNAL_COOKIE_SECURE: 'true',
+    SIGNAL_JOB_SCHEDULER: 'signal-scheduler',
+    SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
+    SIGNAL_PROVIDER_VALIDATION_SCHEDULER: 'signal-scheduler',
+    SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
+    SIGNAL_SESSION_SECRET: 'super_secret_session_value_32chars!',
+    SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+    SIGNAL_STATE_SERVICE_RLS: 'true',
+    SIGNAL_STATE_SERVICE_URL: 'https://state.signal.example/state',
+    SIGNAL_TENANT_ISOLATION_MODE: 'rls',
+    SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
+  };
+}
+
+function readinessCheck(readiness, id) {
+  return readiness.checks.find((item) => item.id === id);
+}
+
 test('Signal state service postgres backend migrates, versions, and backs up state', async () => {
   const config = createStateServiceConfig({
     DATABASE_URL: 'postgres://signal:secret@db.example/signal',
@@ -451,6 +478,48 @@ test('Signal state service postgres RLS mode fails startup when policies are abs
     () => store.init(),
     (error) => error instanceof StateServiceError && error.code === 'STATE_SERVICE_RLS_NOT_VERIFIED',
   );
+});
+
+test('Backend readiness treats DATABASE_URL as one-of state-service database configuration', () => {
+  const readiness = backendReadiness({
+    env: productionBackendEnv({
+      DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+    }),
+  });
+  assert.equal(readiness.productionReady, true);
+  assert.equal(readinessCheck(readiness, 'state_service_storage')?.ok, true);
+  assert.equal(readinessCheck(readiness, 'tenant_isolation')?.ok, true);
+  assert.equal(readiness.summary.missingRequiredEnv.includes('SIGNAL_STATE_SERVICE_DATABASE_URL'), false);
+  assert.equal(readiness.summary.missingRequiredEnv.includes(stateServiceDatabaseRequirement), false);
+});
+
+test('Backend readiness treats SIGNAL_STATE_SERVICE_DATABASE_URL as one-of state-service database configuration', () => {
+  const readiness = backendReadiness({
+    env: productionBackendEnv({
+      SIGNAL_STATE_SERVICE_DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+    }),
+  });
+  assert.equal(readiness.productionReady, true);
+  assert.equal(readinessCheck(readiness, 'state_service_storage')?.ok, true);
+  assert.equal(readinessCheck(readiness, 'tenant_isolation')?.ok, true);
+  assert.equal(readiness.summary.missingRequiredEnv.includes('DATABASE_URL'), false);
+  assert.equal(readiness.summary.missingRequiredEnv.includes(stateServiceDatabaseRequirement), false);
+});
+
+test('Backend readiness reports missing state-service database one-of requirement once', () => {
+  const readiness = backendReadiness({
+    env: productionBackendEnv(),
+  });
+  const stateServiceStorage = readinessCheck(readiness, 'state_service_storage');
+  const tenantIsolation = readinessCheck(readiness, 'tenant_isolation');
+  const summaryDatabaseMissing = readiness.summary.missingRequiredEnv.filter((item) =>
+    item.includes('DATABASE_URL') || item.includes('SIGNAL_STATE_SERVICE_DATABASE_URL'));
+  assert.equal(readiness.productionReady, false);
+  assert.equal(stateServiceStorage?.ok, false);
+  assert.deepEqual(stateServiceStorage?.missingEnv, [stateServiceDatabaseRequirement]);
+  assert.equal(tenantIsolation?.ok, false);
+  assert.deepEqual(tenantIsolation?.missingEnv, [stateServiceDatabaseRequirement]);
+  assert.deepEqual(summaryDatabaseMissing, [stateServiceDatabaseRequirement]);
 });
 
 test('Backend readiness blocks production boot when API system-actor and cookie-secure env are missing', () => {

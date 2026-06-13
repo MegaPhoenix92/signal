@@ -2838,7 +2838,7 @@ async function run() {
       return;
 
     case 'session':
-      if (!subcommand) {
+      if (!subcommand || subcommand === 'list') {
         await listSession();
         return;
       }
@@ -3409,7 +3409,7 @@ async function run() {
       return;
 
     case 'jobs':
-      if (!subcommand) {
+      if (!subcommand || subcommand === 'list') {
         await listJobs();
         return;
       }
