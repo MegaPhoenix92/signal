@@ -52,7 +52,9 @@ import {
   createSessionToken,
 } from './signal-session-token.mjs';
 import {
+  consumeTokenBucketState,
   createRateLimiter,
+  createTokenBucketRateLimiter,
   requestClientIp,
 } from './signal-api-rate-limit.mjs';
 
@@ -308,6 +310,37 @@ test('invite claim rate limiter blocks repeated attempts per client IP', () => {
   assert.equal(second.allowed, true);
   assert.equal(third.allowed, false);
   assert(third.retryAfterMs > 0);
+});
+
+test('shared token bucket adapter enforces API limits across limiter instances', async () => {
+  let now = 1_000;
+  const buckets = new Map();
+  const sharedStore = {
+    kind: 'fake-shared',
+    async consumeTokenBucket(key, config, timestamp) {
+      const result = consumeTokenBucketState(buckets.get(key), config, timestamp);
+      buckets.set(key, result.bucket);
+      return {
+        allowed: result.allowed,
+        retryAfterSeconds: result.retryAfterSeconds,
+      };
+    },
+    reset() {
+      buckets.clear();
+    },
+  };
+  const firstReplica = createTokenBucketRateLimiter({ now: () => now, store: sharedStore });
+  const secondReplica = createTokenBucketRateLimiter({ now: () => now, store: sharedStore });
+
+  const first = await firstReplica.consume('authenticated|203.0.113.10', { burst: 1, rps: 0.01 });
+  const second = await secondReplica.consume('authenticated|203.0.113.10', { burst: 1, rps: 0.01 });
+  now += 100_000;
+  const afterRefill = await secondReplica.consume('authenticated|203.0.113.10', { burst: 1, rps: 0.01 });
+
+  assert.equal(first.allowed, true);
+  assert.equal(second.allowed, false);
+  assert.equal(second.retryAfterSeconds, 100);
+  assert.equal(afterRefill.allowed, true);
 });
 
 test('requestClientIp prefers the first X-Forwarded-For address', () => {
