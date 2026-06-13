@@ -31,16 +31,116 @@ redis.call('PEXPIRE', key, ttl)
 return {1, 0}
 `;
 
-export function requestClientIp(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (forwarded) {
-    const raw = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-    const first = raw.split(',')[0]?.trim();
-    if (first) {
-      return first;
+function normalizeIpAddress(address) {
+  const raw = String(address ?? '').trim();
+  if (!raw) {
+    return null;
+  }
+  if (raw.startsWith('::ffff:')) {
+    const mapped = raw.slice('::ffff:'.length);
+    if (net.isIP(mapped) === 4) {
+      return mapped;
     }
   }
-  return req.socket?.remoteAddress ?? 'unknown';
+  return net.isIP(raw) ? raw : null;
+}
+
+function parseIpv4Parts(address) {
+  const parts = address.split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return null;
+  }
+  return parts;
+}
+
+function ipv4ToInt(parts) {
+  return ((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3];
+}
+
+function parseIpv4Cidr(entry) {
+  const [address, prefixText] = entry.split('/');
+  const parts = parseIpv4Parts(address);
+  const prefix = Number(prefixText);
+  if (!parts || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
+    return null;
+  }
+  const mask = prefix === 0 ? 0 : ((0xffffffff << (32 - prefix)) >>> 0);
+  return {
+    network: ipv4ToInt(parts) & mask,
+    mask,
+  };
+}
+
+function ipMatchesTrustedProxy(ip, trustedEntries) {
+  const normalized = normalizeIpAddress(ip);
+  if (!normalized) {
+    return false;
+  }
+  for (const entry of trustedEntries) {
+    if (!entry.includes('/')) {
+      if (normalizeIpAddress(entry) === normalized) {
+        return true;
+      }
+      continue;
+    }
+    const cidr = parseIpv4Cidr(entry);
+    const parts = parseIpv4Parts(normalized);
+    if (!cidr || !parts) {
+      continue;
+    }
+    if ((ipv4ToInt(parts) & cidr.mask) === cidr.network) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseTrustedProxyList(env = process.env) {
+  const raw = env.SIGNAL_TRUSTED_PROXY;
+  if (!raw) {
+    return [];
+  }
+  return raw.split(',').map((entry) => entry.trim()).filter(Boolean);
+}
+
+function parseForwardedFor(headerValue) {
+  const raw = Array.isArray(headerValue) ? headerValue.join(',') : String(headerValue ?? '');
+  return raw.split(',').map((hop) => hop.trim()).filter(Boolean);
+}
+
+function clientIpFromForwardedChain(hops, trustedEntries) {
+  for (let index = hops.length - 1; index >= 0; index -= 1) {
+    const hop = hops[index];
+    if (!ipMatchesTrustedProxy(hop, trustedEntries)) {
+      return normalizeIpAddress(hop);
+    }
+  }
+  return null;
+}
+
+export function normalizeInviteClaimRateLimitEmail(email) {
+  const normalized = String(email ?? '').trim().toLowerCase();
+  if (!normalized || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    return 'invalid';
+  }
+  return normalized;
+}
+
+export function requestClientIp(req, { env = process.env } = {}) {
+  const socketIp = normalizeIpAddress(req.socket?.remoteAddress) ?? req.socket?.remoteAddress ?? 'unknown';
+  const trustedEntries = parseTrustedProxyList(env);
+  if (!trustedEntries.length || !ipMatchesTrustedProxy(socketIp, trustedEntries)) {
+    return socketIp;
+  }
+
+  const forwarded = req.headers['x-forwarded-for'];
+  if (!forwarded) {
+    return socketIp;
+  }
+
+  const hops = parseForwardedFor(forwarded);
+  const clientIp = clientIpFromForwardedChain(hops, trustedEntries);
+  return clientIp ?? socketIp;
 }
 
 export function createRateLimiter({

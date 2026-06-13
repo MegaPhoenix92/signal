@@ -963,7 +963,8 @@
       "accepted": true,
       "reason": null,
       "receivedAt": "2026-06-03T00:05:00.000Z",
-      "status": 200
+      "status": 200,
+      "tenantId": "tenant_demo"
     },
     {
       "id": "wh_seed_gmail_accepted",
@@ -972,7 +973,8 @@
       "accepted": true,
       "reason": null,
       "receivedAt": "2026-06-03T00:06:00.000Z",
-      "status": 200
+      "status": 200,
+      "tenantId": "tenant_demo"
     }
   ]
 }
