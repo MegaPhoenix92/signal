@@ -2453,14 +2453,40 @@ h3 {
   border-color: rgba(255, 253, 247, 0.14);
 }
 
+.admin-console-layout {
+  align-items: start;
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(190px, 230px) minmax(0, 1fr);
+}
+
+.admin-sidebar {
+  min-width: 0;
+  position: sticky;
+  top: 88px;
+}
+
+.admin-panel-region,
+.admin-tabpanel {
+  min-width: 0;
+}
+
+.admin-tabpanel:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid var(--lime);
+  outline-offset: 4px;
+}
+
+.admin-tabpanel[hidden] {
+  display: none;
+}
+
 .admin-tabbar {
   background: rgba(255, 253, 247, 0.08);
   border: 1px solid rgba(255, 253, 247, 0.14);
   border-radius: 8px;
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 8px;
-  margin-bottom: 18px;
   padding: 8px;
 }
 
@@ -2471,11 +2497,14 @@ h3 {
   border-radius: 6px;
   color: rgba(255, 253, 247, 0.72);
   cursor: pointer;
-  display: inline-flex;
+  display: flex;
   font-weight: 800;
   gap: 8px;
+  justify-content: flex-start;
   min-height: 42px;
   padding: 0 13px;
+  text-align: left;
+  width: 100%;
 }
 
 .admin-tab:hover,
@@ -2493,6 +2522,58 @@ h3 {
 
 .admin-grid {
   align-items: stretch;
+}
+
+.admin-launch-banner,
+.dashboard-audit-panel {
+  grid-column: 1 / -1;
+}
+
+.admin-launch-banner {
+  border-color: rgba(255, 253, 247, 0.22);
+}
+
+.admin-launch-banner.is-ready {
+  background: rgba(218, 255, 107, 0.14);
+}
+
+.admin-launch-banner.is-blocked {
+  background: rgba(255, 115, 90, 0.12);
+}
+
+.launch-banner-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.launch-banner-grid > div {
+  background: rgba(255, 253, 247, 0.08);
+  border: 1px solid rgba(255, 253, 247, 0.14);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 14px;
+}
+
+.launch-banner-grid span {
+  color: rgba(255, 253, 247, 0.62);
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.launch-banner-grid strong {
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-size: 2rem;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.launch-banner-grid small {
+  color: rgba(255, 253, 247, 0.68);
+  font-weight: 700;
 }
 
 .admin-two-column {
@@ -2736,8 +2817,18 @@ h3 {
   .account-monitor-grid,
   .workspace-grid,
   .registration-grid,
-  .admin-two-column {
+  .admin-two-column,
+  .admin-console-layout,
+  .launch-banner-grid {
     grid-template-columns: 1fr;
+  }
+
+  .admin-sidebar {
+    position: static;
+  }
+
+  .admin-tabbar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .metric-grid,
@@ -2775,6 +2866,14 @@ h3 {
     max-width: 100%;
     overflow-x: hidden;
     padding: 14px;
+  }
+
+  .admin-tabbar {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-tab {
+    min-height: 44px;
   }
 
   .product-hero-panel,

@@ -459,35 +459,41 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   const adminRoute = await navigate(client, `${baseUrl}#admin`, 'Manage users, email flows, and payments locally.');
   assert.equal(adminRoute.snapshot.hash, '#admin');
   assert.equal(adminRoute.snapshot.errorOverlay, false);
-  assertTextIncludes(adminRoute.text, 'Readiness checks', 'admin overview should render readiness checks');
+  assertTextIncludes(adminRoute.text, 'Readiness checks', 'admin dashboard should render readiness checks');
+  assertTextIncludes(adminRoute.text, 'Launch gate go/no-go', 'admin dashboard should render launch gate go/no-go banner');
+  assertTextIncludes(adminRoute.text, 'Dashboard calculation audit', 'admin dashboard should render dashboard audit summary');
   assertTextIncludes(adminRoute.text, 'Admin console', 'admin route should render the admin console heading');
 
-  const adminOverviewRoute = await navigate(client, `${baseUrl}#admin/overview`, 'Readiness checks');
-  assert.equal(adminOverviewRoute.snapshot.hash, '#admin/overview');
-  assertTextIncludes(adminOverviewRoute.text, 'Admin console', 'admin overview deep link should render overview tab content');
+  const adminOverviewRoute = await navigate(client, `${baseUrl}#admin/overview`, 'Dashboard calculation audit');
+  assert.equal(adminOverviewRoute.snapshot.hash, '#admin/dashboard');
+  assertTextIncludes(adminOverviewRoute.text, 'dashboard-audit --json', 'legacy admin overview deep link should render dashboard tab content');
 
-  const adminOpsRoute = await navigate(client, `${baseUrl}#admin/ops`, 'Webhook and rate-limit health');
-  assert.equal(adminOpsRoute.snapshot.hash, '#admin/ops');
-  assertTextIncludes(adminOpsRoute.text, 'API session registry', 'admin operations deep link should render operations tab content');
+  const adminOpsRoute = await navigate(client, `${baseUrl}#admin/ops`, 'Production launch gate');
+  assert.equal(adminOpsRoute.snapshot.hash, '#admin/launch');
+  assertTextIncludes(adminOpsRoute.text, 'Provider launch matrix', 'legacy admin operations deep link should render launch readiness content');
 
   const adminPaymentsRoute = await navigate(client, `${baseUrl}#admin/payments`, 'Billing overrides');
-  assert.equal(adminPaymentsRoute.snapshot.hash, '#admin/payments');
-  assertTextIncludes(adminPaymentsRoute.text, 'Payment lifecycle audit', 'admin payments deep link should render payments tab content');
+  assert.equal(adminPaymentsRoute.snapshot.hash, '#admin/billing');
+  assertTextIncludes(adminPaymentsRoute.text, 'Payment lifecycle audit', 'legacy admin payments deep link should render billing tab content');
 
   await evaluate(client, 'history.back()');
-  const backText = await waitForText(client, 'Webhook and rate-limit health');
+  const backText = await waitForText(client, 'Production launch gate');
   const backHash = await evaluate(client, 'window.location.hash');
-  assert.equal(backHash, '#admin/ops');
-  assertTextIncludes(backText, 'API session registry', 'admin back button should restore operations tab');
+  assert.equal(backHash, '#admin/launch');
+  assertTextIncludes(backText, 'Provider launch matrix', 'admin back button should restore launch readiness tab');
 
   const unknownAdminRoute = await navigate(client, `${baseUrl}#admin/not-a-tab`, 'Readiness checks');
-  assert.equal(unknownAdminRoute.snapshot.hash, '#admin/not-a-tab');
-  assertTextIncludes(unknownAdminRoute.text, 'Admin console', 'unknown admin tab should fall back to overview content');
+  assert.equal(unknownAdminRoute.snapshot.hash, '#admin/dashboard');
+  assertTextIncludes(unknownAdminRoute.text, 'Admin console', 'unknown admin tab should fall back to dashboard content');
+
+  const adminUsersRoute = await navigate(client, `${baseUrl}#admin/users`, 'Tenant workspace');
+  assert.equal(adminUsersRoute.snapshot.hash, '#admin/organization/users');
+  assertTextIncludes(adminUsersRoute.text, 'Tenant operator view', 'legacy admin users deep link should render organization tab content');
 
   await evaluate(client, `(() => {
-    const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Users'));
+    const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Organization'));
     if (!button) {
-      throw new Error('Users tab button missing');
+      throw new Error('Organization tab button missing');
     }
     button.click();
   })()`);
@@ -527,104 +533,95 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assertTextIncludes(adminEmailText, 'email-flows route', 'admin email section should expose routing-rule CLI commands');
   assertTextIncludes(adminEmailText, 'signals handoff', 'admin email section should expose signal handoff CLI commands');
   await evaluate(client, `(() => {
-    const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Operations'));
+    const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Platform'));
     if (!button) {
-      throw new Error('Operations tab button missing');
+      throw new Error('Platform tab button missing');
     }
     button.click();
   })()`);
-  const adminOpsText = await waitForText(client, 'API session registry');
-  assertTextIncludes(adminOpsText, 'Local agent handoff', 'admin operations should expose local-agent handoff');
-  assertTextIncludes(adminOpsText, 'agent-handoff --json', 'admin operations should expose agent-handoff CLI command');
-  assertTextIncludes(adminOpsText, 'agent-handoff --env-file', 'admin operations should expose agent-handoff env-file preflight command');
-  assertTextIncludes(adminOpsText, '/api/agent-handoff', 'admin operations should expose agent-handoff API command');
-  assertTextIncludes(adminOpsText, 'Next action', 'admin operations should explain the next local-agent action');
-  assertTextIncludes(adminOpsText, 'Production backend, durable state, auth, CORS, and storage', 'admin operations should rank the production backend as the next launch action');
-  assertTextIncludes(adminOpsText, 'Completion audit', 'admin operations should expose completion audit');
-  assertTextIncludes(adminOpsText, 'completion-audit --json', 'admin operations should expose completion audit CLI command');
-  assertTextIncludes(adminOpsText, 'completion-audit --env-file', 'admin operations should expose completion audit env-file command');
-  assertTextIncludes(adminOpsText, '/api/completion-audit', 'admin operations should expose completion audit API command');
-  assertTextIncludes(adminOpsText, 'The local SaaS slice covers public entry', 'admin operations should summarize local completion scope');
-  assertTextIncludes(adminOpsText, 'Do not treat local completion as production launch readiness', 'admin operations should keep production launch proof separate');
-  assertTextIncludes(adminOpsText, 'Product readiness audit', 'admin operations should expose product readiness audit');
-  assertTextIncludes(adminOpsText, 'readiness --json', 'admin operations should expose readiness CLI command');
-  assertTextIncludes(adminOpsText, '/api/readiness', 'admin operations should expose readiness API command');
-  assertTextIncludes(adminOpsText, 'Production still needs live provider evidence', 'admin operations should call out production readiness gaps');
-  assertTextIncludes(adminOpsText, 'Stakeholder QA answers', 'admin operations should expose stakeholder QA answers');
-  assertTextIncludes(adminOpsText, 'qa-answers --json', 'admin operations should expose QA answers CLI command');
-  assertTextIncludes(adminOpsText, '/api/qa-answers', 'admin operations should expose QA answers API command');
-  assertTextIncludes(adminOpsText, 'Do dashboard display calculations match the DB/backend connection?', 'admin operations should answer dashboard and backend QA');
-  assertTextIncludes(adminOpsText, 'Do we need a data digestion model', 'admin operations should answer model governance QA');
-  assertTextIncludes(adminOpsText, 'How do we handle failed payment', 'admin operations should answer payment lifecycle QA');
-  assertTextIncludes(adminOpsText, 'Onboarding and RBAC readiness', 'admin operations should expose onboarding readiness audit');
-  assertTextIncludes(adminOpsText, '/api/onboarding-readiness', 'admin operations should expose onboarding readiness API command');
-  assertTextIncludes(adminOpsText, 'Tenant isolation remains a production backend blocker', 'admin operations should call out tenant-isolation guardrail');
-  assertTextIncludes(adminOpsText, 'Tenant isolation audit', 'admin operations should expose tenant isolation audit');
-  assertTextIncludes(adminOpsText, 'tenant-isolation --json', 'admin operations should expose tenant isolation CLI command');
-  assertTextIncludes(adminOpsText, '/api/tenant-isolation', 'admin operations should expose tenant isolation API command');
-  assertTextIncludes(adminOpsText, 'Production tenant isolation still needs', 'admin operations should show production tenant-isolation caveat');
-  assertTextIncludes(adminOpsText, 'Actor-scoped visibility', 'admin operations should explain actor-scoped visibility');
-  assertTextIncludes(adminOpsText, 'Dashboard calculation audit', 'admin operations should expose dashboard calculation audit');
-  assertTextIncludes(adminOpsText, 'dashboard-audit --json', 'admin operations should expose dashboard audit CLI command');
-  assertTextIncludes(adminOpsText, '/api/dashboard-audit', 'admin operations should expose dashboard audit API command');
-  assertTextIncludes(adminOpsText, 'actor-scoped', 'admin operations should explain actor-scoped dashboard rows');
-  assertTextIncludes(adminOpsText, 'Webhook and rate-limit health', 'admin operations should expose operations health audit');
-  assertTextIncludes(adminOpsText, 'operations-health --json', 'admin operations should expose operations health CLI command');
-  assertTextIncludes(adminOpsText, '/api/operations-health', 'admin operations should expose operations health API command');
-  assertTextIncludes(adminOpsText, 'No active provider backoff', 'admin operations should show provider backoff state');
-  assertTextIncludes(adminOpsText, 'billing_webhook', 'admin operations should expose billing webhook worker queue');
-  assertTextIncludes(adminOpsText, 'outbound_email', 'admin operations should expose outbound email worker queue');
-  assertTextIncludes(adminOpsText, 'managed scheduler/observability', 'admin operations should call out production monitoring guardrail');
-  assertTextIncludes(adminOpsText, 'Production launch gate', 'admin operations should expose production launch gate');
-  assertTextIncludes(adminOpsText, 'launch-gate --json', 'admin operations should expose launch-gate CLI command');
-  assertTextIncludes(adminOpsText, 'launch-gate --env-file', 'admin operations should expose env-file launch preflight');
-  assertTextIncludes(adminOpsText, 'launch-gate package', 'admin operations should expose launch evidence package command');
-  assertTextIncludes(adminOpsText, 'verify-package', 'admin operations should expose launch package verification command');
-  assertTextIncludes(adminOpsText, '/api/launch-gate', 'admin operations should expose launch-gate API command');
-  assertTextIncludes(adminOpsText, 'Go-live is blocked', 'admin operations should call out go-live blockers');
-  assertTextIncludes(adminOpsText, 'Production env audit', 'admin operations should expose production env audit');
-  assertTextIncludes(adminOpsText, 'production-env --json', 'admin operations should expose production env CLI command');
-  assertTextIncludes(adminOpsText, '/api/production-env', 'admin operations should expose production env API command');
-  assertTextIncludes(adminOpsText, '.env.production.example covers every required production setup name', 'admin operations should expose env template coverage');
-  assertTextIncludes(adminOpsText, 'required production env value', 'admin operations should expose missing production env value count');
-  assertTextIncludes(adminOpsText, 'Production setup plan', 'admin operations should expose production setup plan');
-  assertTextIncludes(adminOpsText, 'production-plan --json', 'admin operations should expose production plan CLI command');
-  assertTextIncludes(adminOpsText, '/api/production-plan', 'admin operations should expose production plan API command');
-  assertTextIncludes(adminOpsText, 'Durable backend, state service, backup, restore, and migration', 'admin operations should expose durable backend setup phase');
-  assertTextIncludes(adminOpsText, 'Next phase', 'admin operations should expose the next production setup phase');
-  assertTextIncludes(adminOpsText, 'Production operations drill', 'admin operations should expose production operations drill');
-  assertTextIncludes(adminOpsText, 'production-drill --json', 'admin operations should expose production drill CLI command');
-  assertTextIncludes(adminOpsText, '/api/production-drill', 'admin operations should expose production drill API command');
-  assertTextIncludes(adminOpsText, 'Backup policy', 'admin operations should expose backup policy drill');
-  assertTextIncludes(adminOpsText, 'restore ./signal-prod-backup.json --dry-run', 'admin operations should expose restore rehearsal command');
-  assertTextIncludes(adminOpsText, 'SIGNAL_OPERATIONS_RUNBOOK_URL', 'admin operations should expose operations runbook proof requirement');
-  assertTextIncludes(adminOpsText, 'Backend boundary', 'admin operations should expose backend boundary readiness');
-  assertTextIncludes(adminOpsText, 'backend --json', 'admin operations should expose backend readiness CLI commands');
-  assertTextIncludes(adminOpsText, 'Production backend handoff', 'admin operations should expose backend handoff');
-  assertTextIncludes(adminOpsText, 'backend-handoff --json', 'admin operations should expose backend handoff CLI command');
-  assertTextIncludes(adminOpsText, 'backend-handoff --env-file', 'admin operations should expose backend handoff env-file preflight');
-  assertTextIncludes(adminOpsText, '/api/backend-handoff', 'admin operations should expose backend handoff API command');
-  assertTextIncludes(adminOpsText, 'Next backend action', 'admin operations should explain the next backend action');
-  assertTextIncludes(adminOpsText, 'Backend cutover drill', 'admin operations should expose backend cutover drill');
-  assertTextIncludes(adminOpsText, 'backend-cutover --json', 'admin operations should expose backend cutover CLI command');
-  assertTextIncludes(adminOpsText, 'backend-cutover --env-file', 'admin operations should expose backend cutover env-file preflight');
-  assertTextIncludes(adminOpsText, '/api/backend-cutover', 'admin operations should expose backend cutover API command');
-  assertTextIncludes(adminOpsText, 'Next cutover step', 'admin operations should explain the next backend cutover step');
-  assertTextIncludes(adminOpsText, 'SIGNAL_BACKEND_MODE=external-service', 'admin operations should name the backend mode launch command');
-  assertTextIncludes(adminOpsText, 'state-service:admin -- backup', 'admin operations should expose state-service backup CLI commands');
-  assertTextIncludes(adminOpsText, 'state-service:admin -- restore', 'admin operations should expose state-service restore CLI commands');
-  assertTextIncludes(adminOpsText, 'Scheduler operations handoff', 'admin operations should expose scheduler operations handoff');
-  assertTextIncludes(adminOpsText, 'scheduler-handoff --json', 'admin operations should expose scheduler handoff CLI command');
-  assertTextIncludes(adminOpsText, 'scheduler-handoff --env-file', 'admin operations should expose scheduler handoff env-file preflight');
-  assertTextIncludes(adminOpsText, '/api/scheduler-handoff', 'admin operations should expose scheduler handoff API command');
-  assertTextIncludes(adminOpsText, 'Next scheduler step', 'admin operations should explain the next scheduler handoff step');
-  assertTextIncludes(adminOpsText, 'SIGNAL_JOB_SCHEDULER=signal-scheduler', 'admin operations should name the scheduler daemon launch command');
-  assertTextIncludes(adminOpsText, 'No registered API sessions', 'admin operations should expose API session registry state');
-  assertTextIncludes(adminOpsText, 'Run handoffs', 'admin operations should expose signal handoff job execution');
-  assertTextIncludes(adminOpsText, 'Run validation scheduler', 'admin operations should expose provider validation scheduler execution');
-  assertTextIncludes(adminOpsText, 'provider_validation', 'admin operations should expose provider validation worker queue');
-  assertTextIncludes(adminOpsText, 'npm run scheduler', 'admin operations should expose scheduler daemon commands');
-  assertTextIncludes(adminOpsText, 'jobs run signal_handoff', 'admin operations should expose handoff worker CLI commands');
+  const adminPlatformText = await waitForText(client, 'API session registry');
+  assertTextIncludes(adminPlatformText, 'Retention and redaction', 'admin platform should retain governance policy panels');
+  assertTextIncludes(adminPlatformText, 'Export, delete, and incidents', 'admin platform should retain data request and incident panels');
+  assertTextIncludes(adminPlatformText, 'Production backend handoff', 'admin platform should expose backend handoff');
+  assertTextIncludes(adminPlatformText, 'backend-handoff --json', 'admin platform should expose backend handoff CLI command');
+  assertTextIncludes(adminPlatformText, '/api/backend-handoff', 'admin platform should expose backend handoff API command');
+  assertTextIncludes(adminPlatformText, 'Scheduler operations handoff', 'admin platform should expose scheduler operations handoff');
+  assertTextIncludes(adminPlatformText, 'scheduler-handoff --json', 'admin platform should expose scheduler handoff CLI command');
+  assertTextIncludes(adminPlatformText, '/api/scheduler-handoff', 'admin platform should expose scheduler handoff API command');
+  assertTextIncludes(adminPlatformText, 'Onboarding and RBAC readiness', 'admin platform should expose onboarding readiness audit');
+  assertTextIncludes(adminPlatformText, '/api/onboarding-readiness', 'admin platform should expose onboarding readiness API command');
+  assertTextIncludes(adminPlatformText, 'Tenant isolation audit', 'admin platform should expose tenant isolation audit');
+  assertTextIncludes(adminPlatformText, 'tenant-isolation --json', 'admin platform should expose tenant isolation CLI command');
+  assertTextIncludes(adminPlatformText, 'Webhook and rate-limit health', 'admin platform should expose operations health audit');
+  assertTextIncludes(adminPlatformText, 'operations-health --json', 'admin platform should expose operations health CLI command');
+  assertTextIncludes(adminPlatformText, 'No active provider backoff', 'admin platform should show provider backoff state');
+  assertTextIncludes(adminPlatformText, 'billing_webhook', 'admin platform should expose billing webhook worker queue');
+  assertTextIncludes(adminPlatformText, 'outbound_email', 'admin platform should expose outbound email worker queue');
+  assertTextIncludes(adminPlatformText, 'Operational jobs', 'admin platform should expose worker queue controls');
+  assertTextIncludes(adminPlatformText, 'Run handoffs', 'admin platform should expose signal handoff job execution');
+  assertTextIncludes(adminPlatformText, 'Run validation scheduler', 'admin platform should expose provider validation scheduler execution');
+  assertTextIncludes(adminPlatformText, 'Provider operations', 'admin platform should expose provider operations summary');
+  assertTextIncludes(adminPlatformText, 'Backend boundary', 'admin platform should expose backend boundary readiness');
+  assertTextIncludes(adminPlatformText, 'backend --json', 'admin platform should expose backend readiness CLI commands');
+  assertTextIncludes(adminPlatformText, 'No registered API sessions', 'admin platform should expose API session registry state');
+  assertTextIncludes(adminPlatformText, 'Digest operations', 'admin platform should expose outbound email digest operations');
+
+  await evaluate(client, `(() => {
+    const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Launch readiness'));
+    if (!button) {
+      throw new Error('Launch readiness tab button missing');
+    }
+    button.click();
+  })()`);
+  const adminLaunchText = await waitForText(client, 'Production launch gate');
+  assertTextIncludes(adminLaunchText, 'Local agent handoff', 'admin launch should expose local-agent handoff');
+  assertTextIncludes(adminLaunchText, 'agent-handoff --json', 'admin launch should expose agent-handoff CLI command');
+  assertTextIncludes(adminLaunchText, 'Next action', 'admin launch should explain the next local-agent action');
+  assertTextIncludes(adminLaunchText, 'Provider launch matrix', 'admin launch should expose provider launch matrix');
+  assertTextIncludes(adminLaunchText, 'provider-launch --json', 'admin launch should expose provider launch CLI command');
+  assertTextIncludes(adminLaunchText, '/api/provider-launch', 'admin launch should expose provider launch API command');
+  assertTextIncludes(adminLaunchText, 'Completion audit', 'admin launch should expose completion audit');
+  assertTextIncludes(adminLaunchText, 'completion-audit --json', 'admin launch should expose completion audit CLI command');
+  assertTextIncludes(adminLaunchText, '/api/completion-audit', 'admin launch should expose completion audit API command');
+  assertTextIncludes(adminLaunchText, 'Product readiness audit', 'admin launch should expose product readiness audit');
+  assertTextIncludes(adminLaunchText, 'readiness --json', 'admin launch should expose readiness CLI command');
+  assertTextIncludes(adminLaunchText, '/api/readiness', 'admin launch should expose readiness API command');
+  assertTextIncludes(adminLaunchText, 'Stakeholder QA answers', 'admin launch should expose stakeholder QA answers');
+  assertTextIncludes(adminLaunchText, 'qa-answers --json', 'admin launch should expose QA answers CLI command');
+  assertTextIncludes(adminLaunchText, '/api/qa-answers', 'admin launch should expose QA answers API command');
+  assertTextIncludes(adminLaunchText, 'Backend cutover drill', 'admin launch should expose backend cutover drill');
+  assertTextIncludes(adminLaunchText, 'backend-cutover --json', 'admin launch should expose backend cutover CLI command');
+  assertTextIncludes(adminLaunchText, 'SIGNAL_BACKEND_MODE=external-service', 'admin launch should name the backend mode launch command');
+  assertTextIncludes(adminLaunchText, 'launch-gate --json', 'admin launch should expose launch-gate CLI command');
+  assertTextIncludes(adminLaunchText, 'launch-gate package', 'admin launch should expose launch evidence package command');
+  assertTextIncludes(adminLaunchText, 'verify-package', 'admin launch should expose launch package verification command');
+  assertTextIncludes(adminLaunchText, 'Production env audit', 'admin launch should expose production env audit');
+  assertTextIncludes(adminLaunchText, 'production-env --json', 'admin launch should expose production env CLI command');
+  assertTextIncludes(adminLaunchText, 'Production setup plan', 'admin launch should expose production setup plan');
+  assertTextIncludes(adminLaunchText, 'production-plan --json', 'admin launch should expose production plan CLI command');
+  assertTextIncludes(adminLaunchText, 'Production operations drill', 'admin launch should expose production operations drill');
+  assertTextIncludes(adminLaunchText, 'production-drill --json', 'admin launch should expose production drill CLI command');
+  assertTextIncludes(adminLaunchText, 'restore ./signal-prod-backup.json --dry-run', 'admin launch should expose restore rehearsal command');
+
+  const adminAria = await evaluate(client, `(() => {
+    const selectedTab = document.querySelector('[role="tab"][aria-selected="true"]');
+    const controlledPanel = selectedTab ? document.getElementById(selectedTab.getAttribute('aria-controls')) : null;
+    return {
+      controlsPanel: Boolean(controlledPanel),
+      panelLabelledBy: controlledPanel?.getAttribute('aria-labelledby') ?? '',
+      selectedId: selectedTab?.id ?? '',
+      selectedTabIndex: selectedTab?.getAttribute('tabindex') ?? '',
+      tabCount: document.querySelectorAll('[role="tab"]').length,
+      tabPanelCount: document.querySelectorAll('[role="tabpanel"]').length,
+      vertical: document.querySelector('[role="tablist"]')?.getAttribute('aria-orientation') ?? '',
+    };
+  })()`);
+  assert.equal(adminAria.selectedTabIndex, '0');
+  assert.equal(adminAria.controlsPanel, true);
+  assert.equal(adminAria.panelLabelledBy, adminAria.selectedId);
+  assert.equal(adminAria.tabCount, 9);
+  assert.equal(adminAria.tabPanelCount, 9);
+  assert.equal(adminAria.vertical, 'vertical');
   await evaluate(client, `(() => {
     const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Integrations'));
     if (!button) {
@@ -633,16 +630,14 @@ test('Signal browser routes render public, registration, workspace, and admin ap
     button.click();
   })()`);
   const adminIntegrationsText = await waitForText(client, 'Provider sandbox validation');
-  assertTextIncludes(adminIntegrationsText, 'Provider launch matrix', 'admin integrations should expose provider launch matrix');
-  assertTextIncludes(adminIntegrationsText, 'provider-launch --json', 'admin integrations should expose provider launch CLI command');
-  assertTextIncludes(adminIntegrationsText, '/api/provider-launch', 'admin integrations should expose provider launch API command');
+  assertTextIncludes(adminIntegrationsText, 'Provider readiness', 'admin integrations should expose provider readiness');
+  assertTextIncludes(adminIntegrationsText, 'Live integration boundaries', 'admin integrations should expose live integration boundaries');
   assertTextIncludes(adminIntegrationsText, 'Provider handoff', 'admin integrations should expose provider handoff action ranking');
   assertTextIncludes(adminIntegrationsText, 'provider-handoff --json', 'admin integrations should expose provider handoff CLI command');
   assertTextIncludes(adminIntegrationsText, 'provider-handoff --env-file', 'admin integrations should expose provider handoff production env preflight command');
   assertTextIncludes(adminIntegrationsText, '/api/provider-handoff', 'admin integrations should expose provider handoff API command');
   assertTextIncludes(adminIntegrationsText, 'Next provider action', 'admin integrations should expose the next provider handoff action');
   assertTextIncludes(adminIntegrationsText, 'SendGrid / Outbound Email Provider', 'admin integrations should map outbound email launch to SendGrid proof');
-  assertTextIncludes(adminIntegrationsText, 'payments webhook-signed', 'admin integrations should expose Stripe signed webhook replay command');
   assertTextIncludes(adminIntegrationsText, 'Provider validation schedule', 'admin integrations should expose scheduled provider validation');
   assertTextIncludes(adminIntegrationsText, 'Run due', 'admin integrations should expose due provider validation execution');
   assertTextIncludes(adminIntegrationsText, 'Run all now', 'admin integrations should expose forced provider validation execution');
@@ -655,33 +650,33 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assertTextIncludes(adminIntegrationsText, 'SIGNAL_GMAIL_ACCESS_TOKEN', 'admin integrations should name missing sandbox inputs without values');
   assertTextIncludes(adminIntegrationsText, 'No recorded runs', 'admin integrations should expose provider sandbox validation evidence state');
   await evaluate(client, `(() => {
-    const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Payments'));
+    const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Billing'));
     if (!button) {
-      throw new Error('Payments tab button missing');
+      throw new Error('Billing tab button missing');
     }
     button.click();
   })()`);
-  const adminPaymentsText = await waitForText(client, 'Billing overrides');
-  assertTextIncludes(adminPaymentsText, 'Support credit', 'admin payments should expose support credit override controls');
-  assertTextIncludes(adminPaymentsText, 'Lifecycle notices', 'admin payments should expose lifecycle notice monitoring');
-  assertTextIncludes(adminPaymentsText, 'Payment lifecycle audit', 'admin payments should expose payment lifecycle audit');
-  assertTextIncludes(adminPaymentsText, 'payment-lifecycle --json', 'admin payments should expose payment lifecycle CLI command');
-  assertTextIncludes(adminPaymentsText, '/api/payment-lifecycle', 'admin payments should expose payment lifecycle API command');
-  assertTextIncludes(adminPaymentsText, 'Subscription start, Checkout/Portal, failed payment recovery', 'admin payments should summarize payment lifecycle audit coverage');
-  assertTextIncludes(adminPaymentsText, 'Signed Webhook Replay', 'admin payments should expose signed webhook replay audit row');
-  assertTextIncludes(adminPaymentsText, 'Payment launch handoff', 'admin payments should expose payment launch handoff');
-  assertTextIncludes(adminPaymentsText, 'payment-handoff --json', 'admin payments should expose payment handoff CLI command');
-  assertTextIncludes(adminPaymentsText, 'payment-handoff --env-file', 'admin payments should expose payment handoff env-file preflight command');
-  assertTextIncludes(adminPaymentsText, '/api/payment-handoff', 'admin payments should expose payment handoff API command');
-  assertTextIncludes(adminPaymentsText, 'Next payment step', 'admin payments should explain the next payment launch step');
-  assertTextIncludes(adminPaymentsText, 'payments webhook-signed', 'admin payments should expose signed Stripe webhook launch command');
-  assertTextIncludes(adminPaymentsText, 'Lifecycle playbook', 'admin payments should expose lifecycle playbook monitoring');
-  assertTextIncludes(adminPaymentsText, 'lifecycle-playbook --json', 'admin payments should expose lifecycle playbook CLI command');
-  assertTextIncludes(adminPaymentsText, '/api/lifecycle-playbook', 'admin payments should expose lifecycle playbook API command');
-  assertTextIncludes(adminPaymentsText, 'Failed payment, dunning, and recovery session handling', 'admin payments should explain failed payment recovery handling');
-  assertTextIncludes(adminPaymentsText, 'Multi-member org, RBAC, and member data privacy', 'admin payments should explain multi-member privacy handling');
-  assertTextIncludes(adminPaymentsText, 'payments recover', 'admin payments should expose payment recovery command');
-  assertTextIncludes(adminPaymentsText, 'payments override', 'admin payments should expose billing override CLI commands');
+  const adminBillingText = await waitForText(client, 'Billing overrides');
+  assertTextIncludes(adminBillingText, 'Support credit', 'admin billing should expose support credit override controls');
+  assertTextIncludes(adminBillingText, 'Lifecycle notices', 'admin billing should expose lifecycle notice monitoring');
+  assertTextIncludes(adminBillingText, 'Payment lifecycle audit', 'admin billing should expose payment lifecycle audit');
+  assertTextIncludes(adminBillingText, 'payment-lifecycle --json', 'admin billing should expose payment lifecycle CLI command');
+  assertTextIncludes(adminBillingText, '/api/payment-lifecycle', 'admin billing should expose payment lifecycle API command');
+  assertTextIncludes(adminBillingText, 'Subscription start, Checkout/Portal, failed payment recovery', 'admin billing should summarize payment lifecycle audit coverage');
+  assertTextIncludes(adminBillingText, 'Signed Webhook Replay', 'admin billing should expose signed webhook replay audit row');
+  assertTextIncludes(adminBillingText, 'Payment launch handoff', 'admin billing should expose payment launch handoff');
+  assertTextIncludes(adminBillingText, 'payment-handoff --json', 'admin billing should expose payment handoff CLI command');
+  assertTextIncludes(adminBillingText, 'payment-handoff --env-file', 'admin billing should expose payment handoff env-file preflight command');
+  assertTextIncludes(adminBillingText, '/api/payment-handoff', 'admin billing should expose payment handoff API command');
+  assertTextIncludes(adminBillingText, 'Next payment step', 'admin billing should explain the next payment launch step');
+  assertTextIncludes(adminBillingText, 'payments webhook-signed', 'admin billing should expose signed Stripe webhook launch command');
+  assertTextIncludes(adminBillingText, 'Lifecycle playbook', 'admin billing should expose lifecycle playbook monitoring');
+  assertTextIncludes(adminBillingText, 'lifecycle-playbook --json', 'admin billing should expose lifecycle playbook CLI command');
+  assertTextIncludes(adminBillingText, '/api/lifecycle-playbook', 'admin billing should expose lifecycle playbook API command');
+  assertTextIncludes(adminBillingText, 'Failed payment, dunning, and recovery session handling', 'admin billing should explain failed payment recovery handling');
+  assertTextIncludes(adminBillingText, 'Multi-member org, RBAC, and member data privacy', 'admin billing should explain multi-member privacy handling');
+  assertTextIncludes(adminBillingText, 'payments recover', 'admin billing should expose payment recovery command');
+  assertTextIncludes(adminBillingText, 'payments override', 'admin billing should expose billing override CLI commands');
 
   const runtimeProblems = client.events
     .filter((event) =>
