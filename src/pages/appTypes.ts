@@ -1,0 +1,79 @@
+import type {
+  BackendCutoverDrillReport,
+  BackendHandoffReport,
+  BackendReadiness,
+  CompletionAuditReport,
+  DashboardAuditReport,
+  DoctorReport,
+  EmailHandoffReport,
+  LocalAgentHandoffReport,
+  LifecyclePlaybookReport,
+  OnboardingReadinessReport,
+  OperationsHealthReport,
+  PaymentHandoffReport,
+  PaymentLifecycleAuditReport,
+  ProductionDrillReport,
+  ProductionEnvAuditReport,
+  ProductionSetupPlanReport,
+  ProviderHandoffReport,
+  ProviderLaunchMatrixReport,
+  ProviderReadiness,
+  ProviderSandboxReport,
+  QaAnswersReport,
+  SchedulerHandoffReport,
+  SignalAppData,
+  SignalDigestionPipelineReport,
+  SignalMutationAction,
+  StateSummary,
+  TenantIsolationAuditReport,
+} from '../signalData';
+
+export type Accent = 'lime' | 'coral' | 'cyan' | 'gold';
+export type AppMode = 'marketing' | 'register' | 'workspace' | 'admin';
+export type AdminTab = 'overview' | 'tenants' | 'users' | 'email' | 'governance' | 'integrations' | 'payments' | 'ops' | 'audit' | 'cli';
+export type MutationOutcome = { ok: true } | { ok: false; error: string };
+export type RegistrationFormErrors = Partial<Record<'workspaceName' | 'workspaceDomain' | 'adminEmail' | 'adminName' | 'inviteTenantId' | 'inviteEmail' | 'claimCode' | 'claimEmail' | 'form', string>>;
+export type DataSource = 'api' | 'seed';
+
+export type LiveState = {
+  agentHandoff: LocalAgentHandoffReport;
+  completionAudit: CompletionAuditReport;
+  backendHandoff: BackendHandoffReport;
+  backendCutover: BackendCutoverDrillReport;
+  schedulerHandoff: SchedulerHandoffReport;
+  backendReadiness: BackendReadiness;
+  data: SignalAppData;
+  dashboardAudit: DashboardAuditReport;
+  digestionPipeline: SignalDigestionPipelineReport;
+  lifecyclePlaybook: LifecyclePlaybookReport;
+  onboardingReadiness: OnboardingReadinessReport;
+  tenantIsolation: TenantIsolationAuditReport;
+  operationsHealth: OperationsHealthReport;
+  emailHandoff: EmailHandoffReport;
+  paymentHandoff: PaymentHandoffReport;
+  paymentLifecycle: PaymentLifecycleAuditReport;
+  providerHandoff: ProviderHandoffReport;
+  providerLaunch: ProviderLaunchMatrixReport;
+  productionEnv: ProductionEnvAuditReport;
+  productionPlan: ProductionSetupPlanReport;
+  productionDrill: ProductionDrillReport;
+  qaAnswers: QaAnswersReport;
+  doctor: DoctorReport;
+  error: string | null;
+  isLoading: boolean;
+  isMutating: boolean;
+  isValidatingSandbox: boolean;
+  claimInvite: (args: Record<string, unknown>) => Promise<MutationOutcome>;
+  lastMutation: string | null;
+  mutate: (action: SignalMutationAction, args: Record<string, unknown>) => Promise<MutationOutcome>;
+  providerReadiness: ProviderReadiness;
+  providerSandbox: ProviderSandboxReport | null;
+  registerWorkspace: (args: Record<string, unknown>) => Promise<MutationOutcome>;
+  refresh: () => Promise<void>;
+  actorUserId: string;
+  runScheduledValidation: (force?: boolean) => Promise<void>;
+  setActorUserId: (userId: string) => Promise<void>;
+  validateSandbox: () => Promise<void>;
+  source: DataSource;
+  summary: StateSummary;
+};
