@@ -24,4 +24,5 @@ jobs:
       - name: Test
         env:
           SIGNAL_CHROME_BIN: /usr/bin/chromium
+          SIGNAL_CHROME_NO_SANDBOX: "true"
         run: npm run test:local

@@ -131,7 +131,7 @@ async function chromeExecutable() {
 
 async function startChrome({ cdpPort, profileDir }) {
   const executable = await chromeExecutable();
-  const child = spawn(executable, [
+  const args = [
     '--headless=new',
     '--disable-background-networking',
     '--disable-extensions',
@@ -142,7 +142,11 @@ async function startChrome({ cdpPort, profileDir }) {
     `--remote-debugging-port=${cdpPort}`,
     `--user-data-dir=${profileDir}`,
     'about:blank',
-  ], {
+  ];
+  if (process.env.SIGNAL_CHROME_NO_SANDBOX === 'true') {
+    args.splice(1, 0, '--no-sandbox');
+  }
+  const child = spawn(executable, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const output = processOutputCollector(child);
