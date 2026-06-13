@@ -846,6 +846,7 @@ export type ProviderReadinessItem = {
   optionalEnv: string[];
   callbackPath: string;
   webhookPath: string;
+  lifecycleWebhookPath?: string;
   boundary: string;
   configuredRequired: string[];
   configuredOptional: string[];
@@ -1657,6 +1658,7 @@ export type ProviderLaunchRow = {
   boundary: string;
   callbackPath: string;
   webhookPath: string;
+  lifecycleWebhookPath?: string;
   configurationReady: boolean;
   configuredRequired: string[];
   missingEnv: string[];
@@ -2779,6 +2781,7 @@ const fallbackProviderRequirements = [
     optionalEnv: ['SIGNAL_API_BASE_URL', 'SIGNAL_OAUTH_STATE_KEY', 'SIGNAL_OUTLOOK_NOTIFICATION_URL', 'SIGNAL_OUTLOOK_LIFECYCLE_NOTIFICATION_URL', 'SIGNAL_OUTLOOK_SUBSCRIPTION_RESOURCE', 'SIGNAL_OUTLOOK_WEBHOOK_CLIENT_STATE', 'SIGNAL_TOKEN_VAULT'],
     callbackPath: '/api/oauth/outlook/callback',
     webhookPath: '/api/webhooks/outlook',
+    lifecycleWebhookPath: '/api/webhooks/outlook/lifecycle',
     boundary: 'Graph OAuth connection, folder-scoped sync, delta cursor replay, and subscription notifications.',
   },
   {
@@ -4269,6 +4272,7 @@ export function fallbackProviderLaunchMatrix(
       boundary: item.boundary,
       callbackPath: item.callbackPath,
       webhookPath: item.webhookPath,
+      ...(item.lifecycleWebhookPath ? { lifecycleWebhookPath: item.lifecycleWebhookPath } : {}),
       configurationReady,
       configuredRequired: item.configuredRequired,
       missingEnv: item.missingRequired,

@@ -603,6 +603,7 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
   assert.equal(cliProviderLaunch.launch.summary.total, 5);
   assert.equal(cliProviderLaunch.launch.summary.secretSafe, true);
   assert(cliProviderLaunch.launch.rows.some((row) => row.id === 'gmail' && row.webhookPath === '/api/webhooks/gmail' && row.evidenceCommands.some((command) => command.includes('validate-sandbox'))));
+  assert(cliProviderLaunch.launch.rows.some((row) => row.id === 'outlook' && row.lifecycleWebhookPath === '/api/webhooks/outlook/lifecycle'));
   assert(cliProviderLaunch.launch.rows.some((row) => row.id === 'outbound-email' && row.label.includes('SendGrid') && row.signedReplayCommand.includes('notifications webhook-signed')));
   assert(cliProviderLaunch.launch.rows.some((row) => row.id === 'stripe' && row.launchCommands.some((command) => command.includes('payments checkout'))));
   assert(!JSON.stringify(cliProviderLaunch.launch).includes(sessionSecret), 'provider launch matrix must not serialize local session secrets');
@@ -1998,6 +1999,25 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(syncedEntitlement.seatLimit, 10);
     assert.equal(syncedState.payload.state.subscriptions.find((item) => item.id === expiredOverrideSubscription.id).status, 'canceled');
     assert(syncedState.payload.state.paymentEvents.some((event) => event.type === 'billing.sync.completed' && event.tenantId === 'tenant_demo'));
+
+    const returnCheckout = await mutate(adminToken, 'payments.checkout', {
+      planId: 'plan_team',
+      tenantId: 'tenant_demo',
+    });
+    assert.equal(returnCheckout.status, 200);
+    const billingReturn = await fetch(`${apiBaseUrl}/api/billing/return?session_id=${encodeURIComponent(returnCheckout.payload.details.sessionId)}&result=success`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+      redirect: 'manual',
+    });
+    assert.equal(billingReturn.status, 303);
+    assert.match(billingReturn.headers.get('location'), /^http:\/\/127\.0\.0\.1:5173\/#workspace\?billing=success/);
+
+    const returnedState = await requestApi('/api/state', { token: adminToken });
+    const returnedSession = returnedState.payload.state.billingSessions.find((item) => item.id === returnCheckout.payload.details.sessionId);
+    assert.equal(returnedSession.status, 'returned');
+    assert.equal(returnedSession.returnResult, 'success');
+    assert(returnedState.payload.state.paymentEvents.some((event) => event.type === 'billing.return.success' && event.sessionId === returnedSession.id));
+    assert(returnedState.payload.state.jobs.some((job) => job.type === 'payment.return.success' && job.targetId === returnedSession.id && job.status === 'succeeded'));
 
     const cliSync = await runCli(['payments', 'sync', 'tenant_demo', '--json'], { SIGNAL_ADMIN_ACTOR: 'usr_admin' });
     assert.equal(cliSync.action, 'payments.sync');

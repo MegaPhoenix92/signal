@@ -19,6 +19,7 @@ import {
   handleSignedEmailDeliveryWebhook,
   handleSignedSendGridEmailDeliveryWebhook,
   handleSignedStripePaymentWebhook,
+  handleOutlookLifecycleNotification,
   handleProviderWatchNotification,
   issueSessionToken,
   launchGateReport,
@@ -41,6 +42,7 @@ import {
   productReadinessReport,
   recordWebhookIngestOutcome,
   recordProviderSandboxValidation,
+  reconcileBillingReturn,
   registerTenantWorkspace,
   redactClientStateSecrets,
   resolveStatePath,
@@ -145,6 +147,7 @@ function rateLimitKind(pathname) {
     pathname === '/api/registration'
     || pathname === '/api/invites/claim'
     || pathname === '/api/session/token'
+    || pathname === '/api/billing/return'
     || pathname.startsWith('/api/oauth/')
     || pathname.startsWith('/api/email/unsubscribe/')
   ) {
@@ -255,6 +258,14 @@ function sendText(res, statusCode, text, contentType = 'text/plain; charset=utf-
     'Content-Type': contentType,
   }));
   res.end(text);
+}
+
+function sendRedirect(res, statusCode, location) {
+  res.writeHead(statusCode, securityHeaders({
+    'Cache-Control': 'no-store',
+    Location: location,
+  }));
+  res.end();
 }
 
 function notFound(res) {
@@ -572,7 +583,41 @@ function webhookProviderForPath(pathname) {
   if (pathname === '/api/webhooks/outlook') {
     return 'outlook';
   }
+  if (pathname === '/api/webhooks/outlook/lifecycle') {
+    return 'outlook';
+  }
   return null;
+}
+
+function appBaseUrl() {
+  return (process.env.SIGNAL_APP_BASE_URL ?? process.env.SIGNAL_PUBLIC_APP_URL ?? 'http://127.0.0.1:5173').replace(/\/+$/, '');
+}
+
+function billingReturnResultFromQuery(url) {
+  if (url.searchParams.get('canceled') === 'true' || url.searchParams.get('cancelled') === 'true') {
+    return 'cancel';
+  }
+  return url.searchParams.get('result')
+    ?? url.searchParams.get('status')
+    ?? url.searchParams.get('billing')
+    ?? (url.searchParams.has('portal') ? 'portal_return' : null);
+}
+
+function billingReturnRedirect(details = {}) {
+  const status = details.redirectStatus === 'cancel'
+    ? 'cancel'
+    : details.redirectStatus === 'portal_return' || details.sessionType === 'portal'
+      ? 'portal_return'
+      : 'success';
+  const route = status === 'portal_return' ? 'admin' : 'workspace';
+  const params = new URLSearchParams({ billing: status });
+  if (details.tenantId) {
+    params.set('tenantId', details.tenantId);
+  }
+  if (details.sessionId) {
+    params.set('billingSessionId', details.sessionId);
+  }
+  return `${appBaseUrl()}/#${route}?${params.toString()}`;
 }
 
 function errorPayload(error) {
@@ -1585,6 +1630,22 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/billing/return') {
+    const auth = await requestStateAuth(req);
+    const result = await reconcileBillingReturn({
+      billingSessionId: url.searchParams.get('billingSessionId') ?? url.searchParams.get('billing_session_id'),
+      providerSessionId: url.searchParams.get('providerSessionId') ?? url.searchParams.get('provider_session_id') ?? url.searchParams.get('session_id'),
+      result: billingReturnResultFromQuery(url),
+      sessionId: url.searchParams.get('sessionId') ?? url.searchParams.get('session_id'),
+      tenantId: url.searchParams.get('tenantId') ?? url.searchParams.get('tenant_id'),
+    }, {
+      actorUserId: auth.actorUserId,
+      statePath,
+    });
+    sendRedirect(res, 303, billingReturnRedirect(result.details));
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/bootstrap') {
     const body = await readBody(req);
     const { auth, state } = await authenticatedState(req, body);
@@ -1741,6 +1802,34 @@ async function route(req, res) {
       accepted: true,
       eventType: body?.message?.attributes?.eventType ?? body?.eventType ?? result.action,
       tenantId: result.details?.tenantId ?? null,
+      status: 200,
+    });
+    sendJson(res, 200, {
+      ok: true,
+      action: result.action,
+      details: result.details,
+      summary: result.summary,
+      doctor: doctor(result.state),
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/webhooks/outlook/lifecycle') {
+    const validationToken = url.searchParams.get('validationToken');
+    if (validationToken) {
+      sendText(res, 200, validationToken);
+      return;
+    }
+    const body = await readBody(req);
+    const webhookActorUserId = requireWebhookActor(resolveWebhookActor(req));
+    const result = await handleOutlookLifecycleNotification(body, {
+      actorUserId: webhookActorUserId,
+      statePath,
+    });
+    await noteWebhookOutcome('outlook', {
+      accepted: true,
+      eventType: body?.value?.[0]?.lifecycleEvent ?? result.action,
+      tenantId: result.details?.tenantIds?.[0] ?? null,
       status: 200,
     });
     sendJson(res, 200, {
