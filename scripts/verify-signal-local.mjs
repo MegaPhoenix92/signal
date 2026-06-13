@@ -891,7 +891,7 @@ assert.equal(restoredOutlookWatch.details.status, 'active');
 
 const gmailNotificationPayload = {
   message: {
-    data: Buffer.from(JSON.stringify({ emailAddress: 'sales@acme.example', historyId: '987654' }), 'utf8').toString('base64'),
+    data: Buffer.from(JSON.stringify({ emailAddress: 'mia@acme.example', historyId: '987654' }), 'utf8').toString('base64'),
   },
 };
 const gmailNotification = await handleProviderWatchNotification('gmail', gmailNotificationPayload, { actorUserId: 'usr_admin', statePath });

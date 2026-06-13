@@ -1346,7 +1346,7 @@ test('Gmail webhook accepts verified Pub/Sub push tokens when audience verificat
   const response = await fetch(`${api.apiBaseUrl}/api/webhooks/gmail`, {
     body: JSON.stringify({
       message: {
-        data: Buffer.from(JSON.stringify({ emailAddress: 'sales@acme.example', historyId: '12345' }), 'utf8').toString('base64'),
+        data: Buffer.from(JSON.stringify({ emailAddress: 'mia@acme.example', historyId: '12345' }), 'utf8').toString('base64'),
       },
     }),
     headers: {

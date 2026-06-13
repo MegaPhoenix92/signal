@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import {
   SignalStateError,
   getActor,
+  isPlatformOperator,
   validateApiSession,
 } from './signal-state.mjs';
 import {
@@ -422,11 +423,11 @@ export function requireKnownLocalActor(state, requestActor) {
 
 export function requireAdminRequestAuth(state, requestActor, action) {
   const actor = getActor(state, requestActor.actorUserId);
-  if (actor.role !== 'admin') {
-    throw new SignalStateError(`Admin role required for ${action}.`, {
+  if (!isPlatformOperator(actor)) {
+    throw new SignalStateError(`Platform operator role required for ${action}.`, {
       code: 'FORBIDDEN',
       status: 403,
-      details: { action, actorUserId: actor.id, actorRole: actor.role, requiredRole: 'admin' },
+      details: { action, actorUserId: actor.id, actorRole: actor.role, requiredPlatformRole: 'operator' },
     });
   }
   return actor;

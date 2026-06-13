@@ -333,12 +333,38 @@ export async function saveState(state, { ifMatch, statePath } = {}) {
   };
 }
 
-export async function switchSession(userId, { actorUserId, statePath } = {}) {
+function sessionSwitchDisallowed(env = process.env) {
+  return env.SIGNAL_REQUIRE_SIGNED_SESSION === 'true' || env.SIGNAL_AUTH_PROVIDER === 'jwks';
+}
+
+export async function switchSession(userId, { actorUserId, env = process.env, statePath } = {}) {
   const resolvedStatePath = resolveStatePath(statePath);
   return runLockedStateWriter(resolvedStatePath, async () => {
     const state = await loadState({ statePath });
     const previousActor = getActor(state, actorUserId ?? state.session?.activeUserId, { allowMissing: true });
     const nextActor = getActor(state, requireArg(userId, 'user id', 'session switch <userId>'));
+    if (sessionSwitchDisallowed(env)) {
+      throw new SignalStateError('Session switching is disabled in signed-session/JWKS mode.', {
+        code: 'SESSION_SWITCH_DISABLED',
+        status: 403,
+        details: { targetUserId: nextActor.id },
+      });
+    }
+    if (!previousActor) {
+      throw new SignalStateError('Actor identity is required to switch sessions.', {
+        code: 'ACTOR_REQUIRED',
+        status: 401,
+        details: { targetUserId: nextActor.id },
+      });
+    }
+    requireAdminOrOwner(previousActor, nextActor.id, 'session.switch', state, nextActor.tenantId);
+    if (!isPlatformOperator(previousActor) && nextActor.tenantId !== previousActor.tenantId) {
+      throw new SignalStateError('Session switching is limited to users in the same tenant.', {
+        code: 'FORBIDDEN',
+        status: 403,
+        details: { actorUserId: previousActor.id, actorTenantId: previousActor.tenantId, targetUserId: nextActor.id, targetTenantId: nextActor.tenantId },
+      });
+    }
     const previousUserId = state.session?.activeUserId ?? null;
     state.session = {
       activeUserId: nextActor.id,
@@ -551,6 +577,26 @@ export function isPlatformOperator(user) {
   return user?.platformRole === 'operator' || user?.role === 'operator';
 }
 
+export function sessionUsersForActor(state, actor) {
+  if (!actor) {
+    return [];
+  }
+  const tenantId = actor.tenantId;
+  const includeEmail = isPlatformOperator(actor) || isTenantAdmin(state, actor, tenantId);
+  const users = isPlatformOperator(actor)
+    ? (state.users ?? [])
+    : (state.users ?? []).filter((user) => user.tenantId === tenantId);
+  return users.map((user) => ({
+    email: includeEmail ? user.email : undefined,
+    id: user.id,
+    name: user.name,
+    role: user.role,
+    status: user.status,
+    team: user.team ?? null,
+    tenantId: user.tenantId,
+  }));
+}
+
 function scopeAuditEventsForActor(state, scoped, actor) {
   if (actor?.role !== 'admin') {
     return undefined;
@@ -682,7 +728,7 @@ function dashboardAuditRow({
 
 function visibleDashboardScope(state, actor, tenantId) {
   const membership = membershipForUser(state, actor?.id, tenantId);
-  const role = membership?.role ?? actor?.role ?? null;
+  const role = membership?.role ?? null;
   const team = membership?.team ?? actor?.team ?? null;
   const isAdmin = role === 'admin';
   const visibleSignals = (state.signals ?? []).filter((signal) =>
@@ -9384,7 +9430,7 @@ export async function issueSessionToken(userId, { actorUserId, env = process.env
     'session.token',
     (state, actor) => {
       const target = getActor(state, requireArg(userId, 'user id', 'session token <userId>'));
-      requireAdminOrOwner(actor, target.id, 'session.token');
+      requireAdminOrOwner(actor, target.id, 'session.token', state, target.tenantId);
       let issued;
       try {
         issued = createSessionToken({
@@ -9443,7 +9489,7 @@ export async function revokeSessionToken(sessionRef, options = {}) {
     'session.revoke',
     (state, actor) => {
       const session = findApiSession(state, sessionRef);
-      requireAdminOrOwner(actor, session.userId, 'session.revoke');
+      requireAdminOrOwner(actor, session.userId, 'session.revoke', state, session.tenantId);
       const previousStatus = apiSessionStatus(session);
       session.status = 'revoked';
       session.revokedAt = nowIso();
@@ -9467,11 +9513,12 @@ export async function revokeUserSessions(userId, options = {}) {
   return mutateState(
     'users.revoke-sessions',
     (state, actor) => {
-      requireAdmin(actor, 'users.revoke-sessions');
       const target = getActor(state, requireArg(userId, 'user id', 'users revoke-sessions <userId>'), { allowMissing: true });
       if (!target) {
         findById(state.users, userId, 'User');
       }
+      const targetTenantId = target?.tenantId ?? findById(state.users, userId, 'User').tenantId;
+      requireAdmin(actor, 'users.revoke-sessions', state, targetTenantId);
       const revoked = revokeApiSessionsForUser(state, userId, actor, 'admin_user_session_revocation');
       return {
         message: `Revoked ${revoked.length} API session(s) for ${target?.email ?? userId}`,
@@ -9489,7 +9536,7 @@ export async function recordProviderSandboxValidation(sandbox, options = {}) {
   return mutateState(
     'integrations.sandbox.record',
     (state, actor) => {
-      requireAdmin(actor, 'integrations.sandbox.record');
+      requirePlatformOperator(actor, 'integrations.sandbox.record');
       return recordProviderSandboxValidationInState(state, actor, sandbox);
     },
     options,
@@ -9500,7 +9547,7 @@ export async function exportProviderSandboxEvidence(runRef = 'latest', options =
   return mutateState(
     'integrations.sandbox.evidence-export',
     (state, actor) => {
-      requireAdmin(actor, 'integrations.sandbox.evidence-export');
+      requirePlatformOperator(actor, 'integrations.sandbox.evidence-export');
       const run = providerValidationRunByRef(state, runRef);
       const artifact = createProviderSandboxEvidenceArtifact(run, {
         exportedByUserId: actor.id,
@@ -9524,7 +9571,7 @@ export async function importProviderSandboxEvidence(artifact, options = {}) {
   return mutateState(
     'integrations.sandbox.evidence-import',
     (state, actor) => {
-      requireAdmin(actor, 'integrations.sandbox.evidence-import');
+      requirePlatformOperator(actor, 'integrations.sandbox.evidence-import');
       const sanitizedArtifact = sanitizeProviderSandboxEvidenceArtifact(artifact);
       const recorded = recordProviderSandboxValidationInState(state, actor, sanitizedArtifact.sandbox);
       return {
@@ -9547,7 +9594,7 @@ export async function setProviderValidationSchedule(providerId, { cadence, statu
   return mutateState(
     'integrations.schedule',
     (state, actor) => {
-      requireAdmin(actor, 'integrations.schedule');
+      requirePlatformOperator(actor, 'integrations.schedule');
       ensureDefaultProviderValidationSchedules(state);
       const normalizedProviderId = requireOneOf(
         providerId,
@@ -9604,8 +9651,8 @@ export async function setTenantStatus(tenantId, nextStatus, { reason } = {}, opt
   return mutateState(
     'tenants.status',
     (state, actor) => {
-      requireAdmin(actor, 'tenants.status');
       const tenant = findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'tenants status <tenantId> <active|suspended> [reason]'), 'Tenant');
+      requireAdmin(actor, 'tenants.status', state, tenant.id);
       const status = requireOneOf(nextStatus, ['active', 'suspended'], 'tenant status', 'tenants status <tenantId> <active|suspended> [reason]');
       const previousStatus = tenant.status ?? 'active';
       tenant.status = status;
@@ -9671,8 +9718,8 @@ export async function setTenantDomain(tenantId, domain, options = {}) {
   return mutateState(
     'tenants.domain',
     (state, actor) => {
-      requireAdmin(actor, 'tenants.domain');
       const tenant = findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'tenants domain <tenantId> <domain>'), 'Tenant');
+      requireAdmin(actor, 'tenants.domain', state, tenant.id);
       const nextDomain = normalizeDomain(domain, 'tenants domain <tenantId> <domain>');
       const previousDomain = tenant.domain;
       const conflict = (state.tenants ?? []).find((candidate) => candidate.id !== tenant.id && candidate.domain === nextDomain);
@@ -9698,18 +9745,32 @@ export async function setTenantDomain(tenantId, domain, options = {}) {
   );
 }
 
-function requireAdmin(actor, action) {
-  if (actor.role !== 'admin') {
-    throw new SignalStateError(`Admin role required for ${action}.`, {
+function isTenantAdmin(state, actor, tenantId) {
+  return isPlatformOperator(actor) || activeMembershipForUser(state, actor.id, tenantId)?.role === 'admin';
+}
+
+function requireAdmin(actor, action, state = null, tenantId = null) {
+  if (isPlatformOperator(actor)) {
+    return;
+  }
+  if (state && tenantId) {
+    if (isTenantAdmin(state, actor, tenantId)) {
+      return;
+    }
+    throw new SignalStateError(`Tenant admin role required for ${action}.`, {
       code: 'FORBIDDEN',
       status: 403,
-      details: { action, actorUserId: actor.id, actorRole: actor.role, requiredRole: 'admin' },
+      details: { action, actorUserId: actor.id, actorRole: actor.role, requiredRole: 'tenant_admin', tenantId },
     });
   }
+  throw new SignalStateError(`Platform operator or tenant context required for ${action}.`, {
+    code: 'FORBIDDEN',
+    status: 403,
+    details: { action, actorUserId: actor.id, actorRole: actor.role, requiredRole: 'platform_operator_or_tenant_admin' },
+  });
 }
 
 function requirePlatformOperator(actor, action) {
-  requireAdmin(actor, action);
   if (isPlatformOperator(actor)) {
     return;
   }
@@ -9720,31 +9781,32 @@ function requirePlatformOperator(actor, action) {
   });
 }
 
-function requireAdminOrOwner(actor, ownerUserId, action) {
-  if (actor.role === 'admin' || actor.id === ownerUserId) {
+function requireAdminOrOwner(actor, ownerUserId, action, state = null, tenantId = null) {
+  if (actor.id === ownerUserId) {
+    if (state && tenantId) {
+      if (!activeMembershipForUser(state, actor.id, tenantId)) {
+        throw new SignalStateError(`Active tenant membership required for ${action}.`, {
+          code: 'FORBIDDEN',
+          status: 403,
+          details: { action, actorUserId: actor.id, actorRole: actor.role, ownerUserId, tenantId, requiredMembership: 'active' },
+        });
+      }
+    }
     return;
   }
-  throw new SignalStateError(`Admin role or ownership required for ${action}.`, {
-    code: 'FORBIDDEN',
-    status: 403,
-    details: { action, actorUserId: actor.id, actorRole: actor.role, ownerUserId },
-  });
+  requireAdmin(actor, action, state, tenantId);
 }
 
 function requireBillingOwner(state, actor, tenant, action) {
   const ownerUserId = tenant.billingOwnerUserId ?? tenant.ownerUserId ?? state.users?.find((user) => user.tenantId === tenant.id && user.role === 'admin')?.id;
-  if (actor.role === 'admin' || actor.id === ownerUserId) {
+  if (actor.id === ownerUserId) {
     return;
   }
-  throw new SignalStateError(`Admin role or billing ownership required for ${action}.`, {
-    code: 'FORBIDDEN',
-    status: 403,
-    details: { action, actorUserId: actor.id, actorRole: actor.role, billingOwnerUserId: ownerUserId, tenantId: tenant.id },
-  });
+  requireAdmin(actor, action, state, tenant.id);
 }
 
 function requireActiveEntitlementForMember(state, actor, tenantId, action) {
-  if (actor.role === 'admin') {
+  if (isTenantAdmin(state, actor, tenantId)) {
     return;
   }
   const tenant = findById(state.tenants ?? [], tenantId, 'Tenant');
@@ -10084,7 +10146,7 @@ export async function createTenantWorkspace({ name, domain, adminEmail, adminNam
   return mutateState(
     'tenants.create',
     (state, actor) => {
-      requireAdmin(actor, 'tenants.create');
+      requirePlatformOperator(actor, 'tenants.create');
       return createTenantWorkspaceInState(state, { name, domain, adminEmail, adminName, planId }, {
         action: 'tenants.create',
         actor,
@@ -10243,9 +10305,9 @@ export async function setUserRole(userId, nextRole, options = {}) {
   return mutateState(
     'users.role',
     (state, actor) => {
-      requireAdmin(actor, 'users.role');
       const role = requireOneOf(nextRole, ['admin', 'member'], 'role', 'users role <userId> <admin|member>');
       const user = findById(state.users, requireArg(userId, 'user id', 'users role <userId> <admin|member>'), 'User');
+      requireAdmin(actor, 'users.role', state, user.tenantId);
       const previousRole = user.role;
       user.role = role;
       const membership = membershipForUser(state, user.id, user.tenantId);
@@ -10274,9 +10336,9 @@ export async function setUserStatus(userId, nextStatus, options = {}) {
   return mutateState(
     nextStatus === 'active' ? 'users.activate' : 'users.disable',
     (state, actor) => {
-      requireAdmin(actor, nextStatus === 'active' ? 'users.activate' : 'users.disable');
       const status = requireOneOf(nextStatus, ['active', 'disabled'], 'status', 'users disable|activate <userId>');
       const user = findById(state.users, requireArg(userId, 'user id', 'users disable|activate <userId>'), 'User');
+      requireAdmin(actor, nextStatus === 'active' ? 'users.activate' : 'users.disable', state, user.tenantId);
       const previousStatus = user.status;
       user.status = status;
       const membership = membershipForUser(state, user.id, user.tenantId);
@@ -10309,8 +10371,8 @@ export async function createUserInvite({ tenantId, email, role = 'member', team 
   return mutateState(
     'users.invite',
     (state, actor) => {
-      requireAdmin(actor, 'users.invite');
       const tenant = findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'users invite <tenantId> <email> [admin|member] [team]'), 'Tenant');
+      requireAdmin(actor, 'users.invite', state, tenant.id);
       const inviteEmail = normalizeEmail(email, 'users invite <tenantId> <email> [admin|member] [team]');
       const inviteRole = requireOneOf(role, ['admin', 'member'], 'role', 'users invite <tenantId> <email> [admin|member] [team]');
       const inviteTeam = team ?? null;
@@ -10372,8 +10434,8 @@ export async function acceptUserInvite(inviteId, { name, team } = {}, options = 
   return mutateState(
     'users.invite-accept',
     (state, actor) => {
-      requireAdmin(actor, 'users.invite-accept');
       const invite = findById(state.invites ?? [], requireArg(inviteId, 'invite id', 'users accept <inviteId> [name]'), 'Invite');
+      requireAdmin(actor, 'users.invite-accept', state, invite.tenantId);
       return acceptInviteInState(state, invite, { action: 'users.invite-accept', acceptedByUserId: actor.id, name, team });
     },
     options,
@@ -10535,8 +10597,8 @@ export async function revokeUserInvite(inviteId, options = {}) {
   return mutateState(
     'users.invite-revoke',
     (state, actor) => {
-      requireAdmin(actor, 'users.invite-revoke');
       const invite = findById(state.invites ?? [], requireArg(inviteId, 'invite id', 'users revoke <inviteId>'), 'Invite');
+      requireAdmin(actor, 'users.invite-revoke', state, invite.tenantId);
       if (invite.status !== 'pending') {
         throw new SignalStateError(`Only pending invites can be revoked: ${invite.id}`, {
           code: 'INVITE_NOT_PENDING',
@@ -10564,7 +10626,7 @@ export async function setMailboxStatus(mailboxId, nextStatus, options = {}) {
       const action = nextStatus === 'connected' ? 'mailboxes.resume' : 'mailboxes.pause';
       const status = requireOneOf(nextStatus, ['connected', 'paused'], 'status', 'mailboxes pause|resume <mailboxId>');
       const mailbox = findById(state.mailboxes, requireArg(mailboxId, 'mailbox id', 'mailboxes pause|resume <mailboxId>'), 'Mailbox');
-      requireAdminOrOwner(actor, mailbox.ownerUserId, action);
+      requireAdminOrOwner(actor, mailbox.ownerUserId, action, state, mailbox.tenantId);
       requireActiveEntitlementForMember(state, actor, mailbox.tenantId, action);
       const previousStatus = mailbox.status;
       mailbox.status = status;
@@ -10679,12 +10741,12 @@ export async function createMailboxConnectionSession({ tenantId, provider, owner
       const tenant = findById(state.tenants, requireArg(tenantId, 'tenant id', 'mailboxes connect-url <tenantId> <gmail|outlook> <ownerUserId> [mailboxId]'), 'Tenant');
       const sourceProvider = requireOneOf(provider, ['gmail', 'outlook'], 'provider', 'mailboxes connect-url <tenantId> <gmail|outlook> <ownerUserId> [mailboxId]');
       const owner = findById(state.users, requireArg(ownerUserId, 'owner user id', 'mailboxes connect-url <tenantId> <gmail|outlook> <ownerUserId> [mailboxId]'), 'User');
-      requireAdminOrOwner(actor, owner.id, 'mailboxes.connect-url');
+      requireAdminOrOwner(actor, owner.id, 'mailboxes.connect-url', state, tenant.id);
       requireActiveEntitlementForMember(state, actor, tenant.id, 'mailboxes.connect-url');
       let mailbox = null;
       if (mailboxId) {
         mailbox = findById(state.mailboxes, mailboxId, 'Mailbox');
-        requireAdminOrOwner(actor, mailbox.ownerUserId, 'mailboxes.connect-url');
+        requireAdminOrOwner(actor, mailbox.ownerUserId, 'mailboxes.connect-url', state, mailbox.tenantId);
         if (mailbox.ownerUserId !== owner.id || mailbox.tenantId !== tenant.id || mailbox.provider !== sourceProvider) {
           throw new SignalStateError(`Mailbox ${mailbox.id} does not match the requested owner, tenant, or provider.`, {
             code: 'MAILBOX_OWNER_MISMATCH',
@@ -10759,7 +10821,7 @@ export async function completeMailboxConnection(sessionId, options = {}) {
     'mailboxes.complete',
     (state, actor) => {
       const session = findById(state.mailboxConnectionSessions ?? [], requireArg(sessionId, 'session id', 'mailboxes complete <sessionId>'), 'Mailbox connection session');
-      requireAdminOrOwner(actor, session.ownerUserId, 'mailboxes.complete');
+      requireAdminOrOwner(actor, session.ownerUserId, 'mailboxes.complete', state, session.tenantId);
       requireActiveEntitlementForMember(state, actor, session.tenantId, 'mailboxes.complete');
       if (session.status !== 'ready') {
         throw new SignalStateError(`Connection session is not ready: ${session.id}`, {
@@ -10841,7 +10903,7 @@ export async function completeMailboxConnectionFromOAuthCallback(provider, { cod
         });
       }
       const session = findById(localState.mailboxConnectionSessions ?? [], payload.sessionId, 'Mailbox connection session');
-      requireAdminOrOwner(actor, session.ownerUserId, 'mailboxes.oauth-callback');
+      requireAdminOrOwner(actor, session.ownerUserId, 'mailboxes.oauth-callback', localState, session.tenantId);
       requireActiveEntitlementForMember(localState, actor, session.tenantId, 'mailboxes.oauth-callback');
       const expectedDigest = session.oauthStateDigest ?? null;
       const receivedDigest = oauthStateDigest(oauthState);
@@ -10982,7 +11044,7 @@ export async function disconnectMailbox(mailboxId, options = {}) {
     'mailboxes.disconnect',
     (state, actor) => {
       const mailbox = findById(state.mailboxes, requireArg(mailboxId, 'mailbox id', 'mailboxes disconnect <mailboxId>'), 'Mailbox');
-      requireAdminOrOwner(actor, mailbox.ownerUserId, 'mailboxes.disconnect');
+      requireAdminOrOwner(actor, mailbox.ownerUserId, 'mailboxes.disconnect', state, mailbox.tenantId);
       requireActiveEntitlementForMember(state, actor, mailbox.tenantId, 'mailboxes.disconnect');
       const previousStatus = mailbox.status;
       mailbox.status = 'disconnected';
@@ -11016,7 +11078,7 @@ export async function syncMailbox(mailboxId, options = {}) {
     'mailboxes.sync',
     async (state, actor) => {
       const mailbox = findById(state.mailboxes, requireArg(mailboxId, 'mailbox id', 'mailboxes sync <mailboxId>'), 'Mailbox');
-      requireAdminOrOwner(actor, mailbox.ownerUserId, 'mailboxes.sync');
+      requireAdminOrOwner(actor, mailbox.ownerUserId, 'mailboxes.sync', state, mailbox.tenantId);
       requireActiveEntitlementForMember(state, actor, mailbox.tenantId, 'mailboxes.sync');
       if (mailbox.status !== 'connected') {
         throw new SignalStateError(`Mailbox must be connected before sync: ${mailbox.id}`, {
@@ -11072,8 +11134,8 @@ export async function replayMailbox(mailboxId, options = {}) {
   return mutateState(
     'mailboxes.replay',
     async (state, actor) => {
-      requireAdmin(actor, 'mailboxes.replay');
       const mailbox = findById(state.mailboxes, requireArg(mailboxId, 'mailbox id', 'mailboxes replay <mailboxId>'), 'Mailbox');
+      requireAdmin(actor, 'mailboxes.replay', state, mailbox.tenantId);
       if (mailbox.status !== 'connected') {
         throw new SignalStateError(`Mailbox must be connected before replay: ${mailbox.id}`, {
           code: 'MAILBOX_NOT_CONNECTED',
@@ -11610,8 +11672,8 @@ export async function setupMailboxWatch(mailboxId, options = {}) {
   return mutateState(
     'mailboxes.watch',
     async (state, actor) => {
-      requireAdmin(actor, 'mailboxes.watch');
       const mailbox = findById(state.mailboxes, requireArg(mailboxId, 'mailbox id', 'mailboxes watch <mailboxId>'), 'Mailbox');
+      requireAdmin(actor, 'mailboxes.watch', state, mailbox.tenantId);
       if (mailbox.status !== 'connected') {
         throw new SignalStateError(`Mailbox must be connected before watch setup: ${mailbox.id}`, {
           code: 'MAILBOX_NOT_CONNECTED',
@@ -11667,9 +11729,9 @@ export async function renewMailboxWatch(watchId, options = {}) {
   return mutateState(
     'mailboxes.watch-renew',
     async (state, actor) => {
-      requireAdmin(actor, 'mailboxes.watch-renew');
       const existingWatch = findById(state.emailWatchSubscriptions ?? [], requireArg(watchId, 'watch id', 'mailboxes renew-watch <watchId>'), 'Provider watch');
       const mailbox = findById(state.mailboxes, existingWatch.mailboxId, 'Mailbox');
+      requireAdmin(actor, 'mailboxes.watch-renew', state, mailbox.tenantId);
       if (mailbox.status !== 'connected') {
         throw new SignalStateError(`Mailbox must be connected before watch renewal: ${mailbox.id}`, {
           code: 'MAILBOX_NOT_CONNECTED',
@@ -11736,7 +11798,37 @@ export async function handleProviderWatchNotification(provider, payload = {}, op
         if (sourceProvider === 'gmail') {
           const notification = parseGmailPubSubNotification(payload);
           cursorValue = notification.historyId ? String(notification.historyId) : null;
-          targetWatch = [...(state.emailWatchSubscriptions ?? [])].reverse().find((watch) => watch.provider === 'gmail' && watch.status === 'active');
+          const emailAddress = String(notification.emailAddress ?? '').trim().toLowerCase();
+          if (!emailAddress) {
+            throw new ProviderWatchError('Gmail Pub/Sub notification is missing emailAddress.', {
+              code: 'GMAIL_NOTIFICATION_EMAIL_REQUIRED',
+              status: 401,
+            });
+          }
+          const mailbox = (state.mailboxes ?? []).find((candidate) => {
+            if (candidate.provider !== 'gmail' || candidate.status !== 'connected') {
+              return false;
+            }
+            const owner = (state.users ?? []).find((user) => user.id === candidate.ownerUserId);
+            const candidateEmails = [
+              candidate.notificationEmail,
+              candidate.providerAccountEmail,
+              candidate.email,
+              owner?.email,
+            ].filter(Boolean).map((value) => String(value).trim().toLowerCase());
+            return candidateEmails.includes(emailAddress);
+          });
+          if (!mailbox) {
+            throw new ProviderWatchError('Gmail notification emailAddress did not match any connected mailbox.', {
+              code: 'GMAIL_NOTIFICATION_MAILBOX_MISMATCH',
+              status: 401,
+              details: { emailAddress },
+            });
+          }
+          targetWatch = (state.emailWatchSubscriptions ?? []).find((watch) =>
+            watch.provider === 'gmail' &&
+            watch.status === 'active' &&
+            watch.mailboxId === mailbox.id);
           notificationCount = 1;
         } else {
           const notifications = parseOutlookChangeNotification(payload);
@@ -11809,9 +11901,9 @@ export async function setEmailFlowStatus(flowId, nextStatus, options = {}) {
   return mutateState(
     nextStatus === 'enabled' ? 'email-flows.enable' : 'email-flows.disable',
     (state, actor) => {
-      requireAdmin(actor, nextStatus === 'enabled' ? 'email-flows.enable' : 'email-flows.disable');
       const status = requireOneOf(nextStatus, ['enabled', 'disabled'], 'status', 'email-flows enable|disable <flowId>');
       const flow = findById(state.emailFlows, requireArg(flowId, 'flow id', 'email-flows enable|disable <flowId>'), 'Email flow');
+      requireAdmin(actor, nextStatus === 'enabled' ? 'email-flows.enable' : 'email-flows.disable', state, flow.tenantId);
       const previousStatus = flow.status;
       flow.status = status;
       return {
@@ -11830,9 +11922,9 @@ export async function setEmailFlowRouting(flowId, { routeTo, ownerUserId, status
   return mutateState(
     'email-flows.route',
     (state, actor) => {
-      requireAdmin(actor, 'email-flows.route');
       ensureDefaultRoutingRules(state);
       const flow = findById(state.emailFlows, requireArg(flowId, 'flow id', 'email-flows route <flowId> <routeTarget> [ownerUserId] [note]'), 'Email flow');
+      requireAdmin(actor, 'email-flows.route', state, flow.tenantId);
       const nextRoute = requireOneOf(routeTo, routingTargets, 'route target', 'email-flows route <flowId> <sales|product|customer_success|founder|crm> [ownerUserId] [note]');
       const nextStatus = requireOneOf(status, ['active', 'disabled'], 'routing rule status', 'email-flows route <flowId> <routeTarget> [ownerUserId] [note]');
       const normalizedOwnerId = ownerUserId && !['-', 'null', 'none'].includes(String(ownerUserId).toLowerCase())
@@ -11894,7 +11986,15 @@ export async function setEmailFlowRouting(flowId, { routeTo, ownerUserId, status
 }
 
 function runEmailFlowsInState(state, actor, { flowId, mailboxId } = {}) {
-  requireAdmin(actor, 'email-flows.run');
+  if (flowId) {
+    const flow = findById(state.emailFlows, flowId, 'Email flow');
+    requireAdmin(actor, 'email-flows.run', state, flow.tenantId);
+  } else if (mailboxId) {
+    const mailbox = findById(state.mailboxes, mailboxId, 'Mailbox');
+    requireAdmin(actor, 'email-flows.run', state, mailbox.tenantId);
+  } else {
+    requirePlatformOperator(actor, 'email-flows.run');
+  }
   state.sourceMessages = state.sourceMessages ?? defaultSourceMessages(state);
   state.flowRuns = state.flowRuns ?? [];
   state.signals = state.signals ?? [];
@@ -12076,7 +12176,7 @@ export async function createAccountReview(accountRef, { note } = {}, options = {
     'accounts.review',
     (state, actor) => {
       const account = findAccountProfileByRef(state, accountRef);
-      requireAdminOrOwner(actor, account.ownerUserId, 'accounts.review');
+      requireAdminOrOwner(actor, account.ownerUserId, 'accounts.review', state, account.tenantId);
       requireActiveEntitlementForMember(state, actor, account.tenantId, 'accounts.review');
       const accountSignals = (state.signals ?? []).filter((signal) => signal.account === account.name);
       const openSignals = accountSignals.filter((signal) => signal.status === 'open');
@@ -12147,7 +12247,7 @@ export async function setAccountActionStatus(actionId, nextStatus, options = {})
     (state, actor) => {
       const status = requireOneOf(nextStatus, ['open', 'done', 'muted'], 'status', 'accounts action <actionId> <open|done|muted>');
       const action = findById(state.accountActions ?? [], requireArg(actionId, 'account action id', 'accounts action <actionId> <open|done|muted>'), 'Account action');
-      requireAdminOrOwner(actor, action.ownerUserId, 'accounts.action-status');
+      requireAdminOrOwner(actor, action.ownerUserId, 'accounts.action-status', state, action.tenantId);
       requireActiveEntitlementForMember(state, actor, action.tenantId, 'accounts.action-status');
       const previousStatus = action.status;
       action.status = status;
@@ -12196,8 +12296,8 @@ export async function setSignalQualityThreshold(tenantId, minimumConfidence, opt
   return mutateState(
     'quality.threshold',
     (state, actor) => {
-      requireAdmin(actor, 'quality.threshold');
       const tenant = findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'quality threshold <tenantId> <0.00-1.00>'), 'Tenant');
+      requireAdmin(actor, 'quality.threshold', state, tenant.id);
       const threshold = Number(minimumConfidence);
       if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
         throw new SignalStateError(`Invalid minimum confidence: ${minimumConfidence}`, {
@@ -12226,8 +12326,8 @@ export async function createSuppressionRule({ tenantId, type, value, reason } = 
   return mutateState(
     'quality.suppression-add',
     (state, actor) => {
-      requireAdmin(actor, 'quality.suppression-add');
       const tenant = findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'quality suppress <tenantId> <domain|sender|account|term> <value> [reason]'), 'Tenant');
+      requireAdmin(actor, 'quality.suppression-add', state, tenant.id);
       const ruleType = requireOneOf(type, ['domain', 'sender', 'account', 'term'], 'suppression type', 'quality suppress <tenantId> <domain|sender|account|term> <value> [reason]');
       const ruleValue = requireArg(value, 'suppression value', 'quality suppress <tenantId> <domain|sender|account|term> <value> [reason]').trim().toLowerCase();
       state.suppressionRules = state.suppressionRules ?? [];
@@ -12270,9 +12370,9 @@ export async function setSuppressionRuleStatus(ruleId, nextStatus, options = {})
   return mutateState(
     'quality.suppression-status',
     (state, actor) => {
-      requireAdmin(actor, 'quality.suppression-status');
       const status = requireOneOf(nextStatus, ['active', 'disabled'], 'suppression status', 'quality suppression-status <ruleId> <active|disabled>');
       const rule = findById(state.suppressionRules ?? [], requireArg(ruleId, 'rule id', 'quality suppression-status <ruleId> <active|disabled>'), 'Suppression rule');
+      requireAdmin(actor, 'quality.suppression-status', state, rule.tenantId);
       const previousStatus = rule.status;
       rule.status = status;
       rule.updatedAt = nowIso();
@@ -12293,8 +12393,8 @@ export async function setModelGovernancePolicy(tenantId, { learningMode, note } 
   return mutateState(
     'models.policy',
     (state, actor) => {
-      requireAdmin(actor, 'models.policy');
       const tenant = findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'models policy <tenantId> <disabled|opt_in_tuning> [note]'), 'Tenant');
+      requireAdmin(actor, 'models.policy', state, tenant.id);
       ensureDefaultModelGovernancePolicies(state);
       const policy = (state.modelGovernancePolicies ?? []).find((candidate) => candidate.tenantId === tenant.id);
       if (!policy) {
@@ -12335,8 +12435,8 @@ export async function setGovernancePolicy(tenantId, patch = {}, options = {}) {
   return mutateState(
     'governance.policy',
     (state, actor) => {
-      requireAdmin(actor, 'governance.policy');
       const tenant = findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'governance policy <tenantId> [retentionDays] [rawDays]'), 'Tenant');
+      requireAdmin(actor, 'governance.policy', state, tenant.id);
       const policy = governancePolicyForTenant(state, tenant.id);
       const sourceRetentionDays = patch.sourceRetentionDays === undefined
         ? policy.sourceRetentionDays
@@ -12396,8 +12496,8 @@ export async function createRedactionRule({ tenantId, label, scope, pattern, rep
   return mutateState(
     'governance.redaction-add',
     (state, actor) => {
-      requireAdmin(actor, 'governance.redaction-add');
       const tenant = findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'governance redact <tenantId> <scope> <label> <pattern> [replacement]'), 'Tenant');
+      requireAdmin(actor, 'governance.redaction-add', state, tenant.id);
       const ruleScope = requireOneOf(scope, ['source_snippets', 'notifications', 'exports'], 'redaction scope', 'governance redact <tenantId> <source_snippets|notifications|exports> <label> <pattern> [replacement]');
       const ruleLabel = requireArg(label, 'redaction label', 'governance redact <tenantId> <scope> <label> <pattern> [replacement]').trim();
       const rulePattern = requireArg(pattern, 'redaction pattern', 'governance redact <tenantId> <scope> <label> <pattern> [replacement]').trim();
@@ -12445,9 +12545,9 @@ export async function setRedactionRuleStatus(ruleId, nextStatus, options = {}) {
   return mutateState(
     'governance.redaction-status',
     (state, actor) => {
-      requireAdmin(actor, 'governance.redaction-status');
       const status = requireOneOf(nextStatus, ['active', 'disabled'], 'redaction status', 'governance redaction-rule <ruleId> <active|disabled>');
       const rule = findById(state.redactionRules ?? [], requireArg(ruleId, 'rule id', 'governance redaction-rule <ruleId> <active|disabled>'), 'Redaction rule');
+      requireAdmin(actor, 'governance.redaction-status', state, rule.tenantId);
       const previousStatus = rule.status;
       rule.status = status;
       rule.updatedAt = nowIso();
@@ -12468,8 +12568,8 @@ export async function createDataRequest({ tenantId, type, requesterEmail, target
   return mutateState(
     'governance.request-create',
     (state, actor) => {
-      requireAdmin(actor, 'governance.request-create');
       const tenant = findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'governance request <tenantId> <export|delete> <requesterEmail> [target]'), 'Tenant');
+      requireAdmin(actor, 'governance.request-create', state, tenant.id);
       const requestType = requireOneOf(type, ['export', 'delete'], 'request type', 'governance request <tenantId> <export|delete> <requesterEmail> [target]');
       const email = requireArg(requesterEmail, 'requester email', 'governance request <tenantId> <export|delete> <requesterEmail> [target]').trim().toLowerCase();
       if (!email.includes('@')) {
@@ -12523,9 +12623,9 @@ export async function setDataRequestStatus(requestId, nextStatus, { note } = {},
   return mutateState(
     'governance.request-status',
     (state, actor) => {
-      requireAdmin(actor, 'governance.request-status');
       const status = requireOneOf(nextStatus, ['open', 'processing', 'completed', 'rejected'], 'request status', 'governance request-status <requestId> <open|processing|completed|rejected> [note]');
       const request = findById(state.dataRequests ?? [], requireArg(requestId, 'request id', 'governance request-status <requestId> <status> [note]'), 'Data request');
+      requireAdmin(actor, 'governance.request-status', state, request.tenantId);
       const previousStatus = request.status;
       request.status = status;
       request.handledByUserId = actor.id;
@@ -12565,8 +12665,8 @@ export async function createIncidentNote({ tenantId, severity, title, body } = {
   return mutateState(
     'governance.incident-add',
     (state, actor) => {
-      requireAdmin(actor, 'governance.incident-add');
       const tenant = findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'governance incident <tenantId> <info|watch|incident> <title> [body]'), 'Tenant');
+      requireAdmin(actor, 'governance.incident-add', state, tenant.id);
       const noteSeverity = requireOneOf(severity, ['info', 'watch', 'incident'], 'incident severity', 'governance incident <tenantId> <info|watch|incident> <title> [body]');
       const note = {
         id: makeId('inc'),
@@ -12606,8 +12706,8 @@ export async function resolveIncidentNote(noteId, options = {}) {
   return mutateState(
     'governance.incident-resolve',
     (state, actor) => {
-      requireAdmin(actor, 'governance.incident-resolve');
       const note = findById(state.incidentNotes ?? [], requireArg(noteId, 'incident id', 'governance resolve-incident <incidentId>'), 'Incident note');
+      requireAdmin(actor, 'governance.incident-resolve', state, note.tenantId);
       const previousStatus = note.status;
       note.status = 'resolved';
       note.resolvedByUserId = actor.id;
@@ -12639,7 +12739,7 @@ export async function recordSignalFeedback(signalId, label, { note } = {}, optio
     (state, actor) => {
       const feedbackLabel = requireOneOf(label, ['useful', 'noisy', 'wrong_route', 'bad_source', 'product_gap'], 'feedback label', 'signals feedback <signalId> <useful|noisy|wrong_route|bad_source|product_gap> [note]');
       const signal = findById(state.signals ?? [], requireArg(signalId, 'signal id', 'signals feedback <signalId> <label> [note]'), 'Signal');
-      requireAdminOrOwner(actor, signal.ownerUserId, 'signals.feedback');
+      requireAdminOrOwner(actor, signal.ownerUserId, 'signals.feedback', state, signal.tenantId);
       requireActiveEntitlementForMember(state, actor, signal.tenantId, 'signals.feedback');
       state.signalFeedback = state.signalFeedback ?? [];
       const feedback = {
@@ -12672,7 +12772,7 @@ export async function setNotificationPreference(userId, patch = {}, options = {}
     'notifications.preference',
     (state, actor) => {
       const user = findById(state.users ?? [], requireArg(userId, 'user id', 'notifications preference <userId> <daily|weekly|off> [immediate|quiet]'), 'User');
-      requireAdminOrOwner(actor, user.id, 'notifications.preference');
+      requireAdminOrOwner(actor, user.id, 'notifications.preference', state, user.tenantId);
       const preference = preferenceForUser(state, user.id);
       const previous = {
         digestCadence: preference.digestCadence,
@@ -12735,7 +12835,7 @@ export async function setNotificationStatus(notificationId, nextStatus, options 
     (state, actor) => {
       const status = requireOneOf(nextStatus, notificationStatuses, 'notification status', 'notifications status <notificationId> <unread|read|muted|sent>');
       const notification = findById(state.notificationEvents ?? [], requireArg(notificationId, 'notification id', 'notifications status <notificationId> <unread|read|muted|sent>'), 'Notification event');
-      requireAdminOrOwner(actor, notification.userId, 'notifications.status');
+      requireAdminOrOwner(actor, notification.userId, 'notifications.status', state, notification.tenantId);
       const previousStatus = notification.status;
       notification.status = status;
       notification.readAt = status === 'read' ? nowIso() : null;
@@ -12757,9 +12857,9 @@ export async function setNotificationStatus(notificationId, nextStatus, options 
 }
 
 function runNotificationDigestInState(state, actor, { tenantId, userId } = {}) {
-  requireAdmin(actor, 'notifications.digest-run');
   const targetTenantId = tenantId ?? defaultTenantId(state);
   findById(state.tenants ?? [], targetTenantId, 'Tenant');
+  requireAdmin(actor, 'notifications.digest-run', state, targetTenantId);
   if (userId) {
     const user = findById(state.users ?? [], userId, 'User');
     if (user.tenantId !== targetTenantId) {
@@ -12845,9 +12945,9 @@ export async function setEmailDeliveryStatus(messageId, nextStatus, { reason } =
   return mutateState(
     'notifications.delivery-status',
     (state, actor) => {
-      requireAdmin(actor, 'notifications.delivery-status');
       const status = requireOneOf(nextStatus, ['queued', 'sent', 'failed', 'bounced', 'suppressed'], 'delivery status', 'notifications delivery-status <messageId> <queued|sent|failed|bounced|suppressed> [reason]');
       const message = findById(state.emailDeliveryMessages ?? [], requireArg(messageId, 'delivery message id', 'notifications delivery-status <messageId> <status> [reason]'), 'Email delivery message');
+      requireAdmin(actor, 'notifications.delivery-status', state, message.tenantId);
       const previousStatus = message.status;
       message.status = status;
       message.statusReason = reason ?? (status === 'sent' ? null : message.statusReason);
@@ -12888,7 +12988,7 @@ export async function unsubscribeEmailDigest(userOrToken, options = {}) {
           details: { identifier },
         });
       }
-      requireAdminOrOwner(actor, preference.userId, 'notifications.unsubscribe');
+      requireAdminOrOwner(actor, preference.userId, 'notifications.unsubscribe', state, preference.tenantId);
       const previousStatus = preference.emailDeliveryStatus ?? 'subscribed';
       preference.emailDeliveryStatus = 'unsubscribed';
       preference.channels = (preference.channels ?? []).filter((channel) => channel !== 'email_digest');
@@ -12928,8 +13028,8 @@ export async function assignSignal(signalId, userId, options = {}) {
   return mutateState(
     'signals.assign',
     (state, actor) => {
-      requireAdmin(actor, 'signals.assign');
       const signal = findById(state.signals, requireArg(signalId, 'signal id', 'signals assign <signalId> <userId>'), 'Signal');
+      requireAdmin(actor, 'signals.assign', state, signal.tenantId);
       const user = findById(state.users, requireArg(userId, 'user id', 'signals assign <signalId> <userId>'), 'User');
       const previousOwnerUserId = signal.ownerUserId;
       signal.ownerUserId = user.id;
@@ -12952,7 +13052,7 @@ export async function setSignalStatus(signalId, nextStatus, options = {}) {
     (state, actor) => {
       const status = requireOneOf(nextStatus, ['open', 'routed', 'dismissed'], 'status', 'signals status <signalId> <open|routed|dismissed>');
       const signal = findById(state.signals, requireArg(signalId, 'signal id', 'signals status <signalId> <open|routed|dismissed>'), 'Signal');
-      requireAdminOrOwner(actor, signal.ownerUserId, 'signals.status');
+      requireAdminOrOwner(actor, signal.ownerUserId, 'signals.status', state, signal.tenantId);
       requireActiveEntitlementForMember(state, actor, signal.tenantId, 'signals.status');
       const previousStatus = signal.status;
       signal.status = status;
@@ -12973,7 +13073,7 @@ export async function createSignalHandoff(signalId, { target = 'crm', note } = {
     'signals.handoff',
     (state, actor) => {
       const signal = findById(state.signals ?? [], requireArg(signalId, 'signal id', 'signals handoff <signalId> <crm|task> [note]'), 'Signal');
-      requireAdminOrOwner(actor, signal.ownerUserId, 'signals.handoff');
+      requireAdminOrOwner(actor, signal.ownerUserId, 'signals.handoff', state, signal.tenantId);
       requireActiveEntitlementForMember(state, actor, signal.tenantId, 'signals.handoff');
       const handoffTarget = requireOneOf(target, ['crm', 'task'], 'handoff target', 'signals handoff <signalId> <crm|task> [note]');
       const existingQueued = (state.signalHandoffs ?? []).find((handoff) => handoff.signalId === signal.id && handoff.target === handoffTarget && handoff.status === 'queued');
@@ -13048,7 +13148,7 @@ export async function setSignalHandoffStatus(handoffId, nextStatus, { providerRe
       const status = requireOneOf(nextStatus, ['queued', 'sent', 'failed', 'canceled'], 'handoff status', 'signals handoff-status <handoffId> <queued|sent|failed|canceled> [providerRef] [note]');
       const handoff = findById(state.signalHandoffs ?? [], requireArg(handoffId, 'handoff id', 'signals handoff-status <handoffId> <status> [providerRef] [note]'), 'Signal handoff');
       const signal = findById(state.signals ?? [], handoff.signalId, 'Signal');
-      requireAdminOrOwner(actor, handoff.ownerUserId ?? signal.ownerUserId, 'signals.handoff-status');
+      requireAdminOrOwner(actor, handoff.ownerUserId ?? signal.ownerUserId, 'signals.handoff-status', state, signal.tenantId);
       requireActiveEntitlementForMember(state, actor, signal.tenantId, 'signals.handoff-status');
       const previousStatus = handoff.status;
       handoff.status = status;
@@ -13233,10 +13333,14 @@ export async function syncPaymentState({ tenantId } = {}, options = {}) {
   return mutateState(
     'payments.sync',
     (state, actor) => {
-      requireAdmin(actor, 'payments.sync');
       const tenants = tenantId
         ? [findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'payments sync [tenantId]'), 'Tenant')]
         : [...(state.tenants ?? [])];
+      if (tenantId) {
+        requireAdmin(actor, 'payments.sync', state, tenants[0].id);
+      } else {
+        requirePlatformOperator(actor, 'payments.sync');
+      }
       const results = tenants.map((tenant) => {
         const reconciliation = reconcileExpiredBillingOverrides(state, tenant);
         const entitlement = recomputeEntitlementForTenant(state, tenant.id);
@@ -13291,8 +13395,8 @@ export async function createBillingOverride(tenantId, type, { reason, planId, am
   return mutateState(
     'payments.override',
     (state, actor) => {
-      requireAdmin(actor, 'payments.override');
       const tenant = findById(state.tenants, requireArg(tenantId, 'tenant id', 'payments override <tenantId> <type> <reason> [planId|amountCents]'), 'Tenant');
+      requireAdmin(actor, 'payments.override', state, tenant.id);
       const overrideType = requireOneOf(type, ['beta_access', 'support_credit', 'manual_entitlement', 'manual_suspension'], 'override type', 'payments override <tenantId> <beta_access|support_credit|manual_entitlement|manual_suspension> <reason> [planId|amountCents] [expiresAt]');
       const overrideReason = normalizeOverrideReason(reason, `${overrideType.replaceAll('_', ' ')} override`);
       let plan = null;
@@ -13361,8 +13465,8 @@ export async function revokeBillingOverride(overrideId, { reason } = {}, options
   return mutateState(
     'payments.override-revoke',
     (state, actor) => {
-      requireAdmin(actor, 'payments.override-revoke');
       const override = findById(state.billingOverrides ?? [], requireArg(overrideId, 'override id', 'payments override-revoke <overrideId> [reason]'), 'Billing override');
+      requireAdmin(actor, 'payments.override-revoke', state, override.tenantId);
       if (override.status !== 'active') {
         throw new SignalStateError(`Billing override is already ${override.status}: ${override.id}`, {
           code: 'BILLING_OVERRIDE_NOT_ACTIVE',
@@ -13422,8 +13526,8 @@ export async function compTenant(tenantId, planId, options = {}) {
   return mutateState(
     'payments.comp',
     (state, actor) => {
-      requireAdmin(actor, 'payments.comp');
       const tenant = findById(state.tenants, requireArg(tenantId, 'tenant id', 'payments comp <tenantId> <planId>'), 'Tenant');
+      requireAdmin(actor, 'payments.comp', state, tenant.id);
       const plan = findById(state.plans, requireArg(planId, 'plan id', 'payments comp <tenantId> <planId>'), 'Plan');
       tenant.planId = plan.id;
       let subscription = state.subscriptions.find((item) => item.tenantId === tenant.id);
@@ -13462,9 +13566,9 @@ export async function setSubscriptionStatus(subscriptionId, nextStatus, options 
   return mutateState(
     'payments.status',
     (state, actor) => {
-      requireAdmin(actor, 'payments.status');
       const status = requireOneOf(nextStatus, ['trialing', 'active', 'past_due', 'canceled'], 'status', 'payments status <subscriptionId> <trialing|active|past_due|canceled>');
       const subscription = findById(state.subscriptions, requireArg(subscriptionId, 'subscription id', 'payments status <subscriptionId> <status>'), 'Subscription');
+      requireAdmin(actor, 'payments.status', state, subscription.tenantId);
       const previousStatus = subscription.status;
       subscription.status = status;
       const entitlement = upsertEntitlementFromSubscription(state, subscription);
@@ -13506,8 +13610,8 @@ export async function cancelSubscription(subscriptionId, options = {}) {
   return mutateState(
     'payments.cancel',
     (state, actor) => {
-      requireAdmin(actor, 'payments.cancel');
       const subscription = findById(state.subscriptions, requireArg(subscriptionId, 'subscription id', 'payments cancel <subscriptionId>'), 'Subscription');
+      requireAdmin(actor, 'payments.cancel', state, subscription.tenantId);
       const previousStatus = subscription.status;
       subscription.status = 'canceled';
       const entitlement = upsertEntitlementFromSubscription(state, subscription);
@@ -13810,7 +13914,7 @@ export async function handlePaymentWebhook(eventType, {
   return mutateState(
     'payments.webhook',
     (state, actor) => {
-      requireAdmin(actor, 'payments.webhook');
+      requirePlatformOperator(actor, 'payments.webhook');
       const type = requireOneOf(
         eventType,
         ['checkout.completed', 'invoice.paid', 'invoice.payment_failed', 'subscription.updated', 'subscription.canceled'],
@@ -14142,7 +14246,7 @@ export async function handleEmailDeliveryWebhook(payload, options = {}) {
   return mutateState(
     'notifications.delivery-webhook',
     (state, actor) => {
-      requireAdmin(actor, 'notifications.delivery-webhook');
+      requirePlatformOperator(actor, 'notifications.delivery-webhook');
       let event;
       try {
         event = parseEmailWebhookPayload(payload);
@@ -14179,7 +14283,7 @@ export async function handleSignedEmailDeliveryWebhook(rawBody, signatureHeader,
   return mutateState(
     'notifications.delivery-webhook',
     (state, actor) => {
-      requireAdmin(actor, 'notifications.delivery-webhook');
+      requirePlatformOperator(actor, 'notifications.delivery-webhook');
       return reconcileEmailWebhookEventsInState(state, event);
     },
     { actorUserId, requireExplicitActor: true, statePath },
@@ -14210,7 +14314,7 @@ export async function handleSignedSendGridEmailDeliveryWebhook(rawBody, signatur
   return mutateState(
     'notifications.delivery-webhook',
     (state, actor) => {
-      requireAdmin(actor, 'notifications.delivery-webhook');
+      requirePlatformOperator(actor, 'notifications.delivery-webhook');
       return reconcileEmailWebhookEventsInState(state, event);
     },
     { actorUserId, requireExplicitActor: true, statePath },
@@ -14604,7 +14708,7 @@ export async function runJobs({ jobId, queue, limit } = {}, options = {}) {
   return mutateState(
     'jobs.run',
     async (state, actor) => {
-      requireAdmin(actor, 'jobs.run');
+      requirePlatformOperator(actor, 'jobs.run');
       const maxJobs = jobRunLimit(limit);
       const runnableStatuses = ['queued', 'running'];
       let jobs;
@@ -14740,7 +14844,7 @@ export async function retryJob(jobId, options = {}) {
   return mutateState(
     'jobs.retry',
     (state, actor) => {
-      requireAdmin(actor, 'jobs.retry');
+      requirePlatformOperator(actor, 'jobs.retry');
       const job = findById(state.jobs ?? [], requireArg(jobId, 'job id', 'jobs retry <jobId>'), 'Job');
       if (job.status !== 'failed') {
         throw new SignalStateError(`Only failed jobs can be retried: ${job.id}`, {
@@ -14781,7 +14885,7 @@ export async function requeueDeadLetterJob(deadLetterRef, options = {}) {
   return mutateState(
     'jobs.requeue',
     (state, actor) => {
-      requireAdmin(actor, 'jobs.requeue');
+      requirePlatformOperator(actor, 'jobs.requeue');
       const ref = requireArg(deadLetterRef, 'dead-letter job id', 'jobs requeue <deadLetterId|jobId>');
       const deadLetterIndex = (state.deadLetter ?? []).findIndex((job) => job.deadLetterId === ref || job.id === ref || job.originalJobId === ref);
       if (deadLetterIndex < 0) {
@@ -14825,7 +14929,7 @@ export async function requeueDeadLetterJobs(deadLetterRefs, options = {}) {
   return mutateState(
     'jobs.requeue-bulk',
     (state, actor) => {
-      requireAdmin(actor, 'jobs.requeue-bulk');
+      requirePlatformOperator(actor, 'jobs.requeue-bulk');
       const refs = [...new Set((Array.isArray(deadLetterRefs) ? deadLetterRefs : [deadLetterRefs]).map((ref) => String(ref ?? '').trim()).filter(Boolean))];
       if (refs.length === 0) {
         throw new SignalStateError('At least one dead-letter job id is required.', {
@@ -14874,7 +14978,7 @@ export async function drainJobs(queue, options = {}) {
   return mutateState(
     'jobs.drain',
     (state, actor) => {
-      requireAdmin(actor, 'jobs.drain');
+      requirePlatformOperator(actor, 'jobs.drain');
       const jobs = (state.jobs ?? []).filter((job) => ['queued', 'running'].includes(job.status) && (!queue || job.queue === queue));
       jobs.forEach((job) => {
         job.status = 'drained';
