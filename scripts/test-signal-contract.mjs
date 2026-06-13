@@ -769,6 +769,50 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert(state.payload.state.providerValidationSchedules.some((schedule) => schedule.providerId === 'stripe' && schedule.cadence === 'weekly'));
     assert(!JSON.stringify(state.payload.state.providerValidationRuns).includes(sessionSecret), 'provider validation evidence should not expose local session secret');
 
+    const pagedSignals = await requestApi('/api/signals?pageSize=2', { token: adminToken });
+    assert.equal(pagedSignals.status, 200);
+    assert.equal(pagedSignals.payload.pagination.page, 1);
+    assert.equal(pagedSignals.payload.pagination.pageSize, 2);
+    assert.equal(pagedSignals.payload.pagination.total, state.payload.state.signals.length);
+    assert.equal(pagedSignals.payload.pagination.hasNextPage, true);
+    assert.equal(pagedSignals.payload.signals.length, 2);
+
+    const clampedJobs = await requestApi('/api/jobs?pageSize=500', { token: adminToken });
+    assert.equal(clampedJobs.status, 200);
+    assert.equal(clampedJobs.payload.pagination.pageSize, 100);
+    assert.equal(clampedJobs.payload.pagination.total, state.payload.state.jobs.length);
+
+    const payments = await requestApi('/api/payments', { token: adminToken });
+    assert.equal(payments.status, 200);
+    assert(payments.payload.payments.some((row) => row.kind === 'subscription' && row.id === 'sub_demo'));
+    assert(payments.payload.payments.some((row) => row.kind === 'invoice' && row.id === 'inv_demo_paid'));
+    assert.equal(payments.payload.summary.subscriptions, state.payload.state.subscriptions.length);
+    assert.equal(payments.payload.pagination.total, payments.payload.summary.total);
+
+    const invalidPageSize = await requestApi('/api/signals?pageSize=0', { token: adminToken });
+    assert.equal(invalidPageSize.status, 400);
+    assert.equal(invalidPageSize.payload.code, 'INVALID_PAGINATION');
+    assert.equal(invalidPageSize.payload.details.parameter, 'pageSize');
+
+    const memberScopedState = await requestApi('/api/state', { token: memberToken });
+    assert.equal(memberScopedState.status, 200);
+    assert.deepEqual(memberScopedState.payload.state.signals.map((signal) => signal.id).sort(), ['sig_product_001']);
+    assert.deepEqual(memberScopedState.payload.state.mailboxes.map((mailbox) => mailbox.id).sort(), ['mbx_gmail_product']);
+
+    const memberSignals = await requestApi('/api/signals', { token: memberToken });
+    assert.equal(memberSignals.status, 200);
+    assert.deepEqual(memberSignals.payload.signals.map((signal) => signal.id).sort(), ['sig_product_001']);
+    assert.equal(memberSignals.payload.signals.some((signal) => signal.ownerUserId === 'usr_sales'), false);
+    assert.equal(JSON.stringify(memberSignals.payload.signals).includes('sig_expansion_001'), false);
+    assert.equal(Object.hasOwn(memberSignals.payload.signals[0], 'sourceSnippet'), false);
+
+    const memberMailboxes = await requestApi('/api/mailboxes', { token: memberToken });
+    assert.equal(memberMailboxes.status, 200);
+    assert.deepEqual(memberMailboxes.payload.mailboxes.map((mailbox) => mailbox.id).sort(), ['mbx_gmail_product']);
+    assert.equal(memberMailboxes.payload.mailboxes.some((mailbox) => mailbox.ownerUserId === 'usr_sales'), false);
+    assert.equal(JSON.stringify(memberMailboxes.payload.mailboxes).includes('mbx_gmail_sales'), false);
+    assert.equal(Object.hasOwn(memberMailboxes.payload.mailboxes[0], 'credentialDigest'), false);
+
     const integrations = await requestApi('/api/integrations', { token: adminToken });
     assert.equal(integrations.status, 200);
     assert.equal(integrations.payload.providerValidationSchedules.length, 4);
