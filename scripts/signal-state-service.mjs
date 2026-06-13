@@ -173,7 +173,17 @@ function authorized(req, config) {
   if (config.allowUnauthenticated) {
     return true;
   }
-  return req.headers.authorization === `Bearer ${config.token}`;
+  const header = req.headers.authorization;
+  if (typeof header !== 'string') {
+    return false;
+  }
+  const expected = `Bearer ${config.token}`;
+  const left = Buffer.from(header, 'utf8');
+  const right = Buffer.from(expected, 'utf8');
+  if (left.length !== right.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(left, right);
 }
 
 function quoteIdentifier(identifier) {

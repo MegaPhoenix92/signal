@@ -635,7 +635,7 @@ const vault = JSON.parse(await fs.readFile(vaultPath, 'utf8'));
 const vaultText = JSON.stringify(vault);
 assert(!vaultText.includes('live-access-token'), 'vault file should not contain plaintext access credential');
 assert(!vaultText.includes('live-refresh-token'), 'vault file should not contain plaintext refresh credential');
-const decryptedVaultPayload = decryptVaultPayload(vault.records[0].encrypted, { env: tokenExchangeEnv });
+const decryptedVaultPayload = decryptVaultPayload(vault.records[0].encrypted, { env: tokenExchangeEnv, vaultMeta: vault.meta });
 assert.equal(decryptedVaultPayload.response.access_token, 'live-access-token');
 assert.equal(decryptedVaultPayload.response.refresh_token, 'live-refresh-token');
 const vaultRecords = await listProviderCredentialRecords({ vaultPath, env: tokenExchangeEnv });
@@ -730,7 +730,7 @@ assert(refreshedMailbox?.credentialExpiresAt && Date.parse(refreshedMailbox.cred
 const refreshedVault = JSON.parse(await fs.readFile(vaultPath, 'utf8'));
 assert(!JSON.stringify(refreshedVault).includes('rotated-live-access-token'), 'vault should not contain plaintext rotated access token');
 assert(!JSON.stringify(credentialWatchState).includes('rotated-live-access-token'), 'app state should not contain plaintext rotated access token');
-assert.equal(decryptVaultPayload(refreshedVault.records[0].encrypted, { env: tokenExchangeEnv }).response.access_token, 'rotated-live-access-token');
+assert.equal(decryptVaultPayload(refreshedVault.records[0].encrypted, { env: tokenExchangeEnv, vaultMeta: refreshedVault.meta }).response.access_token, 'rotated-live-access-token');
 
 const liveSyncCalls = [];
 const vaultBackedSync = await syncMailbox(tokenExchangeConnection.details.mailboxId, {
