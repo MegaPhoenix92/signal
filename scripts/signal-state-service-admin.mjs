@@ -34,6 +34,11 @@ function stateServiceUrls(env = process.env) {
   if (readyUrl.pathname === stateUrl.pathname) {
     readyUrl.pathname = '/ready';
   }
+  const statusUrl = new URL(stateUrl.href);
+  statusUrl.pathname = statusUrl.pathname.replace(/\/state\/?$/, '/status');
+  if (statusUrl.pathname === stateUrl.pathname) {
+    statusUrl.pathname = '/status';
+  }
   const migrationsUrl = new URL(stateUrl.href);
   migrationsUrl.pathname = migrationsUrl.pathname.replace(/\/state\/?$/, '/migrations');
   if (migrationsUrl.pathname === stateUrl.pathname) {
@@ -43,6 +48,7 @@ function stateServiceUrls(env = process.env) {
     healthUrl: healthUrl.href,
     migrationsUrl: migrationsUrl.href,
     readyUrl: readyUrl.href,
+    statusUrl: statusUrl.href,
     stateUrl: stateUrl.href,
   };
 }
@@ -174,10 +180,10 @@ async function commandMigrations(env = process.env) {
 }
 
 async function commandBackup(env = process.env) {
-  const { healthUrl, stateUrl } = stateServiceUrls(env);
+  const { stateUrl, statusUrl } = stateServiceUrls(env);
   const outputPath = path.resolve(process.cwd(), positionals[1] ?? flagValue('--output') ?? defaultBackupPath());
-  const [health, current] = await Promise.all([
-    requestJson(healthUrl, {
+  const [status, current] = await Promise.all([
+    requestJson(statusUrl, {
       headers: authHeaders(env),
     }),
     requestState(stateUrl, env),
@@ -192,7 +198,7 @@ async function commandBackup(env = process.env) {
       createdAt: new Date().toISOString(),
       digest: artifact.digest,
       path: outputPath,
-      storage: health.storage,
+      storage: status.storage,
       summary: stateSummary(artifact.parsed),
     },
   });

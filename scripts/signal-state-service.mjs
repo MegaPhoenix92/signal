@@ -711,20 +711,27 @@ async function route(req, res, config, store) {
     json(res, 200, {
       ok: true,
       service: 'signal-state-service',
-      authenticated: !config.allowUnauthenticated,
-      storage: storageSummary(config),
     });
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/ready') {
     try {
+      const meta = await store.meta();
+      if (!authorized(req, config)) {
+        json(res, 200, {
+          ok: true,
+          ready: meta.exists,
+          service: 'signal-state-service',
+        });
+        return;
+      }
       json(res, 200, {
         ok: true,
+        ready: meta.exists,
         service: 'signal-state-service',
-        authenticated: !config.allowUnauthenticated,
         storage: storageSummary(config),
-        state: await store.meta(),
+        state: meta,
       });
     } catch (error) {
       json(res, 503, {
@@ -738,10 +745,13 @@ async function route(req, res, config, store) {
   }
 
   if (req.method === 'GET' && url.pathname === '/status') {
+    if (!authorized(req, config)) {
+      json(res, 401, { ok: false, code: 'UNAUTHORIZED', error: 'State service bearer token is required.' });
+      return;
+    }
     json(res, 200, {
       ok: true,
       service: 'signal-state-service',
-      authenticated: !config.allowUnauthenticated,
       storage: storageSummary(config),
       state: await store.meta(),
     });

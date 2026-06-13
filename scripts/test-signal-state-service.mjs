@@ -842,6 +842,28 @@ test('Signal API preserves concurrent mutations through external state service',
   assert.equal(createAudits.every((event) => event.actor === 'usr_admin'), true);
 });
 
+test('Signal state service health endpoint exposes only liveness metadata', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-state-service-health-'));
+  const stateFile = path.join(tempDir, 'state.json');
+  const backupDir = path.join(tempDir, 'backups');
+  const port = await freePort();
+  let stateService = null;
+
+  t.after(async () => {
+    await stopProcess(stateService?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  stateService = await startStateService({ backupDir, port, stateFile, token: 'health_probe_token' });
+  const response = await fetch(`http://127.0.0.1:${port}/health`);
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload, {
+    ok: true,
+    service: 'signal-state-service',
+  });
+});
+
 test('Signal state service prunes file backups older than retention days', async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-state-service-backup-retention-'));
   const stateFile = path.join(tempDir, 'state.json');

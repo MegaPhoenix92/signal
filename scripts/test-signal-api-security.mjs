@@ -681,7 +681,10 @@ test('API health is liveness and readiness reports local state dependency', asyn
   assert.equal(ready.status, 200);
   assert.equal(payload.ok, true);
   assert(payload.components.some((component) => component.component === 'state' && component.ok));
-  assert.equal(payload.summary.statePath, statePath);
+  assert.equal(payload.service, 'signal-local-api');
+  assert.equal(payload.summary, undefined);
+  assert.equal(payload.doctor, undefined);
+  assert.equal(payload.statePath, undefined);
 });
 
 test('API readiness returns 503 when external state service is unavailable', async (t) => {
@@ -1486,6 +1489,95 @@ test('POST /api/invites/claim returns 429 after repeated attempts from the same 
   assert.equal(second.status, 404);
   assert.equal(third.status, 429);
   assert.equal(thirdPayload.code, 'INVITE_CLAIM_RATE_LIMITED');
+});
+
+test('API status requires authenticated admin access', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-api-status-auth-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  const env = { SIGNAL_REQUIRE_SIGNED_SESSION: 'true', SIGNAL_SESSION_SECRET: 'status-auth-secret-32chars-value!' };
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const issued = await issueSessionToken('usr_admin', { actorUserId: 'usr_admin', env, statePath });
+  api = await startApiForSecurityTest({ port, statePath, env });
+
+  const anonymous = await fetch(`${api.apiBaseUrl}/api/status`);
+  const anonymousPayload = await parseJsonResponse(anonymous);
+  assert.equal(anonymous.status, 401);
+  assert.equal(anonymousPayload.code, 'SESSION_TOKEN_REQUIRED');
+
+  const authorized = await signedSessionGet(api.apiBaseUrl, issued.details.token, '/api/status');
+  assert.equal(authorized.status, 200);
+  assert.equal(authorized.payload.ok, true);
+  assert(authorized.payload.summary);
+  assert(authorized.payload.doctor);
+});
+
+test('Public email unsubscribe rejects predictable user identifiers', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-api-unsubscribe-auth-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: { SIGNAL_WEBHOOK_ACTOR: 'usr_admin' },
+  });
+
+  const byUserId = await fetch(`${api.apiBaseUrl}/api/email/unsubscribe/usr_sales`);
+  const byUserIdPayload = await parseJsonResponse(byUserId);
+  assert.equal(byUserId.status, 404);
+  assert.equal(byUserIdPayload.code, 'NOT_FOUND');
+
+  const byPredictableCode = await fetch(`${api.apiBaseUrl}/api/email/unsubscribe/unsub_usr_sales`);
+  const byPredictableCodePayload = await parseJsonResponse(byPredictableCode);
+  assert.equal(byPredictableCode.status, 404);
+  assert.equal(byPredictableCodePayload.code, 'NOT_FOUND');
+});
+
+test('Public email unsubscribe accepts only the stored unsubscribe token', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-api-unsubscribe-token-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const state = await loadState({ statePath });
+  const preference = state.notificationPreferences.find((candidate) => candidate.userId === 'usr_sales');
+  assert(preference?.unsubscribeCode);
+  assert(!preference.unsubscribeCode.startsWith('unsub_usr_'));
+
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: { SIGNAL_WEBHOOK_ACTOR: 'usr_admin' },
+  });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/email/unsubscribe/${encodeURIComponent(preference.unsubscribeCode)}`);
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 200);
+  assert.equal(payload.action, 'notifications.unsubscribe');
+  assert.equal(payload.details.userId, 'usr_sales');
+  assert.equal(payload.summary, undefined);
+  assert.equal(payload.doctor, undefined);
 });
 
 test('signal-api refuses to boot on non-loopback host without verified auth', async () => {

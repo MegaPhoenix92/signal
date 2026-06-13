@@ -8854,8 +8854,38 @@ function defaultImmediateAlertsForUser(user) {
   return user.role === 'admin' || user.team === 'sales';
 }
 
+export function generateUnsubscribeCode() {
+  return `unsub_${crypto.randomBytes(24).toString('base64url')}`;
+}
+
+export function isPredictableUnsubscribeCode(code) {
+  return typeof code === 'string' && /^unsub_usr_[a-z0-9_]+$/.test(code);
+}
+
 function unsubscribeCodeForUser(userId) {
-  return `unsub_${userId}`;
+  return generateUnsubscribeCode();
+}
+
+function findPreferenceByUnsubscribeCode(state, token) {
+  if (typeof token !== 'string' || token.length < 16) {
+    return null;
+  }
+  const preferences = state.notificationPreferences ?? [];
+  let match = null;
+  for (const candidate of preferences) {
+    const code = String(candidate.unsubscribeCode ?? '');
+    if (code.length !== token.length) {
+      continue;
+    }
+    try {
+      if (crypto.timingSafeEqual(Buffer.from(code, 'utf8'), Buffer.from(token, 'utf8'))) {
+        match = candidate;
+      }
+    } catch {
+      // Ignore malformed comparisons and continue scanning.
+    }
+  }
+  return match;
 }
 
 function defaultNotificationPreferences(state) {
@@ -8893,7 +8923,9 @@ function ensureDefaultNotificationPreferences(state) {
     preference.digestCadence = notificationCadences.includes(preference.digestCadence) ? preference.digestCadence : 'daily';
     preference.immediateAlerts = Boolean(preference.immediateAlerts);
     preference.emailDeliveryStatus = ['subscribed', 'unsubscribed'].includes(preference.emailDeliveryStatus) ? preference.emailDeliveryStatus : ((preference.channels ?? []).includes('email_digest') ? 'subscribed' : 'unsubscribed');
-    preference.unsubscribeCode = preference.unsubscribeCode ?? unsubscribeCodeForUser(preference.userId);
+    if (!preference.unsubscribeCode || isPredictableUnsubscribeCode(preference.unsubscribeCode)) {
+      preference.unsubscribeCode = generateUnsubscribeCode();
+    }
     preference.unsubscribedAt = preference.emailDeliveryStatus === 'unsubscribed' ? (preference.unsubscribedAt ?? state.meta?.updatedAt ?? nowIso()) : (preference.unsubscribedAt ?? null);
   });
 }
@@ -13038,12 +13070,15 @@ export async function unsubscribeEmailDigest(userOrToken, options = {}) {
     'notifications.unsubscribe',
     (state, actor) => {
       const identifier = requireArg(userOrToken, 'user id or unsubscribe code', 'notifications unsubscribe <userId|unsubscribeCode>');
-      const preference = (state.notificationPreferences ?? []).find((candidate) => candidate.userId === identifier || candidate.unsubscribeCode === identifier);
+      const allowUserIdentifier = options.allowUserIdentifier === true || options.publicUnsubscribe !== true;
+      const preference = allowUserIdentifier
+        ? (state.notificationPreferences ?? []).find((candidate) => candidate.userId === identifier || candidate.unsubscribeCode === identifier)
+        : findPreferenceByUnsubscribeCode(state, identifier);
       if (!preference) {
-        throw new SignalStateError(`Notification preference not found for unsubscribe identifier: ${identifier}`, {
+        throw new SignalStateError('Notification preference not found for unsubscribe token.', {
           code: 'NOT_FOUND',
           status: 404,
-          details: { identifier },
+          details: allowUserIdentifier ? { identifier } : {},
         });
       }
       requireAdminOrOwner(actor, preference.userId, 'notifications.unsubscribe', state, preference.tenantId);
@@ -15205,7 +15240,7 @@ export async function applyMutation(action, args = {}, options = {}) {
     case 'notifications.delivery-webhook':
       return handleEmailDeliveryWebhook(args.payload ?? args, options);
     case 'notifications.unsubscribe':
-      return unsubscribeEmailDigest(args.userOrToken ?? args.userId ?? args.code, options);
+      return unsubscribeEmailDigest(args.userOrToken ?? args.userId ?? args.code, { ...options, allowUserIdentifier: true });
     case 'signals.assign':
       return assignSignal(args.signalId, args.userId, options);
     case 'signals.status':
