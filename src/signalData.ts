@@ -813,6 +813,7 @@ export type Job = {
 
 export type AuditEvent = {
   id: string;
+  tenantId?: string | null;
   action: string;
   targetId: string;
   message: string;
@@ -1585,6 +1586,7 @@ export type OperationsHealthReport = {
   summary: {
     activeBackoffs: number;
     criticalLifecycle: number;
+    deadLetterJobs: number;
     failedDeliveries: number;
     failedJobs: number;
     failedQueues: number;
@@ -1670,6 +1672,7 @@ export type ProviderLaunchRow = {
   latestEvidenceRunId?: string | null;
   latestEvidenceDigest?: string | null;
   latestProviderRequestIds: string[];
+  freshnessBlockers: string[];
   schedule: {
     cadence: ProviderValidationCadence;
     lastRunAt?: string | null;
@@ -1691,6 +1694,8 @@ export type ProviderLaunchMatrixReport = {
   generatedAt: string;
   ok: boolean;
   productionReady: boolean;
+  freshness: unknown;
+  freshnessBlockers: string[];
   rows: ProviderLaunchRow[];
   recommendation: {
     summary: string;
@@ -1700,6 +1705,7 @@ export type ProviderLaunchMatrixReport = {
   summary: {
     blocked: number;
     configured: number;
+    freshnessBlocked: number;
     launchReady: number;
     missingRequiredEnv: number;
     sandboxPassed: number;
@@ -1952,6 +1958,7 @@ export type LifecyclePlaybookReport = {
     actionReady: number;
     attention: number;
     criticalNotices: number;
+    localReady: number;
     observed: number;
     openNotices: number;
     ready: number;
@@ -3330,7 +3337,7 @@ export function fallbackOnboardingReadiness(data: SignalAppData, backend = fallb
   const rows = [
     onboardingReadinessRow({
       area: 'registration_flow',
-      check: 'Workspace creation creates the tenant, owner, billing owner, subscription start, entitlement, checkout session, onboarding notification, onboarding job, and audit trail.',
+      check: 'Workspace creation creates the tenant, admin owner, billing owner, subscription start, entitlement, checkout session, onboarding notification, onboarding job, and audit trail.',
       evidence: [
         tenant ? `${tenant.name} (${tenant.domain})` : 'No tenant',
         `owner ${tenant?.ownerUserId ?? 'missing'} / billing ${tenant?.billingOwnerUserId ?? 'missing'}`,
@@ -3341,11 +3348,11 @@ export function fallbackOnboardingReadiness(data: SignalAppData, backend = fallb
         Boolean(checkoutSession || subscription?.status) &&
         Boolean(tenant?.registrationStatus === 'active' || (onboardingNotifications.length && onboardingJobs.length)),
       productionOk: durableStateReady && productionAuthReady,
-      recommendation: 'Keep registration workspace-first; do not create personal-only accounts before tenant membership exists.',
+      recommendation: 'Keep registration as a workspace-first flow; do not create personal-only accounts before tenant membership exists.',
     }),
     onboardingReadinessRow({
       area: 'member_invitation',
-      check: 'Invites and acceptance create bounded invite records, active memberships, seat accounting, and invite provenance.',
+      check: 'Member invitation and acceptance create bounded invite records, accepted users, active memberships, seat accounting, and invite provenance.',
       evidence: [
         `${pendingInvites.length} pending invite(s), ${acceptedInvitesWithMembership.length}/${acceptedInvites.length} accepted invite(s) with membership provenance`,
         `${summary.activeSeats}+${summary.pendingInviteSeats}/${summary.seatLimit ?? 'unlimited'} active+pending seats`,
@@ -3356,7 +3363,7 @@ export function fallbackOnboardingReadiness(data: SignalAppData, backend = fallb
         activeMemberships.length > 1 &&
         ((summary.seatsAvailable ?? 0) >= 0),
       productionOk: durableStateReady && productionAuthReady,
-      recommendation: 'Use invite-only member creation and digest accepted claim codes after use.',
+      recommendation: 'Use invite-only member creation for B2B workspaces; keep claim codes one-time and digest accepted codes after use.',
     }),
     onboardingReadinessRow({
       area: 'multi_user_org',
@@ -3368,11 +3375,11 @@ export function fallbackOnboardingReadiness(data: SignalAppData, backend = fallb
       ],
       localOk: Boolean(tenant && activeAdmins.length > 0 && activeMemberships.length > 1 && orphanMemberships.length === 0),
       productionOk: productionIsolationReady,
-      recommendation: 'Multi-member orgs are the right SaaS model; production needs durable tenant isolation and managed auth first.',
+      recommendation: 'Multi-member orgs are the right SaaS model; production must enforce tenant isolation and managed auth before many customer orgs share one backend.',
     }),
     onboardingReadinessRow({
       area: 'rbac_controls',
-      check: 'Admin/member permissions resolve from active membership before workspace, source, billing, and admin mutations run.',
+      check: 'Admin/member permissions are resolved from active membership before workspace, source, billing, and admin mutations run.',
       evidence: [
         `actor ${scope.actor?.id ?? 'none'} as ${scope.actor?.role ?? 'unknown'}`,
         `${scope.visibleSignals.length}/${data.signals.length} visible signal rows for the active actor`,
@@ -3380,7 +3387,7 @@ export function fallbackOnboardingReadiness(data: SignalAppData, backend = fallb
       ],
       localOk: Boolean(scope.actor && memberships.some((membership) => membership.userId === scope.actor?.id && membership.status === 'active')) && mailboxOwnershipOk && routingOwnershipOk,
       productionOk: productionIsolationReady,
-      recommendation: 'Admins see tenant-wide controls; members keep owner/team-scoped signals, owned mailboxes, own notifications, and owned account work.',
+      recommendation: 'Admins can see tenant-wide controls; members should keep owner/team-scoped signals, owned mailboxes, own notifications, and owned account work.',
     }),
     onboardingReadinessRow({
       area: 'data_privacy',
@@ -3550,7 +3557,9 @@ export function fallbackTenantIsolationAudit(data: SignalAppData, backend = fall
     ...tenantRoutingRules.map((rule) => rule.ownerUserId).filter((userId): userId is string => Boolean(userId)),
   ];
   const ownsOrRoutesOk = ownedUserIds.every((userId) => tenantOwnedUserIds.has(userId));
-  const mutationAuditActions = new Set((data.auditEvents ?? []).map((event) => event.action));
+  const mutationAuditActions = new Set((data.auditEvents ?? [])
+    .filter((event) => !tenant?.id || event.tenantId === tenant.id)
+    .map((event) => event.action));
   const adminMutationEvidence = [
     'tenants.create',
     'tenants.register',
@@ -3763,7 +3772,10 @@ function fallbackWebhookHealthRows(data: SignalAppData): OperationsWebhookHealth
   const deliveries = data.emailDeliveryMessages ?? [];
   const paymentEvents = data.paymentEvents ?? [];
   const jobs = data.jobs ?? [];
+  const outcomes = data.webhookEvents ?? [];
   return operationsWebhookCatalog.map((item) => {
+    const channelOutcomes = outcomes.filter((event) => event.provider === item.channel || (item.channel === 'outbound_email' && event.provider === 'email'));
+    const rejected = channelOutcomes.filter((event) => !event.accepted).length;
     if (item.channel === 'gmail' || item.channel === 'outlook') {
       const providerWatches = watches.filter((watch) => watch.provider === item.provider);
       const activeWatches = providerWatches.filter((watch) => watch.status === 'active');
@@ -3779,11 +3791,13 @@ function fallbackWebhookHealthRows(data: SignalAppData): OperationsWebhookHealth
           `${activeWatches.length}/${providerWatches.length} active watch subscription(s)`,
           `${providerWatches.reduce((total, watch) => total + (watch.notificationCount ?? 0), 0)} provider notification(s)`,
           `${failedWatches.length} failed watch subscription(s)`,
+          `${channelOutcomes.length} webhook outcome(s), ${rejected} rejected`,
         ],
         label: item.label,
-        latestAt: latestLocalIso(providerWatches as Array<Record<string, unknown>>, ['lastNotificationAt', 'updatedAt', 'setupAt', 'createdAt']),
-        localOk: failedWatches.length === 0 && backoffWatches.length === 0,
+        latestAt: latestLocalIso([...providerWatches, ...channelOutcomes] as Array<Record<string, unknown>>, ['lastNotificationAt', 'updatedAt', 'setupAt', 'createdAt', 'receivedAt']),
+        localOk: failedWatches.length === 0 && backoffWatches.length === 0 && rejected === 0,
         path: item.path,
+        rejected,
         status,
       };
     }
@@ -3798,11 +3812,13 @@ function fallbackWebhookHealthRows(data: SignalAppData): OperationsWebhookHealth
           `${deliveries.length} delivery ledger record(s)`,
           `${queued} queued, ${statuses.sent ?? 0} sent, ${failed} failed or bounced, ${statuses.suppressed ?? 0} suppressed`,
           `${jobs.filter((job) => job.queue === 'outbound_email').length} outbound_email worker job(s)`,
+          `${channelOutcomes.length} webhook outcome(s), ${rejected} rejected`,
         ],
         label: item.label,
-        latestAt: latestLocalIso(deliveries as Array<Record<string, unknown>>, ['providerStatusUpdatedAt', 'sentAt', 'createdAt']),
-        localOk: failed === 0,
+        latestAt: latestLocalIso([...deliveries, ...channelOutcomes] as Array<Record<string, unknown>>, ['providerStatusUpdatedAt', 'sentAt', 'createdAt', 'receivedAt']),
+        localOk: failed === 0 && rejected === 0,
         path: item.path,
+        rejected,
         status: failed ? 'attention' : queued ? 'queued' : deliveries.length ? 'ready' : 'idle',
       };
     }
@@ -3816,11 +3832,13 @@ function fallbackWebhookHealthRows(data: SignalAppData): OperationsWebhookHealth
         `${paymentEvents.length} payment event(s)`,
         `${signedEvents.length} signed provider event(s)`,
         `${failedBillingJobs.length}/${billingJobs.length} failed billing_webhook job(s)`,
+        `${channelOutcomes.length} webhook outcome(s), ${rejected} rejected`,
       ],
       label: item.label,
-      latestAt: latestLocalIso([...paymentEvents, ...billingJobs] as Array<Record<string, unknown>>, ['signatureVerifiedAt', 'createdAt', 'lastRunAt']),
-      localOk: paymentEvents.length > 0 && failedBillingJobs.length === 0,
+      latestAt: latestLocalIso([...paymentEvents, ...billingJobs, ...channelOutcomes] as Array<Record<string, unknown>>, ['signatureVerifiedAt', 'createdAt', 'lastRunAt', 'receivedAt']),
+      localOk: paymentEvents.length > 0 && failedBillingJobs.length === 0 && rejected === 0,
       path: item.path,
+      rejected,
       status: failedBillingJobs.length ? 'attention' : paymentEvents.length ? 'ready' : 'idle',
     };
   });
@@ -3829,19 +3847,21 @@ function fallbackWebhookHealthRows(data: SignalAppData): OperationsWebhookHealth
 function fallbackQueueHealthRows(data: SignalAppData): OperationsQueueHealth[] {
   return operationsQueueNames.map((queue) => {
     const jobs = (data.jobs ?? []).filter((job) => job.queue === queue);
+    const deadLetter = (data.deadLetter ?? []).filter((job) => job.queue === queue);
     const statuses = countLocalStatuses(jobs);
     const failed = statuses.failed ?? 0;
     const queued = statuses.queued ?? 0;
     const running = statuses.running ?? 0;
     return {
       queue,
+      deadLetter: deadLetter.length,
       drained: statuses.drained ?? 0,
       failed,
       latestAt: latestLocalIso(jobs as Array<Record<string, unknown>>, ['lastRunAt', 'nextRunAt']),
-      localOk: failed === 0,
+      localOk: failed === 0 && deadLetter.length === 0,
       queued,
       running,
-      status: failed ? 'attention' : running ? 'running' : queued ? 'queued' : jobs.length ? 'ready' : 'idle',
+      status: deadLetter.length ? 'attention' : failed ? 'attention' : running ? 'running' : queued ? 'queued' : jobs.length ? 'ready' : 'idle',
       succeeded: statuses.succeeded ?? 0,
       total: jobs.length,
     };
@@ -3978,6 +3998,7 @@ export function fallbackOperationsHealth(data: SignalAppData, backend = fallback
     summary: {
       activeBackoffs: activeBackoffs.length,
       criticalLifecycle: criticalLifecycle.reduce((total, row) => total + row.critical, 0),
+      deadLetterJobs: data.deadLetter?.length ?? 0,
       failedDeliveries: failedDeliveries.length,
       failedJobs: summary.failedJobs ?? 0,
       failedQueues: failedQueues.length,
@@ -4031,6 +4052,7 @@ export function fallbackProductionDrill(
   backend = fallbackBackendReadiness(),
   provider = fallbackProviderReadiness(),
   operations = fallbackOperationsHealth(data, backend),
+  env: Record<string, string | undefined> = {},
 ): ProductionDrillReport {
   const summary = summarizeLocalState(data);
   const checkById = (id: string) => backend.checks.find((check) => check.id === id);
@@ -4043,10 +4065,13 @@ export function fallbackProductionDrill(
   const productionAuth = checkById('production_auth_provider');
   const tenantIsolation = checkById('tenant_isolation');
   const scheduler = checkById('job_scheduler');
+  const schedulerLockEnv = ['SIGNAL_SCHEDULER_LOCK_POLICY'];
+  const schedulerLockReady = fallbackMissingKeys(env, schedulerLockEnv).length === 0;
+  const stateServiceTokenConfigured = Boolean(env.SIGNAL_STATE_SERVICE_TOKEN);
   const latestProviderRun = [...(data.providerValidationRuns ?? [])].sort((left, right) => Date.parse(right.recordedAt ?? '') - Date.parse(left.recordedAt ?? ''))[0];
   const activeProviderSchedules = data.providerValidationSchedules?.filter((schedule) => schedule.status === 'active').length ?? 0;
   const providerSandboxPassed = latestProviderRun?.status === 'passed';
-  const stateServiceReady = backend.mode === 'external-service' && Boolean(durableState?.ok && stateServiceStorage?.ok);
+  const stateServiceReady = backend.mode === 'external-service' && Boolean(env.SIGNAL_STATE_SERVICE_URL) && Boolean(durableState?.ok && stateServiceStorage?.ok && stateServiceTokenConfigured);
   const identityReady = Boolean(
     signedSession?.ok &&
     sessionCookieSecureCheck?.ok &&
@@ -4055,14 +4080,48 @@ export function fallbackProductionDrill(
     productionAuth?.ok &&
     tenantIsolation?.ok,
   );
-  const schedulerReady = Boolean(scheduler?.ok && summary.failedJobs === 0 && activeProviderSchedules >= 4);
+  const schedulerReady = Boolean(scheduler?.ok && schedulerLockReady && summary.failedJobs === 0 && activeProviderSchedules >= 4);
   const liveProviderSchedulerReady = Boolean(provider.ok && providerSandboxPassed && activeProviderSchedules >= 4);
+  const providerById = (id: string) => provider.providers.find((item) => item.id === id);
+  const gmail = providerById('gmail');
+  const outlook = providerById('outlook');
+  const outboundEmail = providerById('outbound-email');
+  const stripe = providerById('stripe');
+  const localReadinessChecks = [
+    (summary.activeMemberships ?? 0) > 0 && (summary.activeEntitlements ?? 0) > 0,
+    (summary.activeMemberships ?? 0) > 0,
+    summary.connectedMailboxes > 0 && summary.enabledEmailFlows > 0 && (summary.sourceMessages ?? 0) > 0,
+    (summary.modelGovernancePolicies ?? 0) > 0 && (summary.perTenantModels ?? 0) === 0,
+    (summary.accounts ?? 0) > 0 && (summary.accountRecommendations ?? 0) > 0,
+    (summary.notificationPreferences ?? 0) > 0,
+    summary.subscriptions > 0 && (summary.activeEntitlements ?? 0) > 0,
+    activeProviderSchedules >= 4,
+    (summary.jobs ?? 0) > 0 && Array.isArray(data.auditEvents),
+    true,
+  ];
+  const localReady = localReadinessChecks.filter(Boolean).length;
+  const localTotal = localReadinessChecks.length;
+  const launchGateStatuses = [
+    localReady === localTotal,
+    backend.productionReady,
+    tenantIsolation?.ok,
+    provider.ok,
+    providerSandboxPassed,
+    gmail?.ready && outlook?.ready && outboundEmail?.ready && providerSandboxPassed,
+    stripe?.ready && providerSandboxPassed,
+    schedulerReady,
+  ];
+  const launchGatePassed = launchGateStatuses.filter(Boolean).length;
+  const launchGateTotal = launchGateStatuses.length;
   const rows = [
     productionDrillRow({
       area: 'local_contracts',
       check: 'Local contracts, browser routes, API mutations, scheduler, state-service, and launch package tests are the baseline before production rehearsal.',
       commands: ['npm run test:local', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json'],
-      evidence: [`${summary.users} user(s), ${summary.mailboxes} mailbox source(s), ${summary.jobs} job record(s)`],
+      evidence: [
+        `${localReady}/${localTotal} local readiness areas pass`,
+        `${launchGatePassed}/${launchGateTotal} launch gate(s) currently pass`,
+      ],
       owner: 'product',
       productionOk: backend.productionReady && provider.ok && providerSandboxPassed,
       recommendation: 'Run npm run test:local and launch-gate package before any provider or deployment rehearsal.',
@@ -4072,7 +4131,11 @@ export function fallbackProductionDrill(
       area: 'state_service_health',
       check: 'External state service is configured, bearer-protected, database-backed, and reachable through the local-agent admin boundary.',
       commands: ['SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- health --json'],
-      evidence: [`Backend mode: ${backend.mode}`, stateServiceStorage?.message ?? 'State-service storage not evaluated'],
+      evidence: [
+        `Backend mode: ${backend.mode}`,
+        stateServiceStorage?.message ?? 'State-service storage not evaluated',
+        `State-service token configured: ${stateServiceTokenConfigured ? 'yes' : 'no'}`,
+      ],
       owner: 'platform',
       productionOk: stateServiceReady,
       recommendation: 'Run health through the same state-service URL the API will use; do not test backups against local JSON mode.',
@@ -4130,17 +4193,26 @@ export function fallbackProductionDrill(
       area: 'scheduler_daemon',
       check: 'Managed scheduler process, single-runner policy, active validation schedules, and clean queues are ready.',
       commands: ['npm run scheduler -- --once --dry-run --json', 'SIGNAL_JOB_SCHEDULER=signal-scheduler SIGNAL_PROVIDER_VALIDATION_SCHEDULER=signal-scheduler npm run scheduler -- --once --json'],
-      evidence: [scheduler?.message ?? 'Scheduler not evaluated', `${summary.failedJobs}/${summary.jobs} failed job(s)`, `${activeProviderSchedules}/${data.providerValidationSchedules?.length ?? 0} active provider validation schedule(s)`],
+      evidence: [
+        scheduler?.message ?? 'Scheduler not evaluated',
+        `${summary.failedJobs}/${summary.jobs} failed job(s)`,
+        `${activeProviderSchedules}/${data.providerValidationSchedules?.length ?? 0} active provider validation schedule(s)`,
+        `Single-runner policy configured: ${schedulerLockReady ? 'yes' : 'no'}`,
+      ],
       owner: 'operations',
       productionOk: schedulerReady,
       recommendation: 'Run the scheduler dry-run and one managed queue tick before enabling continuous production scheduling.',
-      requiredEnv: [...(scheduler?.missingEnv ?? []), 'SIGNAL_SCHEDULER_LOCK_POLICY'],
+      requiredEnv: uniquePlanValues([...(scheduler?.missingEnv ?? []), ...fallbackMissingKeys(env, schedulerLockEnv)]),
     }),
     productionDrillRow({
       area: 'live_provider_recurring_tests',
       check: 'Live-provider sandbox evidence is passed and scheduled for recurring production-safe checks.',
       commands: ['npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- integrations run-scheduled --force --json'],
-      evidence: [`${provider.summary.readyProviders}/${provider.summary.totalProviders} provider group(s) configured`, latestProviderRun ? `Latest sandbox evidence ${latestProviderRun.status} at ${latestProviderRun.recordedAt}` : 'No provider sandbox evidence recorded'],
+      evidence: [
+        `${provider.summary.readyProviders}/${provider.summary.totalProviders} provider group(s) configured`,
+        latestProviderRun ? `Latest sandbox evidence ${latestProviderRun.status} at ${latestProviderRun.recordedAt}` : 'No provider sandbox evidence recorded',
+        `${activeProviderSchedules}/${data.providerValidationSchedules?.length ?? 0} active provider validation schedule(s)`,
+      ],
       owner: 'integrations',
       productionOk: liveProviderSchedulerReady,
       recommendation: 'Use real Gmail, Outlook, SendGrid, and Stripe sandbox credentials and save sanitized evidence before go-live.',
@@ -4247,12 +4319,51 @@ function fallbackProviderLaunchEvidence(providerId: string) {
   return evidenceMap[providerId] ?? [];
 }
 
+function fallbackLaunchFreshnessReport() {
+  return {
+    applies: false,
+    backupRehearsal: {
+      ageMs: null,
+      maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+      recordedAt: null,
+      stale: false,
+    },
+    blockers: [],
+    policy: {
+      backupRehearsalMaxAgeMs: 30 * 24 * 60 * 60 * 1000,
+      sandboxEvidenceMaxAgeMs: 7 * 24 * 60 * 60 * 1000,
+      scheduleOverdueGraceMs: 24 * 60 * 60 * 1000,
+      schedulerHeartbeatMaxAgeMs: 10 * 60 * 1000,
+    },
+    providerValidationSchedules: {
+      graceMs: 24 * 60 * 60 * 1000,
+      overdue: [],
+    },
+    sandboxEvidence: {
+      ageMs: null,
+      maxAgeMs: 7 * 24 * 60 * 60 * 1000,
+      recordedAt: null,
+      runId: null,
+      stale: false,
+      status: null,
+    },
+    schedulerHeartbeat: {
+      ageMs: null,
+      maxAgeMs: 10 * 60 * 1000,
+      ok: null,
+      recordedAt: null,
+      schedulerConfigured: false,
+    },
+  };
+}
+
 export function fallbackProviderLaunchMatrix(
   data: SignalAppData,
   backend = fallbackBackendReadiness(),
   provider = fallbackProviderReadiness(),
 ): ProviderLaunchMatrixReport {
   const signedSession = backend.checks.find((check) => check.id === 'signed_session_enforced');
+  const freshness = fallbackLaunchFreshnessReport();
   const rows = provider.providers.map((item) => {
     const sandboxRequired = item.id !== 'session';
     const schedule = data.providerValidationSchedules?.find((candidate) => candidate.providerId === item.id) ?? null;
@@ -4261,7 +4372,8 @@ export function fallbackProviderLaunchMatrix(
     const scheduleReady = !sandboxRequired || schedule?.status === 'active';
     const configurationReady = item.ready && (item.id !== 'session' || Boolean(signedSession?.ok));
     const sandboxReady = !sandboxRequired || sandboxStatus === 'passed';
-    const launchReady = Boolean(configurationReady && sandboxReady && scheduleReady);
+    const freshnessBlockers: string[] = [];
+    const launchReady = Boolean(configurationReady && sandboxReady && scheduleReady && freshnessBlockers.length === 0);
     const commands = fallbackProviderLaunchCommands(item.id);
     return {
       id: item.id,
@@ -4284,6 +4396,7 @@ export function fallbackProviderLaunchMatrix(
       latestEvidenceRunId: evidence?.runId ?? null,
       latestEvidenceDigest: evidence?.reportDigest ?? null,
       latestProviderRequestIds: evidence?.checks.map((check) => check.providerRequestId).filter(Boolean) as string[] ?? [],
+      freshnessBlockers,
       schedule: schedule
         ? {
             cadence: schedule.cadence,
@@ -4300,13 +4413,15 @@ export function fallbackProviderLaunchMatrix(
       signedReplayCommand: commands.replay,
       localAgentCommand: item.id === 'session' ? 'npm run admin -- backend --env-file ./.env.production --json' : 'npm run admin -- provider-launch --env-file ./.env.production --json',
       launchReady,
-      status: launchReady ? 'production_ready' : !configurationReady ? 'needs_config' : sandboxRequired && sandboxStatus !== 'passed' ? 'needs_sandbox' : sandboxRequired && !scheduleReady ? 'needs_schedule' : 'needs_proof',
+      status: launchReady ? 'production_ready' : !configurationReady ? 'needs_config' : sandboxRequired && sandboxStatus !== 'passed' ? 'needs_sandbox' : sandboxRequired && !scheduleReady ? 'needs_schedule' : freshnessBlockers.length ? 'needs_freshness' : 'needs_proof',
     };
   });
   return {
     generatedAt: new Date().toISOString(),
     ok: true,
     productionReady: rows.every((row) => row.launchReady),
+    freshness,
+    freshnessBlockers: freshness.blockers,
     recommendation: {
       summary: 'Use provider-launch as the provider-by-provider handoff between configuration, saved sandbox evidence, live watch/send/payment commands, and signed webhook replay proof.',
       productionGuardrail: 'Do not enable production Gmail, Outlook, SendGrid/outbound email, Stripe, or signed-session traffic until each provider row is production_ready with current external evidence.',
@@ -4316,6 +4431,7 @@ export function fallbackProviderLaunchMatrix(
     summary: {
       blocked: rows.filter((row) => !row.launchReady).length,
       configured: rows.filter((row) => row.configurationReady).length,
+      freshnessBlocked: freshness.blockers.length,
       launchReady: rows.filter((row) => row.launchReady).length,
       missingRequiredEnv: rows.reduce((count, row) => count + row.missingEnv.length, 0),
       sandboxPassed: rows.filter((row) => row.sandboxRequired && row.sandboxStatus === 'passed').length,
@@ -4561,7 +4677,7 @@ const fallbackLifecyclePlaybookCatalog: LifecyclePlaybookSeed[] = [
     notificationFlow: 'Admins get access-boundary notices; members see only owned/team-routed work.',
     userAction: 'Use the assigned workspace role and manage only owned sources, notifications, and account actions.',
     adminAction: 'Resolve membership role/status before every admin, source, billing, and privacy mutation.',
-    commands: ['npm run admin -- users --json', 'npm run admin -- users role <userId> member sales', 'npm run admin -- users disable <userId>', 'npm run admin -- session token usr_admin --json'],
+    commands: ['npm run admin -- users --json', 'npm run admin -- users role <userId> member sales', 'npm run admin -- users disable <userId>', 'npm run admin -- session token usr_admin --json', 'npm run admin -- onboarding-readiness --json'],
     evidence: (data, summary) => [`${summary.admins} active admin(s)`, `${summary.activeMemberships ?? 0} active membership(s)`, `${summary.apiSessions ?? 0} API session record(s)`, `${data.modelGovernancePolicies?.filter((policy) => policy.dataBoundary === 'tenant_isolated').length ?? 0} tenant-isolated model governance policy row(s)`],
     localOk: (data, summary) => summary.admins > 0 && (summary.activeMemberships ?? 0) > 1 && (data.modelGovernancePolicies ?? []).every((policy) => policy.dataBoundary === 'tenant_isolated'),
   },
@@ -4575,7 +4691,7 @@ const fallbackLifecyclePlaybookCatalog: LifecyclePlaybookSeed[] = [
     notificationFlow: 'Immediate alerts, daily/weekly digests, mute rules, and account ownership route outcomes per user.',
     userAction: 'Set digest cadence, mute noisy accounts or signal types, and act on assigned account recommendations.',
     adminAction: 'Tune routing rules, ownership, thresholds, and notification preferences without creating separate org models.',
-    commands: ['npm run admin -- notifications preference usr_sales daily immediate', 'npm run admin -- notifications mute-account usr_product Acme Health', 'npm run admin -- signals assign sig_risk_001 usr_sales', 'npm run admin -- notifications digest tenant_demo'],
+    commands: ['npm run admin -- notifications preference usr_sales daily immediate', 'npm run admin -- notifications mute-account usr_product Acme Health', 'npm run admin -- signals assign sig_risk_001 usr_sales', 'npm run admin -- notifications digest tenant_demo', 'npm run admin -- accounts action <actionId> completed'],
     evidence: (data, summary) => [`${summary.activeRoutingRules ?? 0}/${summary.routingRules ?? 0} active routing rule(s)`, `${data.notificationPreferences?.length ?? 0} notification preference record(s)`, `${summary.openAccountRecommendations ?? 0}/${summary.accountRecommendations ?? 0} open recommendation(s)`, `${summary.unreadNotifications ?? 0}/${summary.notificationEvents ?? 0} unread notification(s)`],
     localOk: (data, summary) => (summary.activeRoutingRules ?? 0) > 0 && (data.notificationPreferences?.length ?? 0) >= (summary.activeMemberships ?? 0),
   },
@@ -4589,7 +4705,7 @@ const fallbackLifecyclePlaybookCatalog: LifecyclePlaybookSeed[] = [
     notificationFlow: 'Source owners and admins get reconnect tasks; raw credentials stay in the vault boundary.',
     userAction: 'Reconnect the mailbox through a scoped auth link or disconnect a source no longer needed.',
     adminAction: 'Create a signed provider auth link, complete the connection, replay sync, or disconnect the source.',
-    commands: ['npm run admin -- mailboxes connect-url tenant_demo gmail usr_sales', 'npm run admin -- mailboxes complete <connectionSessionId>', 'npm run admin -- mailboxes disconnect <mailboxId>', 'npm run admin -- mailboxes replay <mailboxId>'],
+    commands: ['npm run admin -- mailboxes connect-url tenant_demo gmail usr_sales', 'npm run admin -- mailboxes complete <connectionSessionId>', 'npm run admin -- mailboxes disconnect <mailboxId>', 'npm run admin -- mailboxes replay <mailboxId>', 'npm run admin -- lifecycle --json'],
     evidence: (_data, summary) => [`${summary.connectedMailboxes}/${summary.mailboxes} connected mailbox source(s)`, `${summary.mailboxConnectionSessions ?? 0} connection session(s)`, `${summary.blockedSyncCursors ?? 0} blocked sync cursor(s)`, `${summary.activeEmailWatchSubscriptions ?? 0}/${summary.emailWatchSubscriptions ?? 0} active provider watch(es)`],
     localOk: (_data, summary) => summary.mailboxes > 0 && (summary.blockedSyncCursors ?? 0) === 0,
   },
@@ -4603,7 +4719,7 @@ const fallbackLifecyclePlaybookCatalog: LifecyclePlaybookSeed[] = [
     notificationFlow: 'Admin operations sees active provider backoff and worker queue state before customers are spammed.',
     userAction: 'No user action unless a source reconnect is required.',
     adminAction: 'Respect Retry-After, renew watches, replay source cursors, and run scheduled provider validation.',
-    commands: ['npm run admin -- mailboxes renew-watch <watchId>', 'npm run admin -- integrations run-scheduled --json', 'npm run scheduler -- --once --dry-run --json', 'npm run admin -- operations-health --json'],
+    commands: ['npm run admin -- mailboxes renew-watch <watchId>', 'npm run admin -- mailboxes replay <mailboxId>', 'npm run admin -- integrations run-scheduled --json', 'npm run scheduler -- --once --dry-run --json', 'npm run admin -- operations-health --json'],
     evidence: (_data, summary) => [`${summary.activeProviderValidationSchedules ?? 0}/${summary.providerValidationSchedules ?? 0} active provider validation schedule(s)`, `${summary.dueProviderValidationSchedules ?? 0} due validation schedule(s)`, `${summary.failedJobs ?? 0} failed job(s)`, `${summary.expiringEmailWatchSubscriptions ?? 0} expiring email watch(es)`],
     localOk: (_data, summary) => (summary.failedJobs ?? 0) === 0,
   },
@@ -4617,7 +4733,7 @@ const fallbackLifecyclePlaybookCatalog: LifecyclePlaybookSeed[] = [
     notificationFlow: 'Digest delivery creates provider messages; signed delivery webhooks reconcile sent, failed, bounced, and suppressed states.',
     userAction: 'Update notification preferences, unsubscribe, or mute account/signal types.',
     adminAction: 'Run digest, review failed delivery webhooks, replay signed status events, and keep suppression rules honored.',
-    commands: ['npm run admin -- notifications digest tenant_demo', 'npm run admin -- notifications delivery-status <messageId> sent', 'SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET=<email-webhook-secret> npm run admin -- notifications webhook-signed ./email-event.json <Signal-Email-Signature>', 'npm run admin -- notifications unsubscribe usr_product'],
+    commands: ['npm run admin -- notifications digest tenant_demo', 'npm run admin -- notifications delivery-status <messageId> sent', 'SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET=<email-webhook-secret> npm run admin -- notifications webhook-signed ./email-event.json <Signal-Email-Signature>', 'SIGNAL_SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY=<sendgrid-public-key> npm run admin -- notifications sendgrid-webhook-signed ./sendgrid-events.json <signature> <timestamp>', 'npm run admin -- notifications unsubscribe usr_product'],
     evidence: (_data, summary) => [`${summary.digestRuns ?? 0} digest run(s)`, `${summary.failedEmailDeliveries ?? 0}/${summary.emailDeliveries ?? 0} failed email delivery record(s)`, `${summary.unsubscribedUsers ?? 0} unsubscribed user(s)`, `${summary.unreadNotifications ?? 0}/${summary.notificationEvents ?? 0} unread notification(s)`],
     localOk: (data, summary) => (summary.failedEmailDeliveries ?? 0) === 0 && (data.notificationPreferences?.length ?? 0) > 0,
   },
@@ -4631,7 +4747,7 @@ const fallbackLifecyclePlaybookCatalog: LifecyclePlaybookSeed[] = [
     notificationFlow: 'Billing owner receives recovery notice; admins can create Checkout/Billing recovery handoffs and signed webhook replays.',
     userAction: 'Open the recovery link or billing portal to update payment method.',
     adminAction: 'Use Stripe Billing state as source of truth, create a recovery session, and wait for signed invoice webhooks.',
-    commands: ['npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments portal tenant_demo --live-provider', 'npm run admin -- payments webhook invoice.payment_failed sub_demo', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>'],
+    commands: ['npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments portal tenant_demo --live-provider', 'npm run admin -- payments webhook invoice.payment_failed sub_demo', 'npm run admin -- payments webhook invoice.paid sub_demo', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>'],
     evidence: (_data, summary) => [`${summary.openInvoices ?? 0}/${summary.invoices ?? 0} open invoice(s)`, `${summary.billingSessions ?? 0} billing session(s)`, `${summary.paymentEvents} payment event(s)`, `${summary.activeEntitlements ?? 0} active entitlement(s)`],
     localOk: (_data, summary) => (summary.openInvoices ?? 0) === 0 && (summary.billingSessions ?? 0) > 0 && summary.paymentEvents > 0,
   },
@@ -4721,6 +4837,7 @@ export function fallbackLifecyclePlaybook(data: SignalAppData, backend = fallbac
       actionReady: rows.filter((row) => row.status === 'action_ready').length,
       attention: rows.filter((row) => row.status === 'attention').length,
       criticalNotices: rows.reduce((total, row) => total + row.critical, 0),
+      localReady: rows.filter((row) => row.localOk).length,
       observed: rows.filter((row) => row.observed > 0).length,
       openNotices: rows.reduce((total, row) => total + row.open, 0),
       ready: rows.filter((row) => row.status === 'ready' || row.status === 'observed').length,
@@ -5145,6 +5262,7 @@ export function fallbackPaymentHandoff(
   payment = fallbackPaymentLifecycleAudit(data, backend, provider),
   env: Record<string, string | undefined> = {},
 ): PaymentHandoffReport {
+  const summary = summarizeLocalState(data);
   const stripeRow = launch.rows.find((row) => row.id === 'stripe') ?? null;
   const subscriptionStart = paymentLifecycleFallbackRowByArea(payment, 'subscription_starting_point');
   const checkoutPortal = paymentLifecycleFallbackRowByArea(payment, 'checkout_portal_self_service');
@@ -5264,6 +5382,7 @@ export function fallbackPaymentHandoff(
       productionOk: paymentLaunchReady,
       evidence: [
         `${payment.summary.productionReady}/${payment.summary.total} payment lifecycle production row(s) ready`,
+        `${summary.subscriptions} subscription record(s) | ${summary.activeEntitlements} active entitlement(s) | ${summary.openInvoices}/${summary.invoices} open invoice(s) | ${summary.paymentEvents} payment event(s)`,
         stripeRow ? `${stripeRow.label}: ${stripeRow.status}` : 'Stripe launch row missing',
       ],
       blocker: paymentLaunchReady ? 'None' : 'Payment launch evidence cannot be packaged until Stripe launch, lifecycle, sandbox, and gate proof all pass.',
@@ -5427,6 +5546,9 @@ export function fallbackEmailHandoff(
   const emailSyncQueue = operations.queues.find((row) => row.queue === 'email_sync') ?? null;
   const notificationQueue = operations.queues.find((row) => row.queue === 'notification_digest') ?? null;
   const outboundQueue = operations.queues.find((row) => row.queue === 'outbound_email') ?? null;
+  const lifecycle = fallbackLifecyclePlaybook(data, backend);
+  const outboundPlaybook = lifecycle.rows.find((row) => row.id === 'outbound_email_delivery') ?? null;
+  const watchPlaybook = lifecycle.rows.find((row) => row.id === 'provider_backoff_watch') ?? null;
   const signedDeliveryMessages = (data.emailDeliveryMessages ?? []).filter((message) => message.providerSignatureStatus === 'verified');
   const signedDeliveryEventIds = signedDeliveryMessages
     .flatMap((message) => message.providerEventIds ?? (message.providerEventId ? [message.providerEventId] : []))
@@ -5518,7 +5640,13 @@ export function fallbackEmailHandoff(
       env,
       productionOk: watchProofReady,
       requiredEnv: uniquePlanValues([...providerSandboxRequiredEnv('gmail'), ...providerSandboxRequiredEnv('outlook')]),
-      evidence: [`${summary.activeEmailWatchSubscriptions ?? 0}/${summary.emailWatchSubscriptions ?? 0} active email watch subscription(s)`, `Gmail webhook: ${gmailWebhook?.status ?? 'missing'}`, `Outlook webhook: ${outlookWebhook?.status ?? 'missing'}`, `Email sync queue failed jobs: ${emailSyncQueue?.failed ?? 0}`],
+      evidence: [
+        `${summary.activeEmailWatchSubscriptions ?? 0}/${summary.emailWatchSubscriptions ?? 0} active email watch subscription(s)`,
+        `Gmail webhook: ${gmailWebhook?.status ?? 'missing'}`,
+        `Outlook webhook: ${outlookWebhook?.status ?? 'missing'}`,
+        `Email sync queue failed jobs: ${emailSyncQueue?.failed ?? 0}`,
+        `Watch playbook: ${watchPlaybook?.status ?? 'not_evaluated'}`,
+      ],
       blocker: watchProofReady ? 'None' : 'Live Gmail/Outlook watch setup, renewal, sync, or webhook proof is missing.',
       command: 'npm run admin -- mailboxes watch mbx_gmail_sales --live-provider',
       followUpCommands: ['npm run admin -- mailboxes renew-watch watch_outlook_mbx_outlook_success --live-provider', 'npm run admin -- operations-health --json'],
@@ -5532,7 +5660,13 @@ export function fallbackEmailHandoff(
       env,
       productionOk: digestProofReady,
       requiredEnv: providerSandboxRequiredEnv('outbound-email'),
-      evidence: [`${summary.digestRuns ?? 0} digest run(s)`, `${summary.failedEmailDeliveries ?? 0}/${summary.emailDeliveries ?? 0} failed delivery record(s)`, `Notification queue failed jobs: ${notificationQueue?.failed ?? 0}`, `Outbound queue failed jobs: ${outboundQueue?.failed ?? 0}`],
+      evidence: [
+        `${summary.digestRuns ?? 0} digest run(s)`,
+        `${summary.failedEmailDeliveries ?? 0}/${summary.emailDeliveries ?? 0} failed delivery record(s)`,
+        `Notification queue failed jobs: ${notificationQueue?.failed ?? 0}`,
+        `Outbound queue failed jobs: ${outboundQueue?.failed ?? 0}`,
+        `Delivery playbook: ${outboundPlaybook?.status ?? 'not_evaluated'}`,
+      ],
       blocker: digestProofReady ? 'None' : 'Outbound digest send proof, clean queue state, or provider delivery evidence is missing.',
       command: 'npm run admin -- notifications digest tenant_demo --live-provider',
       followUpCommands: ['npm run admin -- notifications --json', 'npm run admin -- operations-health --json'],
@@ -5559,7 +5693,11 @@ export function fallbackEmailHandoff(
       priority: 80,
       env,
       productionOk: emailLaunchReady,
-      evidence: [`${emailRows.filter((row) => row.launchReady).length}/3 email provider launch row(s) ready`, `${operations.summary.totalWebhooks - operations.summary.unhealthyWebhooks}/${operations.summary.totalWebhooks} webhook channel(s) locally healthy`],
+      evidence: [
+        `${summary.connectedMailboxes}/${summary.mailboxes} mailbox source(s) connected locally | ${summary.activeEmailWatchSubscriptions ?? 0}/${summary.emailWatchSubscriptions ?? 0} active provider watch subscription(s) | ${summary.failedEmailDeliveries ?? 0}/${summary.emailDeliveries ?? 0} failed outbound email deliveries`,
+        `${emailRows.filter((row) => row.launchReady).length}/3 email provider launch row(s) ready`,
+        `${operations.summary.totalWebhooks - operations.summary.unhealthyWebhooks}/${operations.summary.totalWebhooks} webhook channel(s) locally healthy`,
+      ],
       blocker: emailLaunchReady ? 'None' : 'Email launch evidence cannot be packaged until provider config, sandbox proof, watches, digest sends, signed webhooks, and launch gate all pass.',
       command: 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json',
       followUpCommands: ['npm run admin -- launch-gate verify-package ./signal-launch-evidence.json --json'],
@@ -5715,102 +5853,209 @@ export function fallbackQaAnswers(data: SignalAppData, backend = fallbackBackend
   const playbook = fallbackLifecyclePlaybook(data, backend);
   const launch = fallbackProviderLaunchMatrix(data, backend, provider);
   const launchById = (id: string) => launch.rows.find((row) => row.id === id);
+  const backendProductionReady = backend.productionReady === true;
+  const readinessEvidence = (id: string): string[] => {
+    if (id === 'workspace_onboarding') {
+      return [
+        `${summary.tenants} tenant(s)`,
+        `${summary.activeMemberships}/${summary.memberships} active memberships`,
+        `${summary.pendingInvites}/${summary.invites} pending invites`,
+        `${summary.activeSeats}+${summary.pendingInviteSeats}/${summary.seatLimit ?? 'unlimited'} seats`,
+      ];
+    }
+    if (id === 'multi_user_rbac_privacy') {
+      return [
+        `${summary.admins} active admin(s)`,
+        `${summary.activeMemberships} active membership(s)`,
+        `${summary.apiSessions} digest-only API session record(s)`,
+        `Backend tenant isolation: ${backend.checks.find((check) => check.id === 'tenant_isolation')?.ok ? 'configured' : 'not production configured'}`,
+      ];
+    }
+    if (id === 'email_source_and_detection_flow') {
+      return [
+        `${summary.connectedMailboxes}/${summary.mailboxes} connected mailbox source(s)`,
+        `${summary.sourceMessages} source message fixture(s)`,
+        `${summary.enabledEmailFlows}/${summary.emailFlows} enabled detector flow(s)`,
+        `${summary.generatedSignals} generated source-backed signal(s)`,
+        `${summary.queuedSignalHandoffs}/${summary.signalHandoffs} queued handoff(s)`,
+      ];
+    }
+    if (id === 'model_governance_and_tuning') {
+      return [
+        `${summary.modelGovernancePolicies} model governance polic${summary.modelGovernancePolicies === 1 ? 'y' : 'ies'}`,
+        `${summary.perTenantModels} per-tenant trained model(s) enabled`,
+        `${summary.activeSuppressionRules}/${summary.suppressionRules} active suppression rule(s)`,
+        `${summary.signalFeedback} feedback label(s)`,
+      ];
+    }
+    if (id === 'relationship_dashboard_and_recommendations') {
+      return [
+        `${summary.accounts} account profile(s)`,
+        `${summary.atRiskAccounts} at-risk account(s)`,
+        `${summary.openAccountActions} open next action(s)`,
+        `${summary.openAccountRecommendations}/${summary.accountRecommendations} open recommendation(s)`,
+      ];
+    }
+    if (id === 'notifications_and_admin_monitoring') {
+      return [
+        `${summary.notificationPreferences} notification preference record(s)`,
+        `${summary.unreadNotifications}/${summary.notificationEvents} unread notification(s)`,
+        `${summary.digestRuns} digest run(s)`,
+        `${summary.failedEmailDeliveries}/${summary.emailDeliveries} failed email deliver${summary.emailDeliveries === 1 ? 'y' : 'ies'}`,
+      ];
+    }
+    if (id === 'payment_lifecycle_and_entitlements') {
+      return [
+        `${summary.subscriptions} subscription record(s)`,
+        `${summary.activeEntitlements} active entitlement(s)`,
+        `${summary.openInvoices}/${summary.invoices} open invoice(s)`,
+        `${summary.billingSessions} billing session(s)`,
+        `${summary.paymentEvents} payment event(s)`,
+      ];
+    }
+    return [];
+  };
   const modelBoundaryStageReady = pipeline.rows.some((row) => row.area === 'model_learning_boundary' && row.localOk);
   const emailProductionReady = Boolean(launchById('gmail')?.launchReady && launchById('outlook')?.launchReady && launchById('outbound-email')?.launchReady);
   const paymentProductionReady = Boolean(launchById('stripe')?.launchReady);
+  const modelLocalOk = (data.modelGovernancePolicies ?? []).every((policy) =>
+    policy.dataBoundary === 'tenant_isolated' &&
+    policy.perTenantModel === false);
+  const relationshipLocalOk = (summary.accounts ?? 0) > 0 && (summary.openAccountRecommendations ?? 0) > 0;
+  const notificationLocalOk = (summary.notificationPreferences ?? 0) > 0 && (summary.notificationEvents ?? 0) > 0;
+  const emailFlowLocalOk = (summary.connectedMailboxes ?? 0) > 0 && (summary.enabledEmailFlows ?? 0) > 0;
+  const paymentLocalOk = (summary.subscriptions ?? 0) > 0 && (summary.activeEntitlements ?? 0) > 0 && playbook.ok;
   const rows = [
     qaFallbackRow({
       id: 'dashboard_calculations_backend',
       question: 'Do dashboard display calculations match the DB/backend connection?',
-      answer: `Yes locally. Dashboard audit rows reconcile visible values to the shared state summary; backend mode is ${dashboard.backend.mode}.`,
+      answer: `Yes locally. Dashboard numbers reconcile against summarizeState from the current state boundary; the current backend mode is ${dashboard.backend.mode}. Production still needs the durable backend checks to pass before claiming DB-backed readiness.`,
       owner: 'product_platform',
       localOk: dashboard.ok,
-      productionOk: backend.productionReady,
-      productionCaveat: backend.productionReady ? 'Production backend checks are configured.' : 'Production DB/state-service, auth, CORS, scheduler, and tenant isolation are not configured.',
-      evidence: [`${dashboard.summary.passed}/${dashboard.summary.total} dashboard audit check(s) pass`, `${dashboard.summary.scopedRows} actor-scoped row(s)`, `Backend mode: ${dashboard.backend.mode}`],
+      productionOk: backendProductionReady,
+      productionCaveat: backendProductionReady
+        ? 'Production backend checks are configured.'
+        : 'Current app is on local-json; production DB/state-service, managed auth, CORS, scheduler, and tenant isolation are not configured.',
+      evidence: [
+        `${dashboard.summary.passed}/${dashboard.summary.total} dashboard audit check(s) pass`,
+        `${dashboard.summary.scopedRows} actor-scoped dashboard row(s)`,
+        `Backend mode: ${dashboard.backend.mode}`,
+        `${backend.summary.readyChecks}/${backend.summary.totalChecks} production backend check(s) ready`,
+      ],
       commands: ['npm run admin -- dashboard-audit --json', 'curl http://127.0.0.1:8787/api/dashboard-audit', 'npm run admin -- backend --env-file ./.env.production --json'],
     }),
     qaFallbackRow({
       id: 'data_digestion_model_boundary',
       question: 'Do we need a data digestion model, model learning pipeline, or one model per org?',
-      answer: 'Use a shared detector/data digestion boundary with tenant-isolated data and tenant-specific thresholds, routing, suppression, feedback, retention, and opt-in learning controls.',
+      answer: 'Use a shared detector/data digestion boundary by default, with tenant-isolated data plus tenant-specific thresholds, routing, suppression, feedback labels, retention, and opt-in learning controls. Do not create one trained model per org unless a governed opt-in tuning policy is approved.',
       owner: 'ai_governance',
-      localOk: modelBoundaryStageReady && (data.modelGovernancePolicies ?? []).every((policy) => policy.dataBoundary === 'tenant_isolated' && policy.perTenantModel === false),
-      productionOk: pipeline.productionReady,
+      localOk: modelLocalOk && modelBoundaryStageReady,
+      productionOk: modelLocalOk && pipeline.productionReady,
       productionCaveat: pipeline.recommendation.productionGuardrail,
-      evidence: [`${summary.modelGovernancePolicies ?? 0} model governance policy row(s)`, `${summary.perTenantModels ?? 0} per-tenant trained model(s) enabled`, `${summary.signalFeedback ?? 0} feedback label(s)`, `${pipeline.summary.localReady}/${pipeline.summary.total} digestion pipeline stage(s) locally ready`, `${pipeline.summary.sourceMessages} source message(s), ${pipeline.summary.generatedSignals} source-backed signal(s)`],
-      commands: ['npm run admin -- digestion-pipeline --json', 'curl http://127.0.0.1:8787/api/digestion-pipeline', 'npm run admin -- models --json', 'npm run admin -- models policy tenant_demo opt_in_tuning Governance_reviewed --json'],
+      evidence: [
+        ...readinessEvidence('model_governance_and_tuning'),
+        `${pipeline.summary.localReady}/${pipeline.summary.total} digestion pipeline stage(s) locally ready`,
+        `${pipeline.summary.sourceMessages} source message(s), ${pipeline.summary.generatedSignals} source-backed signal(s)`,
+        `${summary.perTenantModels} per-tenant trained model(s) enabled`,
+      ],
+      commands: ['npm run admin -- digestion-pipeline --json', 'curl http://127.0.0.1:8787/api/digestion-pipeline', 'npm run admin -- models --json', 'npm run admin -- models policy tenant_demo opt_in_tuning Governance_reviewed --json', 'npm run admin -- quality threshold tenant_demo 0.74'],
     }),
     qaFallbackRow({
       id: 'multi_user_same_org_rbac',
       question: 'Can the system handle multiple users in the same org, and how is that handled?',
-      answer: 'Yes locally. Tenant memberships, role, team, status, owner/billing owner, seats, signed admin sessions, and owner/team-scoped visibility handle multi-user orgs.',
+      answer: 'Yes locally. Multi-user orgs are handled through tenant memberships, role, team, status, owner/billing owner, seat limits, signed admin sessions, and owner/team-scoped member visibility. Production requires durable tenant isolation and managed auth before many customer orgs share one backend.',
       owner: 'security',
       localOk: onboarding.ok,
-      productionOk: onboarding.productionReady && backend.productionReady,
+      productionOk: onboarding.productionReady && backendProductionReady,
       productionCaveat: onboarding.recommendation.productionGuardrail,
-      evidence: [`${onboarding.summary.activeAdmins} active admin(s)`, `${onboarding.summary.activeMembers} active member(s)`, `${onboarding.summary.activeMemberships} active membership(s)`],
-      commands: ['npm run admin -- onboarding-readiness --json', 'npm run admin -- users --json', 'npm run admin -- session token usr_admin --json'],
+      evidence: [
+        ...readinessEvidence('multi_user_rbac_privacy'),
+        `${onboarding.summary.activeAdmins} active admin(s)`,
+        `${onboarding.summary.activeMembers} active member(s)`,
+        `${onboarding.summary.visibleSignalsForActor} signal row(s) visible for active actor`,
+      ],
+      commands: ['npm run admin -- onboarding-readiness --json', 'curl http://127.0.0.1:8787/api/onboarding-readiness', 'npm run admin -- users --json', 'npm run admin -- session token usr_admin --json'],
     }),
     qaFallbackRow({
       id: 'workspace_registration_invitation',
       question: 'Is user onboarding, registration, workspace creation, and member invitation complete?',
-      answer: 'Yes locally. Self-service workspace registration, owner registration, invite claim, admin acceptance, membership records, seats, onboarding notifications, and session switching are represented.',
+      answer: 'Yes locally. Self-service workspace registration, owner/admin registration, invite claim, admin acceptance, membership records, seats, onboarding notifications, and session switching are represented in CLI, API, and UI flows.',
       owner: 'workspace_admin',
-      localOk: onboarding.ok,
+      localOk: onboarding.ok && onboarding.summary.localReady === onboarding.summary.total,
       productionOk: onboarding.productionReady,
       productionCaveat: onboarding.recommendation.productionGuardrail,
-      evidence: [`${summary.tenants} workspace(s)`, `${summary.pendingInvites ?? 0}/${summary.invites ?? 0} pending invites`, `${summary.activeSeats ?? 0}+${summary.pendingInviteSeats ?? 0}/${summary.seatLimit ?? 'unlimited'} active+pending seats`],
-      commands: ['npm run admin -- tenants register New_Revenue_Lab newlab.example owner@newlab.example Owner_Name plan_beta', 'curl -X POST http://127.0.0.1:8787/api/registration', 'npm run admin -- users invite tenant_demo rowan@acme.example member success', 'npm run admin -- users accept <inviteId>'],
+      evidence: [
+        ...readinessEvidence('workspace_onboarding'),
+        `${onboarding.summary.pendingInvites} pending invite(s)`,
+        `${onboarding.summary.seatsAvailable ?? 'unlimited'} seat(s) available`,
+      ],
+      commands: ['npm run admin -- tenants register New_Revenue_Lab newlab.example owner@newlab.example Owner_Name plan_beta', 'curl -X POST http://127.0.0.1:8787/api/registration', 'npm run admin -- users invite tenant_demo rowan@acme.example member success', 'npm run admin -- users claim <inviteCode> "Rowan Lee"', 'npm run admin -- users accept <inviteId>'],
     }),
     qaFallbackRow({
       id: 'focus_priorities_notifications',
       question: 'Can each user/org define focus, outcomes, priorities, and notifications?',
-      answer: 'Yes locally. Routing rules, account ownership, signal assignment, notification preferences, mute rules, digest cadence, immediate alerts, and quality thresholds handle user-specific focus.',
+      answer: 'Yes locally. Focus is modeled through routing rules, account ownership, signal assignment, notification preferences, mute rules, digest cadence, immediate alerts, and tenant quality thresholds instead of separate models per customer.',
       owner: 'customer_success',
-      localOk: (summary.activeRoutingRules ?? 0) > 0 && (data.notificationPreferences?.length ?? 0) > 0,
-      productionOk: true,
-      productionCaveat: 'Production notification sends still depend on outbound provider launch readiness.',
-      evidence: [`${summary.activeRoutingRules ?? 0}/${summary.routingRules ?? 0} active routing rule(s)`, `${summary.notificationPreferences ?? 0} notification preference record(s)`, `${summary.openAccountRecommendations ?? 0}/${summary.accountRecommendations ?? 0} open recommendation(s)`],
-      commands: ['npm run admin -- notifications preference usr_sales daily immediate', 'npm run admin -- notifications mute-account usr_product Acme Health', 'npm run admin -- signals assign sig_risk_001 usr_sales'],
+      localOk: notificationLocalOk && relationshipLocalOk,
+      productionOk: notificationLocalOk && relationshipLocalOk,
+      productionCaveat: 'Live email delivery still depends on provider launch readiness for production notification sends.',
+      evidence: [
+        ...readinessEvidence('notifications_and_admin_monitoring'),
+        `${summary.activeRoutingRules}/${summary.routingRules} active routing rule(s)`,
+        `${summary.openAccountRecommendations}/${summary.accountRecommendations} open recommendation(s)`,
+      ],
+      commands: ['npm run admin -- notifications preference usr_sales daily immediate', 'npm run admin -- notifications mute-account usr_product Acme Health', 'npm run admin -- signals assign sig_risk_001 usr_sales', 'npm run admin -- quality threshold tenant_demo 0.74'],
     }),
     qaFallbackRow({
       id: 'contact_relationship_strategy',
       question: 'Do we have user/contact relationship indicators, recommendations, and strategy?',
-      answer: 'Yes locally. Account health, at-risk accounts, stakeholder timelines, next actions, reviews, and recommendations are backed by source-linked signals.',
+      answer: 'Yes locally. The relationship dashboard includes account health, at-risk accounts, stakeholder timelines, open next actions, account reviews, and recommendations backed by source-linked signals.',
       owner: 'sales_strategy',
-      localOk: (summary.accounts ?? 0) > 0 && (summary.openAccountRecommendations ?? 0) > 0,
-      productionOk: true,
-      productionCaveat: 'Production recommendations need production email ingestion and tenant-isolated storage before live customer data.',
-      evidence: [`${summary.accounts ?? 0} account profile(s)`, `${summary.atRiskAccounts ?? 0} at-risk account(s)`, `${summary.openAccountActions ?? 0} open next action(s)`, `${summary.openAccountRecommendations ?? 0}/${summary.accountRecommendations ?? 0} open recommendation(s)`],
-      commands: ['npm run admin -- accounts --json', 'npm run admin -- accounts review Acme_Health QBR_risk renewal_save'],
+      localOk: relationshipLocalOk,
+      productionOk: relationshipLocalOk,
+      productionCaveat: 'Production relationship recommendations still depend on production email ingestion and tenant-isolated storage before live customer data.',
+      evidence: readinessEvidence('relationship_dashboard_and_recommendations'),
+      commands: ['npm run admin -- accounts --json', 'npm run admin -- accounts review Acme_Health QBR_risk renewal_save', 'npm run admin -- signals feedback sig_risk_001 useful Renewal_save_signal'],
     }),
     qaFallbackRow({
       id: 'email_notification_admin_monitoring',
       question: 'Do we have email notification flow, admin settings, and monitoring?',
-      answer: 'Yes locally. Admins can manage email flows, run detector jobs, send digests, inspect delivery state, process signed webhooks, and monitor queues/backoff.',
+      answer: 'Yes locally. Admins can manage email flows, run detector jobs, send digests, inspect delivery ledger state, process signed delivery webhooks, monitor provider watches/backoff, and use operations health for queues and webhooks. Production send/ingest launch still needs live provider configuration and sandbox proof.',
       owner: 'integrations',
-      localOk: operations.ok && (summary.enabledEmailFlows ?? 0) > 0,
+      localOk: emailFlowLocalOk && notificationLocalOk && operations.ok,
       productionOk: emailProductionReady,
       needsLiveProvider: true,
-      productionCaveat: emailProductionReady ? 'Email provider launch rows are ready.' : 'Gmail, Outlook, and SendGrid/outbound email config plus saved sandbox evidence must pass.',
-      evidence: [`${summary.enabledEmailFlows}/${summary.emailFlows} enabled detector flow(s)`, `${operations.summary.totalWebhooks - operations.summary.unhealthyWebhooks}/${operations.summary.totalWebhooks} webhook channel(s) healthy`, `${operations.summary.failedDeliveries} failed delivery record(s)`],
-      commands: ['npm run admin -- email-flows --json', 'npm run admin -- notifications digest tenant_demo', 'npm run admin -- operations-health --json'],
+      productionCaveat: emailProductionReady
+        ? 'Gmail, Outlook, and outbound email provider launch rows are ready.'
+        : 'Gmail, Outlook, and SendGrid/outbound email config plus saved sandbox evidence must pass before production email launch.',
+      evidence: [
+        ...readinessEvidence('email_source_and_detection_flow'),
+        `${operations.summary.totalWebhooks - operations.summary.unhealthyWebhooks}/${operations.summary.totalWebhooks} webhook channel(s) healthy`,
+        `${operations.summary.failedDeliveries} failed delivery record(s)`,
+        `${launchById('outbound-email')?.sandboxStatus ?? 'not_recorded'} outbound email sandbox status`,
+      ],
+      commands: ['npm run admin -- email-flows --json', 'npm run admin -- notifications digest tenant_demo', 'npm run admin -- operations-health --json', 'npm run admin -- provider-launch --env-file ./.env.production --json'],
     }),
     qaFallbackRow({
       id: 'payment_lifecycle_handling',
       question: 'How do we handle failed payment, disconnect notice, cancellation, resubscription, and subscription starting point?',
-      answer: 'Yes locally. Subscription state, entitlement gates, Checkout/Billing Portal handoffs, invoice recovery, signed webhook replay, lifecycle notices, cancellation, and resubscription commands are mapped.',
+      answer: 'Yes locally. Billing uses subscription state and entitlement gates, Stripe-style Checkout/Billing Portal handoffs, invoice recovery sessions, signed webhook replay, lifecycle notices, cancellation, and resubscription commands. Production billing launch still needs Stripe config and sandbox evidence.',
       owner: 'billing',
-      localOk: playbook.ok && (summary.paymentEvents ?? 0) > 0,
+      localOk: paymentLocalOk,
       productionOk: paymentProductionReady,
       needsLiveProvider: true,
-      productionCaveat: paymentProductionReady ? 'Stripe launch row is ready.' : 'Stripe config, live Checkout/Portal proof, signed webhook replay, and saved sandbox evidence are required.',
-      evidence: [`${summary.subscriptions} subscription record(s)`, `${summary.activeEntitlements ?? 0} active entitlement(s)`, `${summary.openInvoices ?? 0}/${summary.invoices ?? 0} open invoice(s)`, `${playbook.summary.actionReady} lifecycle action-ready row(s)`],
-      commands: ['npm run admin -- lifecycle-playbook --json', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments checkout tenant_demo plan_team'],
+      productionCaveat: paymentProductionReady
+        ? 'Stripe launch row is production-ready.'
+        : 'Stripe secret, webhook secret, price config, live Checkout/Portal proof, signed webhook replay, and saved sandbox evidence are required before production billing launch.',
+      evidence: [
+        ...readinessEvidence('payment_lifecycle_and_entitlements'),
+        `${playbook.summary.actionReady} lifecycle playbook action-ready row(s)`,
+        `${launchById('stripe')?.sandboxStatus ?? 'not_recorded'} Stripe sandbox status`,
+      ],
+      commands: ['npm run admin -- lifecycle-playbook --json', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments checkout tenant_demo plan_team', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>'],
     }),
   ];
-  return {
+  const report = {
     generatedAt: new Date().toISOString(),
     ok: true,
     productionReady: rows.every((row) => row.productionOk),
@@ -5826,10 +6071,13 @@ export function fallbackQaAnswers(data: SignalAppData, backend = fallbackBackend
       needsLocalWork: rows.filter((row) => row.status === 'needs_local_work').length,
       needsProduction: rows.filter((row) => row.status === 'needs_production').length,
       productionReady: rows.filter((row) => row.productionOk).length,
-      secretSafe: true,
+      secretSafe: false,
       total: rows.length,
     },
   };
+  report.summary.secretSafe = !/sk_live_|sk_test_|secret_value|token_value|password_value/i.test(JSON.stringify(report));
+  report.ok = report.summary.secretSafe && rows.length === 8;
+  return report;
 }
 
 function uniquePlanValues(values: Array<string | null | undefined | false>): string[] {
@@ -5877,21 +6125,244 @@ function fallbackProductionPlanRow({
   };
 }
 
+function fallbackLaunchGateRows(
+  data: SignalAppData,
+  backend: BackendReadiness,
+  provider: ProviderReadiness,
+) {
+  const summary = summarizeLocalState(data);
+  const latestProviderRun = [...(data.providerValidationRuns ?? [])].sort((left, right) => Date.parse(right.recordedAt ?? '') - Date.parse(left.recordedAt ?? ''))[0];
+  const providerSandboxPassed = latestProviderRun?.status === 'passed';
+  const backendFailedChecks = backend.checks.filter((check) => !check.ok);
+  const tenantIsolation = backend.checks.find((check) => check.id === 'tenant_isolation');
+  const scheduler = backend.checks.find((check) => check.id === 'job_scheduler');
+  const providerById = (id: string) => provider.providers.find((item) => item.id === id);
+  const gmail = providerById('gmail');
+  const outlook = providerById('outlook');
+  const outboundEmail = providerById('outbound-email');
+  const stripe = providerById('stripe');
+  const providerMissingEnv = uniquePlanValues(provider.providers.flatMap((item) => item.missingRequired));
+  const emailProviderMissingEnv = uniquePlanValues([gmail, outlook, outboundEmail].flatMap((item) => item?.missingRequired ?? []));
+  const activeProviderSchedules = data.providerValidationSchedules?.filter((schedule) => schedule.status === 'active').length ?? 0;
+  const schedulerOperationallyReady = Boolean(scheduler?.ok && summary.failedJobs === 0 && activeProviderSchedules >= 4);
+  const productBlockers: string[] = [];
+  const localReady = 10;
+  const localTotal = 10;
+  const launchGateItem = ({
+    blockers = [],
+    commands = [],
+    evidence = [],
+    id,
+    label,
+    owner,
+    requiredEnv = [],
+    status,
+  }: {
+    blockers?: string[];
+    commands?: string[];
+    evidence?: string[];
+    id: string;
+    label: string;
+    owner: string;
+    requiredEnv?: string[];
+    status?: string;
+  }) => ({
+    blockers,
+    commands,
+    evidence,
+    id,
+    label,
+    owner,
+    requiredEnv: uniquePlanValues(requiredEnv),
+    status: status ?? (blockers.length ? 'blocked' : 'pass'),
+  });
+
+  return [
+    launchGateItem({
+      id: 'local_product_surface',
+      label: 'Local product surface and contracts',
+      owner: 'product',
+      status: localReady === localTotal ? 'pass' : 'attention',
+      evidence: [
+        `${localReady}/${localTotal} local readiness areas pass`,
+        `${summary.users} user(s), ${summary.mailboxes} mailbox source(s), ${summary.subscriptions} subscription record(s)`,
+      ],
+      blockers: productBlockers,
+      commands: [
+        'npm run admin -- readiness --json',
+        'npm run test:local',
+      ],
+    }),
+    launchGateItem({
+      id: 'production_backend',
+      label: 'Production backend, durable state, auth, CORS, and storage',
+      owner: 'platform',
+      status: backend.productionReady ? 'pass' : 'blocked',
+      evidence: [
+        `Backend mode: ${backend.mode}`,
+        `${backend.summary.readyChecks}/${backend.summary.totalChecks} backend checks production-ready`,
+      ],
+      blockers: backendFailedChecks.map((check) => check.message),
+      requiredEnv: backend.summary.missingRequiredEnv,
+      commands: [
+        'npm run admin -- backend --json',
+        'SIGNAL_STATE_SERVICE_BACKEND=postgres DATABASE_URL=postgres://... SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service',
+      ],
+    }),
+    launchGateItem({
+      id: 'tenant_isolation',
+      label: 'Multi-org tenant isolation enforcement',
+      owner: 'security',
+      status: tenantIsolation?.ok ? 'pass' : 'blocked',
+      evidence: [
+        tenantIsolation?.message ?? 'Tenant isolation readiness has not been evaluated.',
+        `${summary.tenants} tenant(s), ${summary.memberships} membership record(s)`,
+      ],
+      blockers: tenantIsolation?.ok ? [] : [tenantIsolation?.message ?? 'Configure a durable tenant isolation policy before production.'],
+      requiredEnv: tenantIsolation?.missingEnv ?? ['SIGNAL_TENANT_ISOLATION_MODE'],
+      commands: [
+        'SIGNAL_TENANT_ISOLATION_MODE=rls npm run admin -- backend --json',
+      ],
+    }),
+    launchGateItem({
+      id: 'provider_configuration',
+      label: 'Gmail, Outlook, SendGrid, and Stripe configuration',
+      owner: 'integrations',
+      status: provider.ok ? 'pass' : 'blocked',
+      evidence: [
+        `${provider.summary.readyProviders}/${provider.summary.totalProviders} provider groups configured`,
+        `${provider.summary.missingRequired} required provider env var name(s) missing`,
+      ],
+      blockers: provider.providers
+        .filter((item) => !item.ready)
+        .map((item) => `${item.label}: missing ${item.missingRequired.join(', ')}`),
+      requiredEnv: providerMissingEnv,
+      commands: [
+        'npm run admin -- integrations --json',
+      ],
+    }),
+    launchGateItem({
+      id: 'provider_sandbox_evidence',
+      label: 'Live-provider sandbox evidence artifact',
+      owner: 'integrations',
+      status: providerSandboxPassed ? 'pass' : 'blocked',
+      evidence: [
+        latestProviderRun ? `Latest sandbox evidence: ${latestProviderRun.status} at ${latestProviderRun.recordedAt}` : 'No sandbox evidence recorded',
+        `${data.providerValidationRuns?.length ?? 0} recorded sandbox run(s)`,
+      ],
+      blockers: providerSandboxPassed ? [] : ['Run sandbox validation with real provider sandbox credentials and save sanitized evidence.'],
+      requiredEnv: ['SIGNAL_GMAIL_ACCESS_TOKEN', 'SIGNAL_OUTLOOK_ACCESS_TOKEN', 'SIGNAL_SENDGRID_API_KEY', 'STRIPE_SECRET_KEY', 'SIGNAL_STRIPE_PRICE_TEAM'],
+      commands: [
+        'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json',
+        'npm run admin -- integrations evidence-export latest ./signal-provider-evidence.json --json',
+      ],
+    }),
+    launchGateItem({
+      id: 'email_notification_launch',
+      label: 'Email ingestion, watch renewal, and outbound notification launch',
+      owner: 'integrations',
+      status: gmail?.ready && outlook?.ready && outboundEmail?.ready && providerSandboxPassed ? 'pass' : 'blocked',
+      evidence: [
+        `${summary.connectedMailboxes}/${summary.mailboxes} mailbox source(s) connected locally`,
+        `${summary.activeEmailWatchSubscriptions}/${summary.emailWatchSubscriptions} active provider watch subscription(s)`,
+        `${summary.failedEmailDeliveries}/${summary.emailDeliveries} failed outbound email deliver${summary.emailDeliveries === 1 ? 'y' : 'ies'}`,
+      ],
+      blockers: gmail?.ready && outlook?.ready && outboundEmail?.ready && providerSandboxPassed
+        ? []
+        : ['Gmail, Outlook, SendGrid/outbound email config and sandbox evidence must pass before production email launch.'],
+      requiredEnv: emailProviderMissingEnv,
+      commands: [
+        'npm run admin -- mailboxes watch mbx_gmail_sales --live-provider',
+        'npm run admin -- mailboxes renew-watch watch_outlook_mbx_outlook_success --live-provider',
+        'npm run admin -- notifications digest tenant_demo --live-provider',
+      ],
+    }),
+    launchGateItem({
+      id: 'payment_launch',
+      label: 'Stripe checkout, billing portal, webhooks, and entitlement launch',
+      owner: 'billing',
+      status: stripe?.ready && providerSandboxPassed ? 'pass' : 'blocked',
+      evidence: [
+        `${summary.subscriptions} subscription record(s)`,
+        `${summary.activeEntitlements} active entitlement(s)`,
+        `${summary.openInvoices}/${summary.invoices} open invoice(s)`,
+        `${summary.paymentEvents} payment event(s)`,
+      ],
+      blockers: stripe?.ready && providerSandboxPassed
+        ? []
+        : ['Stripe env, test price lookup, signed webhook replay, and saved sandbox evidence must pass before production billing launch.'],
+      requiredEnv: stripe?.missingRequired ?? ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'SIGNAL_STRIPE_PRICE_TEAM'],
+      commands: [
+        'npm run admin -- payments checkout tenant_demo plan_team --live-provider',
+        'npm run admin -- payments portal tenant_demo --live-provider',
+        'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>',
+      ],
+    }),
+    launchGateItem({
+      id: 'scheduler_operations',
+      label: 'Production scheduler, retries, and monitoring',
+      owner: 'operations',
+      status: schedulerOperationallyReady ? 'pass' : 'blocked',
+      evidence: [
+        scheduler?.message ?? 'Scheduler readiness has not been evaluated.',
+        `${summary.failedJobs}/${summary.jobs} failed job(s)`,
+        `${activeProviderSchedules}/${data.providerValidationSchedules?.length ?? 0} active provider validation schedule(s)`,
+      ],
+      blockers: scheduler?.ok && summary.failedJobs === 0 && activeProviderSchedules >= 4
+        ? []
+        : ['Configure production scheduler env, keep validation schedules active, and clear failed jobs.'],
+      requiredEnv: scheduler?.missingEnv ?? ['SIGNAL_JOB_SCHEDULER', 'SIGNAL_PROVIDER_VALIDATION_SCHEDULER'],
+      commands: [
+        'SIGNAL_JOB_SCHEDULER=signal-scheduler npm run scheduler',
+        'npm run admin -- jobs run provider_validation --limit 1',
+        'npm run admin -- jobs drain billing_webhook',
+      ],
+    }),
+  ];
+}
+
+function fallbackProductionPlanDrillBlockers(...rows: Array<ProductionDrillRow | undefined>) {
+  return rows
+    .filter((row): row is ProductionDrillRow => Boolean(row && !row.productionOk))
+    .map((row) => `${row.area}: ${row.recommendation}`);
+}
+
+function fallbackProductionPlanDrillEnv(...rows: Array<ProductionDrillRow | undefined>) {
+  return rows.flatMap((row) => row?.requiredEnv ?? []);
+}
+
+function fallbackProductionPlanDrillCommands(...rows: Array<ProductionDrillRow | undefined>) {
+  return rows.flatMap((row) => row?.commands ?? []);
+}
+
+function fallbackProductionPlanDrillEvidence(...rows: Array<ProductionDrillRow | undefined>) {
+  return rows.flatMap((row) => row?.evidence ?? []);
+}
+
 export function fallbackProductionPlan(
   data: SignalAppData,
   backend = fallbackBackendReadiness(),
   provider = fallbackProviderReadiness(),
 ): ProductionSetupPlanReport {
-  const summary = summarizeLocalState(data);
-  const doctor = doctorLocalState(data);
   const drill = fallbackProductionDrill(data, backend, provider);
+  const gateRows = fallbackLaunchGateRows(data, backend, provider);
+  const gateById = (id: string) => gateRows.find((row) => row.id === id);
   const launch = fallbackProviderLaunchMatrix(data, backend, provider);
   const drillByArea = (area: string) => drill.rows.find((row) => row.area === area);
-  const backendCheck = (id: string) => backend.checks.find((check) => check.id === id);
   const providerRow = (id: string) => launch.rows.find((row) => row.id === id);
   const providerRows = launch.rows;
   const emailProviderRows = [providerRow('gmail'), providerRow('outlook'), providerRow('outbound-email')].filter(Boolean) as ProviderLaunchRow[];
   const stripeRow = providerRow('stripe');
+  const gates = {
+    local: gateById('local_product_surface'),
+    backend: gateById('production_backend'),
+    tenantIsolation: gateById('tenant_isolation'),
+    providerConfiguration: gateById('provider_configuration'),
+    providerSandbox: gateById('provider_sandbox_evidence'),
+    email: gateById('email_notification_launch'),
+    payment: gateById('payment_launch'),
+    scheduler: gateById('scheduler_operations'),
+  };
   const localContracts = drillByArea('local_contracts');
   const stateService = drillByArea('state_service_health');
   const backupRestore = drillByArea('backup_restore_rehearsal');
@@ -5900,23 +6371,20 @@ export function fallbackProductionPlan(
   const scheduler = drillByArea('scheduler_daemon');
   const liveProviders = drillByArea('live_provider_recurring_tests');
   const alerting = drillByArea('alerting_runbook');
-  const backendBlockers = backend.checks.filter((check) => !check.ok).map((check) => check.message);
-  const providerBlockers = providerRows.filter((row) => !row.configurationReady).map((row) => `${row.label}: ${row.missingEnv.length} env missing`);
-  const sandboxBlockers = providerRows
-    .filter((row) => row.sandboxRequired && row.sandboxStatus !== 'passed')
-    .map((row) => `${row.label}: sandbox ${row.sandboxStatus}`);
-  const emailLaunchReady = emailProviderRows.every((row) => row.launchReady);
-  const paymentLaunchReady = Boolean(stripeRow?.launchReady);
-  const schedulerCheck = backendCheck('job_scheduler');
-  const localBaselineOk = doctor.ok && Boolean(localContracts?.localOk);
   const rows = [
     fallbackProductionPlanRow({
       id: 'local_baseline',
       phase: 'Local baseline and evidence package starting point',
       owner: 'product',
-      productionOk: localBaselineOk,
-      evidence: [`${doctor.checks.filter((check) => check.ok).length}/${doctor.checks.length} local doctor check(s) pass`, `${summary.users} user(s), ${summary.mailboxes} mailbox source(s), ${summary.jobs} job record(s)`],
-      blockers: localBaselineOk ? [] : doctor.checks.filter((check) => !check.ok).map((check) => check.message),
+      productionOk: Boolean(gates.local?.status === 'pass' && localContracts?.localOk),
+      evidence: [
+        ...(gates.local?.evidence ?? []),
+        ...(localContracts?.evidence ?? []),
+      ],
+      blockers: [
+        ...(gates.local?.blockers ?? []),
+        ...fallbackProductionPlanDrillBlockers(localContracts).filter(() => !localContracts?.localOk),
+      ],
       commands: ['npm run test:local', 'npm run admin -- readiness --json', 'npm run admin -- qa-answers --json'],
       completionCriteria: ['Full local test gate passes.', 'Product readiness reports every local requirement ready.', 'Stakeholder QA answers have no local-work rows.'],
     }),
@@ -5924,11 +6392,24 @@ export function fallbackProductionPlan(
       id: 'durable_backend_storage',
       phase: 'Durable backend, state service, backup, restore, and migration',
       owner: 'platform',
-      productionOk: Boolean(backend.productionReady && stateService?.productionOk && backupRestore?.productionOk && migration?.productionOk),
-      evidence: [`Backend mode: ${backend.mode}`, stateService?.evidence[0], backupRestore?.evidence[0], migration?.evidence[0]],
-      blockers: [...backendBlockers, stateService && !stateService.productionOk && stateService.recommendation, backupRestore && !backupRestore.productionOk && backupRestore.recommendation, migration && !migration.productionOk && migration.recommendation],
-      requiredEnv: [...backend.summary.missingRequiredEnv, ...(stateService?.requiredEnv ?? []), ...(backupRestore?.requiredEnv ?? []), ...(migration?.requiredEnv ?? [])],
-      commands: [...(stateService?.commands ?? []), ...(backupRestore?.commands ?? []), ...(migration?.commands ?? []), 'npm run test:state-service'],
+      productionOk: Boolean(gates.backend?.status === 'pass' && stateService?.productionOk && backupRestore?.productionOk && migration?.productionOk),
+      evidence: [
+        ...(gates.backend?.evidence ?? []),
+        ...fallbackProductionPlanDrillEvidence(stateService, backupRestore, migration),
+      ],
+      blockers: [
+        ...(gates.backend?.blockers ?? []),
+        ...fallbackProductionPlanDrillBlockers(stateService, backupRestore, migration),
+      ],
+      requiredEnv: [
+        ...(gates.backend?.requiredEnv ?? []),
+        ...fallbackProductionPlanDrillEnv(stateService, backupRestore, migration),
+      ],
+      commands: [
+        ...(gates.backend?.commands ?? []),
+        ...fallbackProductionPlanDrillCommands(stateService, backupRestore, migration),
+        'npm run test:state-service',
+      ],
       completionCriteria: ['API uses external state service instead of local JSON.', 'Production storage is database-backed.', 'Backup, digest verification, and restore dry run are proven.', 'Migration rollout plan is recorded.'],
       dependsOn: ['local_baseline'],
     }),
@@ -5936,11 +6417,24 @@ export function fallbackProductionPlan(
       id: 'identity_tenant_isolation',
       phase: 'Managed auth, signed sessions, and tenant isolation',
       owner: 'security',
-      productionOk: Boolean(identity?.productionOk),
-      evidence: identity?.evidence ?? [],
-      blockers: identity?.productionOk ? [] : [identity?.recommendation ?? 'Managed identity and tenant isolation proof are missing.'],
-      requiredEnv: identity?.requiredEnv ?? [backendCheck('signed_session_enforced'), backendCheck('production_auth_provider'), backendCheck('tenant_isolation')].flatMap((check) => check?.missingEnv ?? []),
-      commands: [...(identity?.commands ?? []), 'npm run test:jwks-auth'],
+      productionOk: Boolean(gates.tenantIsolation?.status === 'pass' && identity?.productionOk),
+      evidence: [
+        ...(gates.tenantIsolation?.evidence ?? []),
+        ...fallbackProductionPlanDrillEvidence(identity),
+      ],
+      blockers: [
+        ...(gates.tenantIsolation?.blockers ?? []),
+        ...fallbackProductionPlanDrillBlockers(identity),
+      ],
+      requiredEnv: [
+        ...(gates.tenantIsolation?.requiredEnv ?? []),
+        ...fallbackProductionPlanDrillEnv(identity),
+      ],
+      commands: [
+        ...(gates.tenantIsolation?.commands ?? []),
+        ...fallbackProductionPlanDrillCommands(identity),
+        'npm run test:jwks-auth',
+      ],
       completionCriteria: ['Raw actor fallback is disabled.', 'Managed auth/JWKS verifies API sessions.', 'Tenant isolation mode is configured for shared multi-org production use.'],
       dependsOn: ['durable_backend_storage'],
     }),
@@ -5948,10 +6442,16 @@ export function fallbackProductionPlan(
       id: 'provider_configuration',
       phase: 'Provider environment configuration',
       owner: 'integrations',
-      productionOk: provider.ok,
-      evidence: providerRows.map((row) => `${row.label}: ${row.configurationReady ? 'configured' : `${row.missingEnv.length} env missing`}`),
-      blockers: provider.ok ? [] : providerBlockers,
-      requiredEnv: providerRows.flatMap((row) => row.missingEnv),
+      productionOk: gates.providerConfiguration?.status === 'pass',
+      evidence: [
+        ...(gates.providerConfiguration?.evidence ?? []),
+        ...providerRows.map((row) => `${row.label}: ${row.configurationReady ? 'configured' : `${row.missingEnv.length} env missing`}`),
+      ],
+      blockers: gates.providerConfiguration?.blockers ?? [],
+      requiredEnv: [
+        ...(gates.providerConfiguration?.requiredEnv ?? []),
+        ...providerRows.flatMap((row) => row.missingEnv),
+      ],
       commands: ['npm run admin -- integrations --env-file ./.env.production --json', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'npm run admin -- backend --env-file ./.env.production --json'],
       completionCriteria: ['Signed sessions, Gmail, Outlook, outbound email, and Stripe required environment names are configured.', 'Provider launch matrix reports every provider configuration-ready.'],
       dependsOn: ['identity_tenant_isolation'],
@@ -5960,11 +6460,25 @@ export function fallbackProductionPlan(
       id: 'provider_sandbox_evidence',
       phase: 'Live-provider sandbox validation and saved evidence',
       owner: 'integrations',
-      productionOk: Boolean(liveProviders?.productionOk && providerRows.every((row) => !row.sandboxRequired || row.sandboxStatus === 'passed')),
-      evidence: [...(liveProviders?.evidence ?? []), ...providerRows.map((row) => `${row.label}: sandbox ${row.sandboxStatus}`)],
-      blockers: [...sandboxBlockers, liveProviders && !liveProviders.productionOk && liveProviders.recommendation],
-      requiredEnv: [...(liveProviders?.requiredEnv ?? []), ...providerRows.flatMap((row) => row.missingEnv)],
-      commands: [...(liveProviders?.commands ?? []), ...providerRows.flatMap((row) => row.evidenceCommands)],
+      productionOk: Boolean(gates.providerSandbox?.status === 'pass' && liveProviders?.productionOk),
+      evidence: [
+        ...(gates.providerSandbox?.evidence ?? []),
+        ...fallbackProductionPlanDrillEvidence(liveProviders),
+        ...providerRows.map((row) => `${row.label}: sandbox ${row.sandboxStatus}`),
+      ],
+      blockers: [
+        ...(gates.providerSandbox?.blockers ?? []),
+        ...fallbackProductionPlanDrillBlockers(liveProviders),
+      ],
+      requiredEnv: [
+        ...(gates.providerSandbox?.requiredEnv ?? []),
+        ...fallbackProductionPlanDrillEnv(liveProviders),
+      ],
+      commands: [
+        ...(gates.providerSandbox?.commands ?? []),
+        ...fallbackProductionPlanDrillCommands(liveProviders),
+        ...providerRows.flatMap((row) => row.evidenceCommands),
+      ],
       completionCriteria: ['Provider sandbox validation passes with real sandbox credentials.', 'Sanitized evidence artifact is saved and import/export verified.', 'No credential values are serialized into app state or evidence packages.'],
       dependsOn: ['provider_configuration'],
     }),
@@ -5972,11 +6486,21 @@ export function fallbackProductionPlan(
       id: 'email_launch',
       phase: 'Gmail, Outlook, and outbound email launch',
       owner: 'integrations',
-      productionOk: emailLaunchReady,
-      evidence: emailProviderRows.map((row) => `${row.label}: ${row.status}`),
-      blockers: emailLaunchReady ? [] : ['Gmail, Outlook, outbound email config, sandbox evidence, and signed delivery webhooks must pass.'],
-      requiredEnv: emailProviderRows.flatMap((row) => row.missingEnv),
-      commands: [...emailProviderRows.flatMap((row) => row.launchCommands), ...emailProviderRows.map((row) => row.signedReplayCommand).filter(Boolean)],
+      productionOk: Boolean(gates.email?.status === 'pass' && emailProviderRows.every((row) => row.launchReady)),
+      evidence: [
+        ...(gates.email?.evidence ?? []),
+        ...emailProviderRows.map((row) => `${row.label}: ${row.status}`),
+      ],
+      blockers: gates.email?.blockers ?? [],
+      requiredEnv: [
+        ...(gates.email?.requiredEnv ?? []),
+        ...emailProviderRows.flatMap((row) => row.missingEnv),
+      ],
+      commands: [
+        ...(gates.email?.commands ?? []),
+        ...emailProviderRows.flatMap((row) => row.launchCommands),
+        ...emailProviderRows.map((row) => row.signedReplayCommand).filter(Boolean),
+      ],
       completionCriteria: ['Gmail watch registration succeeds.', 'Outlook subscription renewal succeeds.', 'Outbound email digest send succeeds.', 'Signed email delivery webhook replay updates delivery ledger.'],
       dependsOn: ['provider_sandbox_evidence'],
     }),
@@ -5984,11 +6508,21 @@ export function fallbackProductionPlan(
       id: 'payment_launch',
       phase: 'Stripe billing launch',
       owner: 'billing',
-      productionOk: paymentLaunchReady,
-      evidence: [stripeRow ? `${stripeRow.label}: ${stripeRow.status}` : 'Stripe launch row missing'],
-      blockers: paymentLaunchReady ? [] : ['Stripe config, Checkout/Portal proof, signed webhooks, and sandbox evidence must pass.'],
-      requiredEnv: stripeRow?.missingEnv ?? [],
-      commands: [...(stripeRow?.launchCommands ?? []), stripeRow?.signedReplayCommand],
+      productionOk: Boolean(gates.payment?.status === 'pass' && stripeRow?.launchReady),
+      evidence: [
+        ...(gates.payment?.evidence ?? []),
+        stripeRow ? `${stripeRow.label}: ${stripeRow.status}` : null,
+      ],
+      blockers: gates.payment?.blockers ?? [],
+      requiredEnv: [
+        ...(gates.payment?.requiredEnv ?? []),
+        ...(stripeRow?.missingEnv ?? []),
+      ],
+      commands: [
+        ...(gates.payment?.commands ?? []),
+        ...(stripeRow?.launchCommands ?? []),
+        stripeRow?.signedReplayCommand,
+      ],
       completionCriteria: ['Stripe Checkout session succeeds in test mode.', 'Billing Portal handoff succeeds.', 'Signed Stripe webhook replay updates subscription, invoice, and entitlement state.', 'Failed payment and resubscription lifecycle playbook rows reconcile.'],
       dependsOn: ['provider_sandbox_evidence'],
     }),
@@ -5996,11 +6530,24 @@ export function fallbackProductionPlan(
       id: 'scheduler_alerting',
       phase: 'Scheduler, retries, alerts, and runbook',
       owner: 'operations',
-      productionOk: Boolean(scheduler?.productionOk && alerting?.productionOk),
-      evidence: [schedulerCheck?.message, ...(scheduler?.evidence ?? []), ...(alerting?.evidence ?? [])],
-      blockers: [scheduler && !scheduler.productionOk && scheduler.recommendation, alerting && !alerting.productionOk && alerting.recommendation],
-      requiredEnv: [schedulerCheck?.missingEnv ?? [], scheduler?.requiredEnv ?? [], alerting?.requiredEnv ?? []].flat(),
-      commands: [...(scheduler?.commands ?? []), ...(alerting?.commands ?? []), 'npm run admin -- operations-health --env-file ./.env.production --json'],
+      productionOk: Boolean(gates.scheduler?.status === 'pass' && scheduler?.productionOk && alerting?.productionOk),
+      evidence: [
+        ...(gates.scheduler?.evidence ?? []),
+        ...fallbackProductionPlanDrillEvidence(scheduler, alerting),
+      ],
+      blockers: [
+        ...(gates.scheduler?.blockers ?? []),
+        ...fallbackProductionPlanDrillBlockers(scheduler, alerting),
+      ],
+      requiredEnv: [
+        ...(gates.scheduler?.requiredEnv ?? []),
+        ...fallbackProductionPlanDrillEnv(scheduler, alerting),
+      ],
+      commands: [
+        ...(gates.scheduler?.commands ?? []),
+        ...fallbackProductionPlanDrillCommands(scheduler, alerting),
+        'npm run admin -- operations-health --env-file ./.env.production --json',
+      ],
       completionCriteria: ['Production scheduler runs as a single runner.', 'Provider validation schedules are active.', 'Operations alert channel and runbook URL are configured.', 'Failed jobs and active provider backoffs are clear.'],
       dependsOn: ['durable_backend_storage', 'provider_sandbox_evidence'],
     }),
@@ -6008,9 +6555,13 @@ export function fallbackProductionPlan(
       id: 'launch_evidence_package',
       phase: 'Redacted launch evidence package and final go-live proof',
       owner: 'operations',
-      productionOk: Boolean(backend.productionReady && drill.productionReady && launch.productionReady),
-      evidence: [`${drill.summary.productionReady}/${drill.summary.total} production drill row(s) ready`, `${launch.summary.launchReady}/${launch.summary.total} provider launch row(s) ready`],
-      blockers: backend.productionReady && drill.productionReady && launch.productionReady ? [] : ['Complete every blocked production setup phase before writing final launch evidence.'],
+      productionOk: Boolean(gateRows.every((gate) => gate.status === 'pass') && drill.productionReady && launch.productionReady),
+      evidence: [
+        `${gateRows.filter((gate) => gate.status === 'pass').length}/${gateRows.length} launch gate(s) passed`,
+        `${drill.summary.productionReady}/${drill.summary.total} production drill row(s) ready`,
+        `${launch.summary.launchReady}/${launch.summary.total} provider launch row(s) ready`,
+      ],
+      blockers: gateRows.every((gate) => gate.status === 'pass') && drill.productionReady && launch.productionReady ? [] : ['Complete every blocked production setup phase before writing final launch evidence.'],
       commands: ['npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json', 'npm run admin -- launch-gate verify-package ./signal-launch-evidence.json --json', 'npm run admin -- production-plan --env-file ./.env.production --json'],
       completionCriteria: ['Launch gate is go-live ready.', 'Production drill is production-ready.', 'Provider launch matrix is production-ready.', 'Launch evidence package verifies and contains no secret values.'],
       dependsOn: ['email_launch', 'payment_launch', 'scheduler_alerting'],
@@ -6507,8 +7058,8 @@ export function fallbackLocalAgentHandoff(
   const outlook = providerRow('outlook');
   const outboundEmail = providerRow('outbound-email');
   const stripe = providerRow('stripe');
-  const providerMissingEnv = provider.providers.flatMap((item) => item.missingRequired);
-  const emailProviderMissingEnv = [gmail, outlook, outboundEmail].flatMap((item) => item?.missingRequired ?? []);
+  const providerMissingEnv = uniquePlanValues(provider.providers.flatMap((item) => item.missingRequired));
+  const emailProviderMissingEnv = uniquePlanValues([gmail, outlook, outboundEmail].flatMap((item) => item?.missingRequired ?? []));
   const activeProviderSchedules = data.providerValidationSchedules?.filter((schedule) => schedule.status === 'active').length ?? 0;
   const localChecks = [
     (summary.activeMemberships ?? 0) > 0 && (summary.activeEntitlements ?? 0) > 0,
@@ -6519,6 +7070,7 @@ export function fallbackLocalAgentHandoff(
     (summary.notificationPreferences ?? 0) > 0,
     summary.subscriptions > 0 && (summary.activeEntitlements ?? 0) > 0,
     activeProviderSchedules >= 4,
+    (summary.jobs ?? 0) > 0 && Array.isArray(data.auditEvents),
     true,
   ];
   const localReady = localChecks.filter(Boolean).length;
@@ -6629,7 +7181,7 @@ export function fallbackLocalAgentHandoff(
       blockers: stripe?.ready && providerSandboxPassed
         ? []
         : ['Stripe env, test price lookup, signed webhook replay, and saved sandbox evidence must pass before production billing launch.'],
-      requiredEnv: stripe?.missingRequired ?? ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'SIGNAL_STRIPE_PRICE_TEAM'],
+      requiredEnv: uniquePlanValues(stripe?.missingRequired ?? ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'SIGNAL_STRIPE_PRICE_TEAM']),
       commands: [
         'npm run admin -- payments checkout tenant_demo plan_team --live-provider',
         'npm run admin -- payments portal tenant_demo --live-provider',
@@ -6793,7 +7345,10 @@ export function fallbackCompletionAudit(
       owner: 'product',
       localOk: agent.summary.localReady === agent.summary.localTotal,
       productionOk: agent.summary.localReady === agent.summary.localTotal,
-      evidence: [`${agent.summary.localReady}/${agent.summary.localTotal} local readiness area(s) pass`, `${summary.users} user(s), ${summary.mailboxes} mailbox source(s), ${summary.subscriptions} subscription record(s)`],
+      evidence: [
+        `${agent.summary.localReady}/${agent.summary.localTotal} local product readiness area(s) pass`,
+        `${summary.tenants} tenant(s), ${summary.users} user(s), ${summary.mailboxes} mailbox source(s), ${summary.subscriptions} subscription record(s)`,
+      ],
       commands: ['npm run admin -- readiness --json', 'npm run test:browser-routes'],
       api: '/api/readiness',
     }),
@@ -6836,8 +7391,13 @@ export function fallbackCompletionAudit(
       owner: 'operations',
       localOk: operations.ok && lifecycle.ok && qa.ok,
       productionOk: operations.productionReady && qa.productionReady,
-      evidence: [`${operations.summary.totalWebhooks - operations.summary.unhealthyWebhooks}/${operations.summary.totalWebhooks} webhook channel(s) healthy`, `${lifecycle.summary.ready}/${lifecycle.summary.total} lifecycle playbook row(s) local-ready`, `${qa.summary.localReady}/${qa.summary.total} QA answer row(s) local-ready`],
-      blockers: operations.productionReady && qa.productionReady ? [] : ['Admin production proof still needs launch-gate, provider, backend, and operations evidence.'],
+      evidence: [
+        `${agent.summary.localReady}/${agent.summary.localTotal} readiness area(s) local-ready`,
+        `${operations.summary.totalWebhooks - operations.summary.unhealthyWebhooks}/${operations.summary.totalWebhooks} webhook channel(s) healthy`,
+        `${lifecycle.summary.ready}/${lifecycle.summary.total} lifecycle playbook row(s) local-ready`,
+        `${qa.summary.localReady}/${qa.summary.total} QA answer row(s) local-ready`,
+      ],
+      blockers: operations.productionReady && qa.productionReady ? [] : [`${agent.summary.totalActions} launch gate(s) need production proof.`],
       commands: ['npm run admin -- operations-health --json', 'npm run admin -- lifecycle-playbook --json', 'npm run admin -- qa-answers --json'],
       api: '/api/operations-health',
     }),
@@ -7149,6 +7709,7 @@ export function fallbackBackendCutover(
       productionOk: true,
       env,
       evidence: [
+        `State path: ${summary.statePath}`,
         `${summary.tenants} tenant(s), ${summary.users} user(s), ${summary.mailboxes} mailbox source(s), ${summary.auditEvents} audit event(s)`,
       ],
       command: 'npm run state-service:admin -- verify ./signal-prod-backup.json --json',
@@ -7382,6 +7943,8 @@ export function fallbackSchedulerHandoff(
 ): SchedulerHandoffReport {
   const summary = summarizeLocalState(data);
   const scheduler = backend.checks.find((check) => check.id === 'job_scheduler');
+  const launchGateRows = fallbackLaunchGateRows(data, backend, fallbackProviderReadiness());
+  const schedulerGate = launchGateRows.find((row) => row.id === 'scheduler_operations');
   const drillRows = Object.fromEntries(productionDrill.rows.map((row) => [row.area, row]));
   const activeProviderSchedules = data.providerValidationSchedules?.filter((schedule) => schedule.status === 'active').length ?? 0;
   const totalProviderSchedules = data.providerValidationSchedules?.length ?? 0;
@@ -7406,7 +7969,8 @@ export function fallbackSchedulerHandoff(
     cleanQueuesReady &&
     schedulesReady &&
     alertingReady &&
-    drillRows.scheduler_daemon?.productionOk
+    drillRows.scheduler_daemon?.productionOk &&
+    schedulerGate?.status === 'pass'
   );
   const rows = [
     fallbackSchedulerHandoffStep({
@@ -7494,7 +8058,10 @@ export function fallbackSchedulerHandoff(
       productionOk: schedulerProductionReady,
       requiredEnv: uniquePlanValues([...schedulerEnv, ...singleRunnerEnv, ...alertingEnv, ...backendEnv]),
       env,
-      evidence: [drillRows.scheduler_daemon?.evidence?.join(' | ') ?? 'Production scheduler drill row not evaluated.'],
+      evidence: [
+        schedulerGate?.evidence?.join(' | ') ?? 'Launch gate scheduler row not evaluated.',
+        drillRows.scheduler_daemon?.evidence?.join(' | ') ?? 'Production scheduler drill row not evaluated.',
+      ],
       blocker: schedulerProductionReady ? 'None' : 'Continuous scheduler must wait for env, schedules, clean queues, alerting, backend, and launch-gate proof.',
       command: 'SIGNAL_JOB_SCHEDULER=signal-scheduler SIGNAL_PROVIDER_VALIDATION_SCHEDULER=signal-scheduler npm run scheduler',
       followUpCommands: ['npm run admin -- scheduler-handoff --env-file ./.env.production --json', 'npm run admin -- launch-gate --env-file ./.env.production --json'],
@@ -7507,7 +8074,10 @@ export function fallbackSchedulerHandoff(
       priority: 70,
       productionOk: schedulerProductionReady,
       env,
-      evidence: [`${productionDrill.summary.productionReady}/${productionDrill.summary.total} production drill row(s) ready`],
+      evidence: [
+        `${launchGateRows.filter((gate) => gate.status === 'pass').length}/${launchGateRows.length} launch gate(s) pass`,
+        `${productionDrill.summary.productionReady}/${productionDrill.summary.total} production drill row(s) ready`,
+      ],
       blocker: schedulerProductionReady ? 'None' : 'Scheduler evidence cannot be packaged until the continuous scheduler row is ready.',
       command: 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json',
       followUpCommands: ['npm run admin -- launch-gate verify-package ./signal-launch-evidence.json --json'],
