@@ -71,6 +71,7 @@ import {
   renewMailboxWatch,
   recordProviderSandboxValidation,
   recordSignalFeedback,
+  requeueDeadLetterJob,
   resolveIncidentNote,
   retryJob,
   runJobs,
@@ -78,6 +79,7 @@ import {
   runEmailFlows,
   revokeSessionToken,
   revokeBillingOverride,
+  revokeUserSessions,
   revokeUserInvite,
   setAccountActionStatus,
   setEmailFlowStatus,
@@ -120,6 +122,8 @@ import {
 } from './signal-email-provider.mjs';
 import {
   listProviderCredentialRecords,
+  rotateProviderCredentialVault,
+  verifyProviderCredentialVault,
 } from './signal-token-vault.mjs';
 import {
   validateProviderSandbox,
@@ -1226,6 +1230,7 @@ async function listJobs() {
     status: job.status,
     attempts: `${job.attempts}/${job.maxAttempts}`,
     nextRunAt: job.nextRunAt ? new Date(job.nextRunAt).toISOString().slice(0, 16) : '-',
+    nextAttemptAt: job.nextAttemptAt ? new Date(job.nextAttemptAt).toISOString().slice(0, 16) : '-',
     credentialSource: job.providerCredentialSource ?? '-',
     refreshedAt: job.providerCredentialRefreshedAt ? new Date(job.providerCredentialRefreshedAt).toISOString().slice(0, 16) : '-',
     providerStatus: job.providerResponseStatus ?? '-',
@@ -1233,7 +1238,22 @@ async function listJobs() {
     upserted: job.sourceMessagesUpserted ?? '-',
     target: job.targetId,
   }));
-  emit(wantsJson ? { ok: true, jobs: state.jobs } : table(rows, ['id', 'queue', 'type', 'status', 'attempts', 'nextRunAt', 'credentialSource', 'refreshedAt', 'providerStatus', 'requestDigest', 'upserted', 'target']));
+  const dlqRows = (state.deadLetter ?? []).map((job) => ({
+    id: job.deadLetterId ?? job.id,
+    job: job.originalJobId ?? job.id,
+    queue: job.queue,
+    type: job.type,
+    attempts: `${job.attempts}/${job.maxAttempts}`,
+    failedAt: job.failedAt ? new Date(job.failedAt).toISOString().slice(0, 16) : '-',
+    error: job.message ?? '-',
+    target: job.targetId,
+  }));
+  emit(wantsJson ? { ok: true, deadLetter: state.deadLetter ?? [], jobs: state.jobs } : [
+    table(rows, ['id', 'queue', 'type', 'status', 'attempts', 'nextRunAt', 'nextAttemptAt', 'credentialSource', 'refreshedAt', 'providerStatus', 'requestDigest', 'upserted', 'target']),
+    '',
+    'Dead letter',
+    table(dlqRows, ['id', 'job', 'queue', 'type', 'attempts', 'failedAt', 'error', 'target']),
+  ].join('\n'));
 }
 
 async function listBackendReadiness() {
@@ -2516,6 +2536,7 @@ async function run() {
         '  npm run admin -- tenants status tenant_demo active',
         '  npm run admin -- tenants domain tenant_demo acme.example',
         '  npm run admin -- users role usr_sales admin --actor usr_admin',
+        '  npm run admin -- users revoke-sessions usr_sales --actor usr_admin',
         '  npm run admin -- users invite tenant_demo rowan@acme.example member success',
         '  npm run admin -- users claim local-rowan-success rowan@acme.example Rowan_Lee success',
         '  npm run admin -- users accept inv_rowan_success Rowan_Lee',
@@ -2526,6 +2547,8 @@ async function run() {
         '  npm run admin -- mailboxes pause mbx_gmail_sales',
         '  npm run admin -- mailboxes watch mbx_gmail_sales',
         '  SIGNAL_TOKEN_ENCRYPTION_KEY=... npm run admin -- mailboxes watch <storedCredentialMailboxId> --live-provider',
+        '  SIGNAL_TOKEN_ENCRYPTION_KEYS=v2:<new>,v1:<old> npm run admin -- token-vault rotate --json',
+        '  SIGNAL_TOKEN_ENCRYPTION_KEYS=v2:<new>,v1:<old> npm run admin -- token-vault verify --json',
         '  SIGNAL_GMAIL_ACCESS_TOKEN=... npm run admin -- mailboxes watch mbx_gmail_sales --live-provider',
         '  SIGNAL_OUTLOOK_ACCESS_TOKEN=... npm run admin -- mailboxes renew-watch watch_outlook_mbx_outlook_success --live-provider',
         '  npm run admin -- mailboxes renew-watch watch_gmail_mbx_gmail_sales',
@@ -2601,6 +2624,8 @@ async function run() {
         '  npm run admin -- jobs run provider_validation --limit 1',
         '  npm run admin -- jobs run signal_handoff --limit 5',
         '  npm run admin -- jobs retry job_mbx_outlook_success',
+        '  npm run admin -- jobs dlq',
+        '  npm run admin -- jobs requeue <deadLetterId|jobId>',
         '  npm run scheduler -- --once --dry-run --json',
         '  SIGNAL_JOB_SCHEDULER=signal-scheduler npm run scheduler',
         '  npm run admin -- backend --json',
@@ -2893,6 +2918,10 @@ async function run() {
         emitMutation(await setUserRole(positionals[2], positionals[3], mutationOptions));
         return;
       }
+      if (subcommand === 'revoke-sessions') {
+        emitMutation(await revokeUserSessions(positionals[2], mutationOptions));
+        return;
+      }
       if (subcommand === 'disable') {
         emitMutation(await setUserStatus(positionals[2], 'disabled', mutationOptions));
         return;
@@ -2920,6 +2949,20 @@ async function run() {
       }
       if (subcommand === 'revoke') {
         emitMutation(await revokeUserInvite(positionals[2], mutationOptions));
+        return;
+      }
+      unknownSubcommand();
+      return;
+
+    case 'token-vault':
+      if (subcommand === 'verify') {
+        const result = await verifyProviderCredentialVault();
+        emit(wantsJson ? result : `Token vault verify: ${result.ok ? 'OK' : 'FAILED'} (${result.summary.failed}/${result.summary.total} failed)`);
+        return;
+      }
+      if (subcommand === 'rotate') {
+        const result = await rotateProviderCredentialVault();
+        emit(wantsJson ? result : `Token vault rotated ${result.rotated}/${result.total} record(s) to ${result.targetKeyId}`);
         return;
       }
       unknownSubcommand();
@@ -3368,6 +3411,24 @@ async function run() {
       }
       if (subcommand === 'retry') {
         emitMutation(await retryJob(positionals[2], mutationOptions));
+        return;
+      }
+      if (subcommand === 'dlq') {
+        const state = await loadState();
+        emit(wantsJson ? { ok: true, deadLetter: state.deadLetter ?? [] } : table((state.deadLetter ?? []).map((job) => ({
+          id: job.deadLetterId ?? job.id,
+          job: job.originalJobId ?? job.id,
+          queue: job.queue,
+          type: job.type,
+          attempts: `${job.attempts}/${job.maxAttempts}`,
+          failedAt: job.failedAt ? new Date(job.failedAt).toISOString().slice(0, 16) : '-',
+          error: job.message ?? '-',
+          target: job.targetId,
+        })), ['id', 'job', 'queue', 'type', 'attempts', 'failedAt', 'error', 'target']));
+        return;
+      }
+      if (subcommand === 'requeue') {
+        emitMutation(await requeueDeadLetterJob(positionals[2], mutationOptions));
         return;
       }
       if (subcommand === 'drain') {

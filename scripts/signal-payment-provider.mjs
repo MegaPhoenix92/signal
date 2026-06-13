@@ -110,7 +110,7 @@ function digestStripeRequest(value) {
 }
 
 function idempotencyPart(value, fallback) {
-  const normalized = optionalString(value)?.replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 80);
+  const normalized = optionalString(value)?.replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '');
   return normalized || fallback;
 }
 
@@ -129,15 +129,9 @@ function idempotencyAttemptPart(sessionAttempt) {
 }
 
 function finalizeStripeIdempotencyKey(prefix, parts) {
-  const key = [prefix, ...parts].join('-');
-  if (key.length <= STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH) {
-    return key;
-  }
-  const digest = crypto.createHash('sha256').update(key, 'utf8').digest('hex').slice(0, 32);
-  const compactKey = `${prefix}-${digest}`;
-  return compactKey.length <= STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH
-    ? compactKey
-    : compactKey.slice(0, STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH);
+  const canonicalKey = [prefix, ...parts].join('\0');
+  const digest = crypto.createHash('sha256').update(canonicalKey, 'utf8').digest('hex');
+  return `${prefix}-${digest}`;
 }
 
 export function stripeCheckoutIdempotencyKey({ tenant, plan, subscription, sessionAttempt } = {}) {

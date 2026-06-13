@@ -73,9 +73,10 @@ test('checkout sessions derive a stable Stripe idempotency key by default', asyn
     tenant,
   });
 
-  assert.equal(stripeCheckoutIdempotencyKey({ plan, sessionAttempt: 1, subscription, tenant }), 'signal-checkout-tenant_demo-plan_team-sub_demo-1');
-  assert.equal(calls[0].init.headers['Idempotency-Key'], 'signal-checkout-tenant_demo-plan_team-sub_demo-1');
-  assert.equal(checkout.requestIdempotencyKey, 'signal-checkout-tenant_demo-plan_team-sub_demo-1');
+  const expectedKey = stripeCheckoutIdempotencyKey({ plan, sessionAttempt: 1, subscription, tenant });
+  assert.match(expectedKey, /^signal-checkout-[a-f0-9]{64}$/);
+  assert.equal(calls[0].init.headers['Idempotency-Key'], expectedKey);
+  assert.equal(checkout.requestIdempotencyKey, expectedKey);
 });
 
 test('billing portal sessions derive a stable Stripe idempotency key by default', async () => {
@@ -88,9 +89,10 @@ test('billing portal sessions derive a stable Stripe idempotency key by default'
     tenant,
   });
 
-  assert.equal(stripeBillingPortalIdempotencyKey({ sessionAttempt: 2, subscription, tenant }), 'signal-portal-tenant_demo-sub_demo-cus_signal-2');
-  assert.equal(calls[0].init.headers['Idempotency-Key'], 'signal-portal-tenant_demo-sub_demo-cus_signal-2');
-  assert.equal(portal.requestIdempotencyKey, 'signal-portal-tenant_demo-sub_demo-cus_signal-2');
+  const expectedKey = stripeBillingPortalIdempotencyKey({ sessionAttempt: 2, subscription, tenant });
+  assert.match(expectedKey, /^signal-portal-[a-f0-9]{64}$/);
+  assert.equal(calls[0].init.headers['Idempotency-Key'], expectedKey);
+  assert.equal(portal.requestIdempotencyKey, expectedKey);
 });
 
 test('derived Stripe idempotency keys are stable per attempt and unique across attempts', () => {
@@ -159,13 +161,38 @@ test('derived Stripe idempotency keys stay within Stripe length limits', () => {
   });
 
   assert(key.length <= STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH);
-  assert.match(key, /^signal-checkout-[a-f0-9]{32}$/);
+  assert.match(key, /^signal-checkout-[a-f0-9]{64}$/);
   assert.equal(key, stripeCheckoutIdempotencyKey({
     plan: longPlan,
     sessionAttempt: 1,
     subscription: longSubscription,
     tenant: longTenant,
   }));
+});
+
+test('derived Stripe idempotency keys differ when long inputs differ past the old truncation point', () => {
+  const longPrefix = 'x'.repeat(120);
+  const leftTenant = { id: `tenant_${longPrefix}_left` };
+  const rightTenant = { id: `tenant_${longPrefix}_right` };
+  const longPlan = { id: `plan_${'y'.repeat(120)}` };
+  const longSubscription = { id: `sub_${'z'.repeat(120)}` };
+
+  const left = stripeCheckoutIdempotencyKey({
+    plan: longPlan,
+    sessionAttempt: 1,
+    subscription: longSubscription,
+    tenant: leftTenant,
+  });
+  const right = stripeCheckoutIdempotencyKey({
+    plan: longPlan,
+    sessionAttempt: 1,
+    subscription: longSubscription,
+    tenant: rightTenant,
+  });
+
+  assert.notEqual(left, right);
+  assert(left.length <= STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH);
+  assert(right.length <= STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH);
 });
 
 test('createCheckoutSession retries reuse the same derived Stripe idempotency key', async (t) => {

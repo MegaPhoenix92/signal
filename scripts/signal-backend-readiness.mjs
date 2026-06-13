@@ -27,6 +27,13 @@ function isLoopbackOrigin(origin) {
   }
 }
 
+function productionModeEnabled(env) {
+  return env.NODE_ENV === 'production'
+    || env.SIGNAL_BACKEND_MODE === 'production-node'
+    || env.SIGNAL_BACKEND_MODE === 'external-service'
+    || env.SIGNAL_RUNTIME_ENV === 'production';
+}
+
 function check({
   id,
   label,
@@ -66,12 +73,16 @@ export function backendReadiness({ env = process.env, statePath } = {}) {
   const stateServiceDatabaseConfigured = configuredEnv(env, stateServiceDatabaseEnv);
   const authProvider = env.SIGNAL_AUTH_PROVIDER;
   const tenantIsolationMode = env.SIGNAL_TENANT_ISOLATION_MODE;
+  const stateServiceRlsEnabled = env.SIGNAL_STATE_SERVICE_RLS === 'true' || env.SIGNAL_STATE_SERVICE_ENABLE_RLS === 'true';
   const signedSessionRequired = env.SIGNAL_REQUIRE_SIGNED_SESSION === 'true';
+  const localActorProductionBlocked = !(env.SIGNAL_ALLOW_LOCAL_ACTOR === 'true' && productionModeEnabled(env));
   const corsProductionReady = corsOrigins.length > 0 && !corsOrigins.includes('*') && corsOrigins.every((origin) => !isLoopbackOrigin(origin));
   const externalStateService = mode === 'external-service';
   const stateServiceStorageReady = externalStateService
     ? stateServiceBackend === 'postgres' && stateServiceDatabaseConfigured.length > 0
     : mode === 'production-node';
+  const tenantIsolationReady = tenantIsolationMode === 'policy'
+    || (tenantIsolationMode === 'rls' && stateServiceBackend === 'postgres' && stateServiceRlsEnabled && stateServiceDatabaseConfigured.length > 0);
 
   const checks = [
     check({
@@ -140,6 +151,18 @@ export function backendReadiness({ env = process.env, statePath } = {}) {
       missing: missingEnv(env, ['SIGNAL_REQUIRE_SIGNED_SESSION', 'SIGNAL_SESSION_SECRET']),
     }),
     check({
+      id: 'local_actor_disabled',
+      label: 'Local actor production block',
+      ok: localActorProductionBlocked,
+      message: localActorProductionBlocked
+        ? 'Local actor impersonation is disabled for production mode.'
+        : 'SIGNAL_ALLOW_LOCAL_ACTOR must not be enabled in production mode.',
+      configured: env.SIGNAL_ALLOW_LOCAL_ACTOR ? ['SIGNAL_ALLOW_LOCAL_ACTOR'] : [],
+      details: {
+        productionMode: productionModeEnabled(env),
+      },
+    }),
+    check({
       id: 'production_auth_provider',
       label: 'Production auth provider',
       ok: productionAuthProviders.includes(authProvider) && (authProvider !== 'jwks' || Boolean(env.SIGNAL_AUTH_JWKS_URL)),
@@ -183,15 +206,34 @@ export function backendReadiness({ env = process.env, statePath } = {}) {
     check({
       id: 'tenant_isolation',
       label: 'Tenant isolation',
-      ok: tenantIsolationModes.includes(tenantIsolationMode),
-      message: tenantIsolationModes.includes(tenantIsolationMode)
-        ? 'Tenant isolation mode is declared for multi-org enforcement.'
-        : 'Production multi-org support needs durable tenant isolation such as RLS or policy enforcement.',
-      requiredEnv: tenantIsolationEnv,
-      configured: configuredEnv(env, tenantIsolationEnv),
-      missing: missingEnv(env, tenantIsolationEnv),
+      ok: tenantIsolationReady,
+      message: tenantIsolationReady
+        ? (tenantIsolationMode === 'rls'
+          ? 'Postgres RLS mode is configured; the state service creates and verifies pg_policies on startup.'
+          : 'Tenant isolation policy mode is declared for multi-org enforcement.')
+        : (tenantIsolationMode === 'rls'
+          ? 'RLS mode requires postgres state-service storage plus SIGNAL_STATE_SERVICE_RLS=true so startup verifies pg_policies.'
+          : 'Production multi-org support needs durable tenant isolation such as RLS or policy enforcement.'),
+      requiredEnv: tenantIsolationMode === 'rls'
+        ? ['SIGNAL_TENANT_ISOLATION_MODE', 'SIGNAL_STATE_SERVICE_BACKEND', 'SIGNAL_STATE_SERVICE_RLS', ...stateServiceDatabaseEnv]
+        : tenantIsolationEnv,
+      configured: [
+        ...configuredEnv(env, tenantIsolationEnv),
+        ...(stateServiceBackend ? ['SIGNAL_STATE_SERVICE_BACKEND'] : []),
+        ...(stateServiceRlsEnabled ? ['SIGNAL_STATE_SERVICE_RLS'] : []),
+        ...stateServiceDatabaseConfigured,
+      ],
+      missing: tenantIsolationMode === 'rls'
+        ? [
+          ...(stateServiceBackend === 'postgres' ? [] : ['SIGNAL_STATE_SERVICE_BACKEND']),
+          ...(stateServiceRlsEnabled ? [] : ['SIGNAL_STATE_SERVICE_RLS']),
+          ...missingEnv(env, stateServiceDatabaseEnv),
+        ]
+        : missingEnv(env, tenantIsolationEnv),
       details: {
         mode: tenantIsolationModes.includes(tenantIsolationMode) ? tenantIsolationMode : null,
+        rlsCatalogVerifiedOnStartup: tenantIsolationMode === 'rls' ? stateServiceRlsEnabled : null,
+        stateServiceBackend: stateServiceBackendModes.includes(stateServiceBackend) ? stateServiceBackend : null,
       },
     }),
   ];

@@ -32,10 +32,19 @@ import {
   digestClientState,
 } from './signal-provider-watch.mjs';
 import {
+  createLogger,
+} from './signal-logger.mjs';
+import {
   bootstrapState,
+  createMailboxConnectionSession,
   completeMailboxConnectionFromOAuthCallback,
+  applyMutation,
+  issueSessionToken,
   loadState,
+  revokeSessionToken,
   saveState,
+  setUserRole,
+  setUserStatus,
 } from './signal-state.mjs';
 import {
   SessionTokenError,
@@ -150,6 +159,25 @@ test('assertApiSecurityConfig blocks local actor mode on non-loopback hosts', ()
       SIGNAL_COOKIE_SECURE: 'true',
       SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
       SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
+    }),
+    /SIGNAL_ALLOW_LOCAL_ACTOR/i,
+  );
+});
+
+test('assertApiSecurityConfig blocks local actor mode in production mode', () => {
+  assert.throws(
+    () => assertApiSecurityConfig({
+      NODE_ENV: 'production',
+      SIGNAL_API_HOST: '127.0.0.1',
+      SIGNAL_ALLOW_LOCAL_ACTOR: 'true',
+    }),
+    /SIGNAL_ALLOW_LOCAL_ACTOR/i,
+  );
+  assert.throws(
+    () => assertApiSecurityConfig({
+      SIGNAL_API_HOST: '127.0.0.1',
+      SIGNAL_BACKEND_MODE: 'external-service',
+      SIGNAL_ALLOW_LOCAL_ACTOR: 'true',
     }),
     /SIGNAL_ALLOW_LOCAL_ACTOR/i,
   );
@@ -459,11 +487,134 @@ test('OAuth callback rejects signed state that does not match session oauthState
   );
 });
 
+test('OAuth callback rejects a session whose provider differs from the callback provider', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-oauth-session-provider-mismatch-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const oauthEnv = { SIGNAL_OAUTH_STATE_KEY: 'oauth-session-provider-mismatch-key' };
+  const previousOAuthStateKey = process.env.SIGNAL_OAUTH_STATE_KEY;
+  process.env.SIGNAL_OAUTH_STATE_KEY = oauthEnv.SIGNAL_OAUTH_STATE_KEY;
+  t.after(() => {
+    if (previousOAuthStateKey === undefined) {
+      delete process.env.SIGNAL_OAUTH_STATE_KEY;
+    } else {
+      process.env.SIGNAL_OAUTH_STATE_KEY = previousOAuthStateKey;
+    }
+  });
+
+  const oauthState = signOAuthState(createOAuthStatePayload({
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    mailboxId: 'mbx_outlook_success',
+    ownerUserId: 'usr_admin',
+    provider: 'outlook',
+    sessionId: 'mcs_outlook_reauth',
+    tenantId: 'tenant_demo',
+  }), { env: oauthEnv });
+  const state = await loadState({ statePath });
+  const session = state.mailboxConnectionSessions.find((candidate) => candidate.id === 'mcs_outlook_reauth');
+  session.provider = 'gmail';
+  session.oauthStateDigest = oauthStateDigest(oauthState);
+  session.selectedScopes = ['selected_label_snippets'];
+  await saveState(state, { statePath });
+
+  await assert.rejects(
+    () => completeMailboxConnectionFromOAuthCallback('outlook', { code: 'local_mcs_outlook_reauth', state: oauthState }, {
+      actorUserId: 'usr_admin',
+      env: oauthEnv,
+      statePath,
+    }),
+    (error) => {
+      assert.equal(error.code, 'OAUTH_SESSION_PROVIDER_MISMATCH');
+      assert.equal(error.status, 400);
+      return true;
+    },
+  );
+});
+
+test('OAuth callback fails closed when token exchange is unconfigured for provider codes', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-oauth-exchange-unconfigured-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const oauthEnv = { SIGNAL_OAUTH_STATE_KEY: 'oauth-exchange-unconfigured-key' };
+  const previousOAuthStateKey = process.env.SIGNAL_OAUTH_STATE_KEY;
+  process.env.SIGNAL_OAUTH_STATE_KEY = oauthEnv.SIGNAL_OAUTH_STATE_KEY;
+  t.after(() => {
+    if (previousOAuthStateKey === undefined) {
+      delete process.env.SIGNAL_OAUTH_STATE_KEY;
+    } else {
+      process.env.SIGNAL_OAUTH_STATE_KEY = previousOAuthStateKey;
+    }
+  });
+
+  const connect = await createMailboxConnectionSession({
+    tenantId: 'tenant_demo',
+    provider: 'gmail',
+    ownerUserId: 'usr_admin',
+  }, {
+    actorUserId: 'usr_admin',
+    statePath,
+  });
+  const sessionId = connect.details.sessionId;
+  const oauthState = new URL(connect.details.localCallbackUrl).searchParams.get('state');
+
+  await assert.rejects(
+    () => completeMailboxConnectionFromOAuthCallback('gmail', { code: 'provider-code', state: oauthState }, {
+      actorUserId: 'usr_admin',
+      env: oauthEnv,
+      statePath,
+    }),
+    (error) => {
+      assert.equal(error.code, 'OAUTH_TOKEN_EXCHANGE_NOT_CONFIGURED');
+      assert.equal(error.status, 412);
+      return true;
+    },
+  );
+
+  const state = await loadState({ statePath });
+  const failedSession = state.mailboxConnectionSessions.find((candidate) => candidate.id === sessionId);
+  assert.equal(failedSession.status, 'failed');
+  assert.equal(failedSession.failureCode, 'OAUTH_TOKEN_EXCHANGE_NOT_CONFIGURED');
+  assert.equal(state.mailboxes.some((mailbox) => mailbox.id === 'mbx_gmail_usr_admin'), false);
+  assert(state.jobs.some((job) => job.targetId === sessionId && job.type === 'mailbox.oauth.callback.failed' && job.status === 'failed'));
+});
+
 test('requireOAuthActor fails closed when OAuth actor is not configured', () => {
   assert.throws(
     () => requireOAuthActor(null),
     (error) => error.code === 'OAUTH_ACTOR_REQUIRED',
   );
+});
+
+test('structured logger emits JSON and redacts sensitive fields', () => {
+  const lines = [];
+  const logger = createLogger({ service: 'signal-test', sink: (line) => lines.push(line) });
+  logger.info('credential_check', {
+    authorization: 'Bearer secret-token-value',
+    nested: {
+      refreshToken: 'refresh-token-value',
+    },
+    requestId: 'req_test',
+  });
+
+  assert.equal(lines.length, 1);
+  assert(!lines[0].includes('secret-token-value'));
+  assert(!lines[0].includes('refresh-token-value'));
+  const parsed = JSON.parse(lines[0]);
+  assert.equal(parsed.level, 'info');
+  assert.equal(parsed.service, 'signal-test');
+  assert.equal(parsed.event, 'credential_check');
+  assert.equal(parsed.authorization, '[redacted]');
+  assert.equal(parsed.nested.refreshToken, '[redacted]');
+  assert.equal(parsed.requestId, 'req_test');
+  assert.match(parsed.ts, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 async function startApiForSecurityTest({ port, statePath, env = {} }) {
@@ -503,6 +654,346 @@ async function startApiForSecurityTest({ port, statePath, env = {} }) {
   }
   throw new Error(`Signal API did not start on ${apiBaseUrl}.\n${output}`);
 }
+
+test('API health is liveness and readiness reports local state dependency', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-api-ready-local-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({ port, statePath });
+
+  const health = await fetch(`${api.apiBaseUrl}/api/health`);
+  assert.equal(health.status, 200);
+  assert.deepEqual(await parseJsonResponse(health), {
+    ok: true,
+    service: 'signal-local-api',
+  });
+
+  const ready = await fetch(`${api.apiBaseUrl}/api/ready`);
+  const payload = await parseJsonResponse(ready);
+  assert.equal(ready.status, 200);
+  assert.equal(payload.ok, true);
+  assert(payload.components.some((component) => component.component === 'state' && component.ok));
+  assert.equal(payload.summary.statePath, statePath);
+});
+
+test('API readiness returns 503 when external state service is unavailable', async (t) => {
+  const port = await freePort();
+  const stateServicePort = await freePort();
+  const stateUrl = `http://127.0.0.1:${stateServicePort}/state`;
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+  });
+
+  api = await startApiForSecurityTest({
+    port,
+    statePath: stateUrl,
+    env: {
+      SIGNAL_BACKEND_MODE: 'external-service',
+      SIGNAL_READY_TIMEOUT_MS: '250',
+      SIGNAL_STATE_SERVICE_URL: stateUrl,
+    },
+  });
+
+  const health = await fetch(`${api.apiBaseUrl}/api/health`);
+  assert.equal(health.status, 200);
+
+  const ready = await fetch(`${api.apiBaseUrl}/api/ready`);
+  const payload = await parseJsonResponse(ready);
+  assert.equal(ready.status, 503);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.service, 'signal-local-api');
+  assert.match(payload.code, /READY|STATE|FETCH|API_ERROR/i);
+});
+
+test('signed API state is scoped for platform operators, tenant admins, and members', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-api-scoped-state-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  const env = { SIGNAL_REQUIRE_SIGNED_SESSION: 'true', SIGNAL_SESSION_SECRET: 'scoped-state-secret-32chars-value!' };
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const state = await loadState({ statePath });
+  state.users.find((user) => user.id === 'usr_admin').platformRole = 'operator';
+  state.tenants.push({
+    id: 'tenant_other',
+    name: 'Other Tenant',
+    domain: 'other.example',
+    status: 'active',
+    planId: 'plan_team',
+    ownerUserId: 'usr_other_admin',
+    billingOwnerUserId: 'usr_other_admin',
+  });
+  state.users.push({
+    id: 'usr_other_admin',
+    tenantId: 'tenant_other',
+    name: 'Other Admin',
+    email: 'admin@other.example',
+    role: 'admin',
+    status: 'active',
+  });
+  state.memberships.push({
+    id: 'mem_tenant_other_usr_other_admin',
+    tenantId: 'tenant_other',
+    userId: 'usr_other_admin',
+    role: 'admin',
+    team: 'ops',
+    status: 'active',
+    createdAt: new Date().toISOString(),
+  });
+  state.auditEvents = [
+    ...(state.auditEvents ?? []),
+    { id: 'audit_demo_scope', action: 'tenants.status', targetId: 'tenant_demo', message: 'Demo tenant audit', createdAt: '2026-06-01T00:00:00.000Z', actor: 'usr_admin' },
+    { id: 'audit_other_scope', action: 'tenants.status', targetId: 'tenant_other', message: 'Other tenant audit', createdAt: '2026-06-01T00:01:00.000Z', actor: 'usr_other_admin' },
+  ];
+  await saveState(state, { statePath });
+
+  const operatorToken = await issueSessionToken('usr_admin', { actorUserId: 'usr_admin', env, statePath });
+  const tenantAdminToken = await issueSessionToken('usr_other_admin', { actorUserId: 'usr_admin', env, statePath });
+  const memberToken = await issueSessionToken('usr_sales', { actorUserId: 'usr_admin', env, statePath });
+  api = await startApiForSecurityTest({ port, statePath, env });
+
+  const operatorState = await signedSessionGet(api.apiBaseUrl, operatorToken.details.token);
+  assert.equal(operatorState.status, 200);
+  assert.deepEqual(operatorState.payload.state.tenants.map((item) => item.id).sort(), ['tenant_demo', 'tenant_other']);
+  assert(operatorState.payload.state.auditEvents.some((event) => event.id === 'audit_other_scope'));
+
+  const tenantAdminState = await signedSessionGet(api.apiBaseUrl, tenantAdminToken.details.token);
+  assert.equal(tenantAdminState.status, 200);
+  assert.deepEqual(tenantAdminState.payload.state.tenants.map((item) => item.id), ['tenant_other']);
+  assert(tenantAdminState.payload.state.auditEvents.some((event) => event.id === 'audit_other_scope'));
+  assert.equal(tenantAdminState.payload.state.auditEvents.some((event) => event.id === 'audit_demo_scope'), false);
+
+  const memberState = await signedSessionGet(api.apiBaseUrl, memberToken.details.token);
+  assert.equal(memberState.status, 200);
+  assert.deepEqual(memberState.payload.state.tenants.map((item) => item.id), ['tenant_demo']);
+  assert.equal(Object.hasOwn(memberState.payload.state, 'auditEvents'), false);
+});
+
+async function signedSessionGet(apiBaseUrl, token, pathname = '/api/state') {
+  const response = await fetch(`${apiBaseUrl}${pathname}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return {
+    payload: await parseJsonResponse(response),
+    status: response.status,
+  };
+}
+
+test('revoked signed API sessions are rejected on the next request', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-session-revoked-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  const env = { SIGNAL_REQUIRE_SIGNED_SESSION: 'true', SIGNAL_SESSION_SECRET: 'signal_test_session_secret_32chars!' };
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const issued = await issueSessionToken('usr_admin', { actorUserId: 'usr_admin', env, statePath });
+  api = await startApiForSecurityTest({ port, statePath, env });
+
+  assert.equal((await signedSessionGet(api.apiBaseUrl, issued.details.token)).status, 200);
+  await revokeSessionToken(issued.details.token, { actorUserId: 'usr_admin', statePath });
+
+  const revoked = await signedSessionGet(api.apiBaseUrl, issued.details.token);
+  assert.equal(revoked.status, 401);
+  assert.equal(revoked.payload.code, 'SESSION_REVOKED');
+});
+
+test('role changes revoke existing sessions before the next admin request', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-session-demotion-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  const env = { SIGNAL_REQUIRE_SIGNED_SESSION: 'true', SIGNAL_SESSION_SECRET: 'session-demotion-secret-32chars!' };
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const issued = await issueSessionToken('usr_admin', { actorUserId: 'usr_admin', env, statePath });
+  api = await startApiForSecurityTest({ port, statePath, env });
+  assert.equal((await signedSessionGet(api.apiBaseUrl, issued.details.token, '/api/backend')).status, 200);
+
+  const roleChange = await setUserRole('usr_admin', 'member', { actorUserId: 'usr_admin', statePath });
+  assert.equal(roleChange.details.revokedSessions, 1);
+
+  const demoted = await signedSessionGet(api.apiBaseUrl, issued.details.token, '/api/backend');
+  assert.equal(demoted.status, 401);
+  assert.equal(demoted.payload.code, 'SESSION_REVOKED');
+});
+
+test('disabling a user rejects all of their existing signed sessions', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-session-disabled-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  const env = { SIGNAL_REQUIRE_SIGNED_SESSION: 'true', SIGNAL_SESSION_SECRET: 'session-disabled-secret-32chars!' };
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const issued = await issueSessionToken('usr_sales', { actorUserId: 'usr_admin', env, statePath });
+  api = await startApiForSecurityTest({ port, statePath, env });
+  assert.equal((await signedSessionGet(api.apiBaseUrl, issued.details.token)).status, 200);
+
+  const disabled = await setUserStatus('usr_sales', 'disabled', { actorUserId: 'usr_admin', statePath });
+  assert.equal(disabled.details.revokedSessions, 1);
+
+  const rejected = await signedSessionGet(api.apiBaseUrl, issued.details.token);
+  assert.equal(rejected.status, 401);
+  assert.equal(rejected.payload.code, 'SESSION_REVOKED');
+});
+
+test('users.revoke-sessions revokes every active session for a user', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-user-revoke-sessions-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  const env = { SIGNAL_REQUIRE_SIGNED_SESSION: 'true', SIGNAL_SESSION_SECRET: 'session-revoke-all-secret-32chars!' };
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const first = await issueSessionToken('usr_sales', { actorUserId: 'usr_admin', env, statePath });
+  const second = await issueSessionToken('usr_sales', { actorUserId: 'usr_admin', env, statePath });
+  api = await startApiForSecurityTest({ port, statePath, env });
+  assert.equal((await signedSessionGet(api.apiBaseUrl, first.details.token)).status, 200);
+  assert.equal((await signedSessionGet(api.apiBaseUrl, second.details.token)).status, 200);
+
+  const revoked = await applyMutation('users.revoke-sessions', { userId: 'usr_sales' }, { actorUserId: 'usr_admin', statePath });
+  assert.equal(revoked.details.revokedSessions, 2);
+
+  for (const token of [first.details.token, second.details.token]) {
+    const response = await signedSessionGet(api.apiBaseUrl, token);
+    assert.equal(response.status, 401);
+    assert.equal(response.payload.code, 'SESSION_REVOKED');
+  }
+});
+
+test('local actor mode rejects unknown actors through API routes', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-local-actor-unknown-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: { SIGNAL_ALLOW_LOCAL_ACTOR: 'true' },
+  });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/state`, {
+    headers: { 'X-Signal-Actor': 'usr_missing' },
+  });
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 401);
+  assert.equal(payload.code, 'ACTOR_INVALID');
+});
+
+test('API rejects oversized JSON bodies before route mutation handling', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-body-limit-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: { SIGNAL_API_MAX_BODY_BYTES: '32' },
+  });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/registration`, {
+    body: JSON.stringify({ name: 'Oversized workspace name', domain: 'oversized.example', adminEmail: 'admin@example.test' }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 413);
+  assert.equal(payload.code, 'REQUEST_BODY_TOO_LARGE');
+});
+
+test('API rate limiter returns 429 with Retry-After and health is exempt', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-rate-limit-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: {
+      SIGNAL_API_UNAUTH_RATE_LIMIT_BURST: '1',
+      SIGNAL_API_UNAUTH_RATE_LIMIT_RPS: '0.01',
+    },
+  });
+
+  const body = JSON.stringify({ name: 'Rate Limit', domain: 'rate-limit.example', adminEmail: 'rate-limit@example.test' });
+  const first = await fetch(`${api.apiBaseUrl}/api/registration`, {
+    body,
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+  assert.notEqual(first.status, 429);
+
+  const second = await fetch(`${api.apiBaseUrl}/api/registration`, {
+    body,
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+  const payload = await parseJsonResponse(second);
+  assert.equal(second.status, 429);
+  assert.equal(payload.code, 'RATE_LIMITED');
+  assert.match(second.headers.get('retry-after') ?? '', /^\d+$/);
+
+  const health = await fetch(`${api.apiBaseUrl}/api/health`);
+  assert.equal(health.status, 200);
+});
 
 test('production OAuth callback route ignores spoofed X-Signal-Actor and uses SIGNAL_OAUTH_ACTOR', async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-oauth-actor-'));

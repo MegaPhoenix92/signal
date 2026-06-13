@@ -37,12 +37,61 @@ function requireEncryptionMaterial(env = process.env) {
   return value;
 }
 
-function deriveKey(env = process.env) {
-  return crypto.createHash('sha256').update(requireEncryptionMaterial(env), 'utf8').digest();
+function parseKeyring(env = process.env) {
+  const configured = env.SIGNAL_TOKEN_ENCRYPTION_KEYS;
+  if (!configured) {
+    const material = requireEncryptionMaterial(env);
+    return [{
+      digest: crypto.createHash('sha256').update(material, 'utf8').digest('hex').slice(0, 16),
+      id: 'v1',
+      key: crypto.createHash('sha256').update(material, 'utf8').digest(),
+      material,
+    }];
+  }
+  const keys = configured
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const separatorIndex = entry.indexOf(':');
+      if (separatorIndex <= 0 || separatorIndex === entry.length - 1) {
+        throw new TokenVaultError('SIGNAL_TOKEN_ENCRYPTION_KEYS entries must use <version>:<key> format.', {
+          code: 'TOKEN_VAULT_KEYRING_INVALID',
+          status: 412,
+        });
+      }
+      const id = entry.slice(0, separatorIndex).trim();
+      const material = entry.slice(separatorIndex + 1);
+      if (!/^[A-Za-z0-9_.-]{1,40}$/.test(id)) {
+        throw new TokenVaultError(`Invalid token vault key id: ${id}`, {
+          code: 'TOKEN_VAULT_KEY_ID_INVALID',
+          status: 412,
+          details: { id },
+        });
+      }
+      return {
+        digest: crypto.createHash('sha256').update(material, 'utf8').digest('hex').slice(0, 16),
+        id,
+        key: crypto.createHash('sha256').update(material, 'utf8').digest(),
+        material,
+      };
+    });
+  const ids = new Set(keys.map((key) => key.id));
+  if (keys.length === 0 || ids.size !== keys.length) {
+    throw new TokenVaultError('SIGNAL_TOKEN_ENCRYPTION_KEYS must include unique key ids.', {
+      code: 'TOKEN_VAULT_KEYRING_INVALID',
+      status: 412,
+    });
+  }
+  return keys;
+}
+
+function currentKey(env = process.env) {
+  return parseKeyring(env)[0];
 }
 
 function keyDigest(env = process.env) {
-  return crypto.createHash('sha256').update(requireEncryptionMaterial(env), 'utf8').digest('hex').slice(0, 16);
+  return currentKey(env).digest;
 }
 
 function credentialDigest(value) {
@@ -71,7 +120,8 @@ function isExpiredOrNearExpiry(expiresAt, { nowMs = Date.now(), skewMs = default
 
 function encryptJson(value, { env = process.env } = {}) {
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv(cipherAlgorithm, deriveKey(env), iv);
+  const key = currentKey(env);
+  const cipher = crypto.createCipheriv(cipherAlgorithm, key.key, iv);
   const plaintext = Buffer.from(JSON.stringify(value), 'utf8');
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const tag = cipher.getAuthTag();
@@ -80,20 +130,43 @@ function encryptJson(value, { env = process.env } = {}) {
     ciphertext: ciphertext.toString('base64url'),
     encryptedAt: nowIso(),
     iv: iv.toString('base64url'),
-    keyDigest: keyDigest(env),
+    keyDigest: key.digest,
+    keyId: key.id,
     tag: tag.toString('base64url'),
   };
 }
 
 export function decryptVaultPayload(encrypted, { env = process.env } = {}) {
+  const keyring = parseKeyring(env);
+  const candidates = encrypted?.keyId
+    ? keyring.filter((key) => key.id === encrypted.keyId)
+    : [
+      ...keyring.filter((key) => encrypted?.keyDigest && key.digest === encrypted.keyDigest),
+      ...keyring.filter((key) => !encrypted?.keyDigest || key.digest !== encrypted.keyDigest),
+    ];
+  if (candidates.length === 0) {
+    throw new TokenVaultError('Provider credential record references an unknown token vault key.', {
+      code: 'TOKEN_VAULT_KEY_NOT_FOUND',
+      status: 401,
+      details: { keyId: encrypted?.keyId ?? null },
+    });
+  }
+  let lastError = null;
+  for (const key of candidates) {
+    try {
+      const decipher = crypto.createDecipheriv(cipherAlgorithm, key.key, Buffer.from(encrypted.iv, 'base64url'));
+      decipher.setAuthTag(Buffer.from(encrypted.tag, 'base64url'));
+      const plaintext = Buffer.concat([
+        decipher.update(Buffer.from(encrypted.ciphertext, 'base64url')),
+        decipher.final(),
+      ]);
+      return JSON.parse(plaintext.toString('utf8'));
+    } catch (error) {
+      lastError = error;
+    }
+  }
   try {
-    const decipher = crypto.createDecipheriv(cipherAlgorithm, deriveKey(env), Buffer.from(encrypted.iv, 'base64url'));
-    decipher.setAuthTag(Buffer.from(encrypted.tag, 'base64url'));
-    const plaintext = Buffer.concat([
-      decipher.update(Buffer.from(encrypted.ciphertext, 'base64url')),
-      decipher.final(),
-    ]);
-    return JSON.parse(plaintext.toString('utf8'));
+    throw lastError;
   } catch (error) {
     throw new TokenVaultError('Unable to decrypt provider credential record.', {
       code: 'TOKEN_VAULT_DECRYPT_FAILED',
@@ -336,8 +409,65 @@ export async function listProviderCredentialRecords({ vaultPath = resolveTokenVa
       refreshAvailable: record.refreshAvailable,
       scopeCount: record.scopeCount,
       updatedAt: record.updatedAt,
-      keyMatches: env.SIGNAL_TOKEN_ENCRYPTION_KEY ? record.encrypted?.keyDigest === keyDigest(env) : null,
+      keyMatches: (env.SIGNAL_TOKEN_ENCRYPTION_KEY || env.SIGNAL_TOKEN_ENCRYPTION_KEYS) ? record.encrypted?.keyDigest === keyDigest(env) : null,
+      keyId: record.encrypted?.keyId ?? 'v1',
     })),
+  };
+}
+
+export async function verifyProviderCredentialVault({ vaultPath = resolveTokenVaultPath(), env = process.env } = {}) {
+  const resolvedVaultPath = resolveTokenVaultPath(vaultPath);
+  const vault = await readVault(resolvedVaultPath);
+  const results = [];
+  for (const record of vault.records ?? []) {
+    try {
+      decryptVaultPayload(record.encrypted, { env });
+      results.push({ id: record.id, keyId: record.encrypted?.keyId ?? 'v1', ok: true });
+    } catch (error) {
+      results.push({
+        error: error instanceof Error ? error.message : String(error),
+        id: record.id,
+        keyId: record.encrypted?.keyId ?? 'v1',
+        ok: false,
+      });
+    }
+  }
+  return {
+    ok: results.every((result) => result.ok),
+    path: resolvedVaultPath,
+    records: results,
+    summary: {
+      failed: results.filter((result) => !result.ok).length,
+      total: results.length,
+    },
+  };
+}
+
+export async function rotateProviderCredentialVault({ vaultPath = resolveTokenVaultPath(), env = process.env } = {}) {
+  const resolvedVaultPath = resolveTokenVaultPath(vaultPath);
+  const vault = await readVault(resolvedVaultPath);
+  const targetKey = currentKey(env);
+  let rotated = 0;
+  vault.records = await Promise.all((vault.records ?? []).map(async (record) => {
+    const payload = decryptVaultPayload(record.encrypted, { env });
+    if (record.encrypted?.keyId === targetKey.id && record.encrypted?.keyDigest === targetKey.digest) {
+      return record;
+    }
+    rotated += 1;
+    return {
+      ...record,
+      encrypted: encryptJson(payload, { env }),
+      rotatedAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+  }));
+  await writeVault(resolvedVaultPath, vault);
+  return {
+    ok: true,
+    path: resolvedVaultPath,
+    rotated,
+    targetKeyId: targetKey.id,
+    total: vault.records.length,
   };
 }
 

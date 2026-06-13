@@ -1,0 +1,88 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: signal
+      POSTGRES_PASSWORD: signal_dev_password
+      POSTGRES_USER: signal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signal -d signal"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - signal-postgres:/var/lib/postgresql/data
+
+  state-service:
+    build:
+      context: .
+      target: state-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SIGNAL_STATE_SERVICE_BACKEND: postgres
+      SIGNAL_STATE_SERVICE_DATABASE_URL: postgres://signal:signal_dev_password@postgres:5432/signal
+      SIGNAL_STATE_SERVICE_HOST: 0.0.0.0
+      SIGNAL_STATE_SERVICE_MIGRATE: "true"
+      SIGNAL_STATE_SERVICE_RLS: "true"
+      SIGNAL_STATE_SERVICE_TOKEN: local-state-service-token
+      SIGNAL_TENANT_ISOLATION_MODE: rls
+    ports:
+      - "8791:8791"
+
+  api:
+    build:
+      context: .
+      target: api
+    depends_on:
+      state-service:
+        condition: service_started
+    environment:
+      SIGNAL_ADMIN_STATE: http://state-service:8791/state
+      SIGNAL_ALLOW_LOCAL_ACTOR: "true"
+      SIGNAL_API_CORS_ORIGINS: http://localhost:8080
+      SIGNAL_API_HOST: 0.0.0.0
+      SIGNAL_BACKEND_MODE: external-service
+      SIGNAL_OAUTH_STATE_KEY: local-oauth-state-key
+      SIGNAL_STATE_SERVICE_TOKEN: local-state-service-token
+      SIGNAL_STATE_SERVICE_URL: http://state-service:8791/state
+    ports:
+      - "8787:8787"
+
+  scheduler:
+    build:
+      context: .
+      target: scheduler
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://signal:signal_dev_password@postgres:5432/signal
+      SIGNAL_ADMIN_ACTOR: usr_admin
+      SIGNAL_ADMIN_STATE: http://state-service:8791/state
+      SIGNAL_PROVIDER_VALIDATION_SCHEDULER: signal-scheduler
+      SIGNAL_SCHEDULER_INTERVAL_MS: "60000"
+      SIGNAL_SCHEDULER_LOCK_BACKEND: postgres
+      SIGNAL_STATE_SERVICE_BACKEND: postgres
+      SIGNAL_STATE_SERVICE_TOKEN: local-state-service-token
+
+  frontend:
+    build:
+      args:
+        VITE_SIGNAL_API_URL: http://localhost:8787
+      context: .
+      target: frontend
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      SIGNAL_FRONTEND_HOST: 0.0.0.0
+      SIGNAL_FRONTEND_PORT: "8080"
+    ports:
+      - "8080:8080"
+
+volumes:
+  signal-postgres:

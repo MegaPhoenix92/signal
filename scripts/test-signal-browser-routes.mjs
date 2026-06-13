@@ -37,21 +37,46 @@ function sleep(ms) {
 }
 
 async function stopProcess(child) {
-  if (!child || child.exitCode !== null) {
+  if (!child) {
     return;
   }
-  child.kill('SIGTERM');
+  const closeStreams = () => {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.stdin?.destroy();
+  };
+  if (child.exitCode !== null) {
+    closeStreams();
+    return;
+  }
+  const kill = (signal) => {
+    try {
+      if (child.pid && process.platform !== 'win32') {
+        process.kill(-child.pid, signal);
+        return;
+      }
+    } catch {
+      // Fall back to killing only the direct child below.
+    }
+    child.kill(signal);
+  };
+  kill('SIGTERM');
   await Promise.race([
     new Promise((resolve) => child.once('close', resolve)),
     sleep(2000),
   ]);
   if (child.exitCode === null) {
-    child.kill('SIGKILL');
+    kill('SIGKILL');
+    await Promise.race([
+      new Promise((resolve) => child.once('close', resolve)),
+      sleep(2000),
+    ]);
   }
+  closeStreams();
 }
 
-async function waitForHttp(url, output, label) {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+async function waitForHttp(url, output, label, { attempts = 80 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(500) });
       if (response.ok) {
@@ -86,6 +111,7 @@ async function startApi({ apiPort, statePath }) {
       SIGNAL_API_HOST: '127.0.0.1',
       SIGNAL_API_PORT: String(apiPort),
     },
+    detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const output = processOutputCollector(child);
@@ -100,6 +126,7 @@ async function startVite({ apiPort, webPort }) {
       ...process.env,
       VITE_SIGNAL_API_URL: `http://127.0.0.1:${apiPort}`,
     },
+    detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const output = processOutputCollector(child);
@@ -131,22 +158,30 @@ async function chromeExecutable() {
 
 async function startChrome({ cdpPort, profileDir }) {
   const executable = await chromeExecutable();
-  const child = spawn(executable, [
+  const args = [
     '--headless=new',
     '--disable-background-networking',
+    '--disable-crash-reporter',
     '--disable-extensions',
     '--disable-gpu',
+    '--disable-dev-shm-usage',
     '--no-default-browser-check',
     '--no-first-run',
     '--remote-allow-origins=*',
+    '--remote-debugging-address=127.0.0.1',
     `--remote-debugging-port=${cdpPort}`,
     `--user-data-dir=${profileDir}`,
     'about:blank',
-  ], {
+  ];
+  if (process.env.SIGNAL_CHROME_NO_SANDBOX === 'true') {
+    args.splice(1, 0, '--no-sandbox');
+  }
+  const child = spawn(executable, args, {
+    detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const output = processOutputCollector(child);
-  await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, output, 'Headless Chrome CDP');
+  await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, output, 'Headless Chrome CDP', { attempts: 250 });
   return { child, output };
 }
 
@@ -211,8 +246,21 @@ class CdpClient {
     });
   }
 
-  close() {
-    this.ws.close();
+  async close() {
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+      return;
+    }
+    for (const waiter of this.waiters) {
+      clearTimeout(waiter.timer);
+    }
+    this.waiters = [];
+    if (this.ws.readyState !== WebSocket.CLOSED && this.ws.readyState !== WebSocket.CLOSING) {
+      this.ws.close();
+    }
+    await Promise.race([
+      new Promise((resolve) => this.ws.addEventListener('close', resolve, { once: true })),
+      sleep(1000),
+    ]);
   }
 
   clearEvents() {
@@ -301,7 +349,7 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   let client = null;
 
   t.after(async () => {
-    client?.close();
+    await client?.close();
     await stopProcess(chrome?.child);
     await stopProcess(web?.child);
     await stopProcess(api?.child);
@@ -321,6 +369,37 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assert.equal(publicRoute.snapshot.errorOverlay, false);
   assertTextIncludes(publicRoute.text, 'Create workspace', 'public route should expose the registration CTA');
   assertTextIncludes(publicRoute.text, 'Gmail + Outlook', 'public route should describe supported inbox sources');
+
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  const mobileNav = await evaluate(client, `(async () => {
+    const button = document.querySelector('.mobile-nav-toggle');
+    if (!button) {
+      throw new Error('Mobile navigation toggle missing');
+    }
+    button.click();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const panel = document.querySelector('#mobile-nav-menu');
+    const open = {
+      ariaExpanded: button.getAttribute('aria-expanded'),
+      buttonDisplay: getComputedStyle(button).display,
+      hidden: panel?.hidden,
+      text: panel?.innerText ?? '',
+    };
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return {
+      open,
+      closedExpanded: button.getAttribute('aria-expanded'),
+      closedHidden: panel?.hidden,
+    };
+  })()`);
+  assert.notEqual(mobileNav.open.buttonDisplay, 'none', 'mobile navigation toggle should be visible at narrow widths');
+  assert.equal(mobileNav.open.ariaExpanded, 'true', 'mobile navigation should report expanded after toggle');
+  assert.equal(mobileNav.open.hidden, false, 'mobile navigation panel should open from hamburger');
+  assertTextIncludes(mobileNav.open.text, 'Admin', 'mobile navigation should include app area links');
+  assert.equal(mobileNav.closedExpanded, 'false', 'Escape should close the mobile navigation');
+  assert.equal(mobileNav.closedHidden, true, 'Escape should hide the mobile navigation panel');
+  await client.send('Emulation.clearDeviceMetricsOverride');
 
   const registerRoute = await navigate(client, `${baseUrl}#register`, 'Create the workspace before the dashboard.');
   assert.equal(registerRoute.snapshot.hash, '#register');
@@ -370,6 +449,29 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assert.equal(adminRoute.snapshot.errorOverlay, false);
   assertTextIncludes(adminRoute.text, 'Readiness checks', 'admin overview should render readiness checks');
   assertTextIncludes(adminRoute.text, 'Admin console', 'admin route should render the admin console heading');
+
+  const adminOverviewRoute = await navigate(client, `${baseUrl}#admin/overview`, 'Readiness checks');
+  assert.equal(adminOverviewRoute.snapshot.hash, '#admin/overview');
+  assertTextIncludes(adminOverviewRoute.text, 'Admin console', 'admin overview deep link should render overview tab content');
+
+  const adminOpsRoute = await navigate(client, `${baseUrl}#admin/ops`, 'Webhook and rate-limit health');
+  assert.equal(adminOpsRoute.snapshot.hash, '#admin/ops');
+  assertTextIncludes(adminOpsRoute.text, 'API session registry', 'admin operations deep link should render operations tab content');
+
+  const adminPaymentsRoute = await navigate(client, `${baseUrl}#admin/payments`, 'Billing overrides');
+  assert.equal(adminPaymentsRoute.snapshot.hash, '#admin/payments');
+  assertTextIncludes(adminPaymentsRoute.text, 'Payment lifecycle audit', 'admin payments deep link should render payments tab content');
+
+  await evaluate(client, 'history.back()');
+  const backText = await waitForText(client, 'Webhook and rate-limit health');
+  const backHash = await evaluate(client, 'window.location.hash');
+  assert.equal(backHash, '#admin/ops');
+  assertTextIncludes(backText, 'API session registry', 'admin back button should restore operations tab');
+
+  const unknownAdminRoute = await navigate(client, `${baseUrl}#admin/not-a-tab`, 'Readiness checks');
+  assert.equal(unknownAdminRoute.snapshot.hash, '#admin/not-a-tab');
+  assertTextIncludes(unknownAdminRoute.text, 'Admin console', 'unknown admin tab should fall back to overview content');
+
   await evaluate(client, `(() => {
     const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Users'));
     if (!button) {

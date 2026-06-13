@@ -16,7 +16,7 @@ export type BillingSessionType = 'checkout' | 'portal' | 'payment_recovery';
 export type BillingOverrideType = 'beta_access' | 'support_credit' | 'manual_entitlement' | 'manual_suspension';
 export type BillingOverrideStatus = 'active' | 'revoked' | 'expired';
 export type InvoiceStatus = 'draft' | 'open' | 'paid' | 'past_due' | 'void' | 'uncollectible';
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'drained';
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'drained' | 'dead-letter';
 export type MailboxProvider = 'gmail' | 'outlook';
 export type ConnectionSessionStatus = 'ready' | 'completed' | 'expired';
 export type SyncCursorStatus = 'active' | 'blocked';
@@ -54,6 +54,7 @@ export type User = {
   name: string;
   email: string;
   role: UserRole;
+  platformRole?: 'operator' | null;
   team?: string;
   status: string;
 };
@@ -115,11 +116,13 @@ export type Mailbox = {
   ownerUserId: string;
   provider: MailboxProvider;
   status: MailboxStatus;
+  createdAt?: string | null;
   credentialDigest?: string | null;
   credentialExpiresAt?: string | null;
   credentialStatus?: 'stored' | 'local_only' | 'expired' | 'revoked';
   credentialStoredAt?: string | null;
   credentialVaultRef?: string | null;
+  updatedAt?: string | null;
   selectedScopes: string[];
   syncPolicy: {
     labels?: string[];
@@ -781,6 +784,8 @@ export type LifecycleNotice = {
 
 export type Job = {
   id: string;
+  deadLetterId?: string;
+  originalJobId?: string;
   tenantId: string;
   queue: string;
   type: string;
@@ -813,6 +818,16 @@ export type AuditEvent = {
   message: string;
   createdAt: string;
   actor: string;
+};
+
+export type WebhookIngestEvent = {
+  id: string;
+  provider: 'stripe' | 'email' | 'gmail' | 'outlook' | string;
+  eventType: string;
+  accepted: boolean;
+  reason?: string | null;
+  receivedAt: string;
+  status?: number | null;
 };
 
 export type ProviderEnvStatus = {
@@ -1037,7 +1052,9 @@ export type SignalAppData = {
   paymentEvents: PaymentEvent[];
   lifecycleNotices?: LifecycleNotice[];
   jobs: Job[];
+  deadLetter?: Job[];
   auditEvents?: AuditEvent[];
+  webhookEvents?: WebhookIngestEvent[];
 };
 
 export type DoctorCheck = {
@@ -1151,9 +1168,11 @@ export type StateSummary = {
 export type SignalMutationAction =
   | 'session.token'
   | 'session.revoke'
+  | 'users.revoke-sessions'
   | 'tenants.create'
   | 'tenants.onboarding-complete'
   | 'tenants.status'
+  | 'tenants.status-bulk'
   | 'tenants.domain'
   | 'users.role'
   | 'users.disable'
@@ -1216,6 +1235,8 @@ export type SignalMutationAction =
   | 'payments.webhook'
   | 'jobs.run'
   | 'jobs.retry'
+  | 'jobs.requeue'
+  | 'jobs.requeue-bulk'
   | 'jobs.drain';
 
 export type SignalMutationResult = {
@@ -1492,11 +1513,13 @@ export type OperationsWebhookHealth = {
   latestAt?: string | null;
   localOk: boolean;
   path: string;
+  rejected?: number;
   status: string;
 };
 
 export type OperationsQueueHealth = {
   queue: string;
+  deadLetter?: number;
   drained: number;
   failed: number;
   latestAt?: string | null;
@@ -2635,6 +2658,14 @@ function withFallbackModelGovernancePolicies(data: SignalAppData): SignalAppData
 export const fallbackSignalData = withFallbackModelGovernancePolicies(signalData);
 export const localApiUrl = import.meta.env.VITE_SIGNAL_API_URL ?? 'http://127.0.0.1:8787';
 const localApiCredentials: RequestCredentials = 'include';
+const localApiActorUserId = import.meta.env.VITE_SIGNAL_LOCAL_ACTOR ?? 'usr_admin';
+
+function localActorHeaders(extra: Record<string, string> = {}) {
+  return {
+    'X-Signal-Actor': localApiActorUserId,
+    ...extra,
+  };
+}
 
 const fallbackProviderRequirements = [
   {
@@ -7435,7 +7466,7 @@ export function fallbackStateResponse(): SignalStateResponse {
 }
 
 export async function fetchSignalState(signal?: AbortSignal): Promise<SignalStateResponse> {
-  const response = await fetch(`${localApiUrl}/api/state`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/state`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal API returned ${response.status}`);
   }
@@ -7443,7 +7474,7 @@ export async function fetchSignalState(signal?: AbortSignal): Promise<SignalStat
 }
 
 export async function fetchProviderReadiness(signal?: AbortSignal): Promise<ProviderReadinessResponse> {
-  const response = await fetch(`${localApiUrl}/api/integrations`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/integrations`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal integrations API returned ${response.status}`);
   }
@@ -7451,7 +7482,7 @@ export async function fetchProviderReadiness(signal?: AbortSignal): Promise<Prov
 }
 
 export async function fetchDashboardAudit(signal?: AbortSignal): Promise<DashboardAuditResponse> {
-  const response = await fetch(`${localApiUrl}/api/dashboard-audit`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/dashboard-audit`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal dashboard audit API returned ${response.status}`);
   }
@@ -7459,7 +7490,7 @@ export async function fetchDashboardAudit(signal?: AbortSignal): Promise<Dashboa
 }
 
 export async function fetchSignalDigestionPipeline(signal?: AbortSignal): Promise<SignalDigestionPipelineResponse> {
-  const response = await fetch(`${localApiUrl}/api/digestion-pipeline`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/digestion-pipeline`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal digestion pipeline API returned ${response.status}`);
   }
@@ -7467,7 +7498,7 @@ export async function fetchSignalDigestionPipeline(signal?: AbortSignal): Promis
 }
 
 export async function fetchOnboardingReadiness(signal?: AbortSignal): Promise<OnboardingReadinessResponse> {
-  const response = await fetch(`${localApiUrl}/api/onboarding-readiness`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/onboarding-readiness`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal onboarding readiness API returned ${response.status}`);
   }
@@ -7475,7 +7506,7 @@ export async function fetchOnboardingReadiness(signal?: AbortSignal): Promise<On
 }
 
 export async function fetchTenantIsolation(signal?: AbortSignal): Promise<TenantIsolationAuditResponse> {
-  const response = await fetch(`${localApiUrl}/api/tenant-isolation`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/tenant-isolation`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal tenant isolation API returned ${response.status}`);
   }
@@ -7483,7 +7514,7 @@ export async function fetchTenantIsolation(signal?: AbortSignal): Promise<Tenant
 }
 
 export async function fetchOperationsHealth(signal?: AbortSignal): Promise<OperationsHealthResponse> {
-  const response = await fetch(`${localApiUrl}/api/operations-health`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/operations-health`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal operations health API returned ${response.status}`);
   }
@@ -7491,7 +7522,7 @@ export async function fetchOperationsHealth(signal?: AbortSignal): Promise<Opera
 }
 
 export async function fetchProductionDrill(signal?: AbortSignal): Promise<ProductionDrillResponse> {
-  const response = await fetch(`${localApiUrl}/api/production-drill`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/production-drill`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal production drill API returned ${response.status}`);
   }
@@ -7499,7 +7530,7 @@ export async function fetchProductionDrill(signal?: AbortSignal): Promise<Produc
 }
 
 export async function fetchProviderLaunch(signal?: AbortSignal): Promise<ProviderLaunchResponse> {
-  const response = await fetch(`${localApiUrl}/api/provider-launch`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/provider-launch`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal provider launch API returned ${response.status}`);
   }
@@ -7507,7 +7538,7 @@ export async function fetchProviderLaunch(signal?: AbortSignal): Promise<Provide
 }
 
 export async function fetchProviderHandoff(signal?: AbortSignal): Promise<ProviderHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/provider-handoff`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/provider-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal provider handoff API returned ${response.status}`);
   }
@@ -7515,7 +7546,7 @@ export async function fetchProviderHandoff(signal?: AbortSignal): Promise<Provid
 }
 
 export async function fetchBackendCutover(signal?: AbortSignal): Promise<BackendCutoverResponse> {
-  const response = await fetch(`${localApiUrl}/api/backend-cutover`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/backend-cutover`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal backend cutover API returned ${response.status}`);
   }
@@ -7523,7 +7554,7 @@ export async function fetchBackendCutover(signal?: AbortSignal): Promise<Backend
 }
 
 export async function fetchSchedulerHandoff(signal?: AbortSignal): Promise<SchedulerHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/scheduler-handoff`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/scheduler-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal scheduler handoff API returned ${response.status}`);
   }
@@ -7531,7 +7562,7 @@ export async function fetchSchedulerHandoff(signal?: AbortSignal): Promise<Sched
 }
 
 export async function fetchProductionPlan(signal?: AbortSignal): Promise<ProductionPlanResponse> {
-  const response = await fetch(`${localApiUrl}/api/production-plan`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/production-plan`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal production plan API returned ${response.status}`);
   }
@@ -7539,7 +7570,7 @@ export async function fetchProductionPlan(signal?: AbortSignal): Promise<Product
 }
 
 export async function fetchProductionEnv(signal?: AbortSignal): Promise<ProductionEnvResponse> {
-  const response = await fetch(`${localApiUrl}/api/production-env`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/production-env`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal production env API returned ${response.status}`);
   }
@@ -7547,7 +7578,7 @@ export async function fetchProductionEnv(signal?: AbortSignal): Promise<Producti
 }
 
 export async function fetchLifecyclePlaybook(signal?: AbortSignal): Promise<LifecyclePlaybookResponse> {
-  const response = await fetch(`${localApiUrl}/api/lifecycle-playbook`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/lifecycle-playbook`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal lifecycle playbook API returned ${response.status}`);
   }
@@ -7555,7 +7586,7 @@ export async function fetchLifecyclePlaybook(signal?: AbortSignal): Promise<Life
 }
 
 export async function fetchPaymentLifecycle(signal?: AbortSignal): Promise<PaymentLifecycleAuditResponse> {
-  const response = await fetch(`${localApiUrl}/api/payment-lifecycle`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/payment-lifecycle`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal payment lifecycle API returned ${response.status}`);
   }
@@ -7563,7 +7594,7 @@ export async function fetchPaymentLifecycle(signal?: AbortSignal): Promise<Payme
 }
 
 export async function fetchPaymentHandoff(signal?: AbortSignal): Promise<PaymentHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/payment-handoff`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/payment-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal payment handoff API returned ${response.status}`);
   }
@@ -7571,7 +7602,7 @@ export async function fetchPaymentHandoff(signal?: AbortSignal): Promise<Payment
 }
 
 export async function fetchEmailHandoff(signal?: AbortSignal): Promise<EmailHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/email-handoff`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/email-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal email handoff API returned ${response.status}`);
   }
@@ -7579,7 +7610,7 @@ export async function fetchEmailHandoff(signal?: AbortSignal): Promise<EmailHand
 }
 
 export async function fetchQaAnswers(signal?: AbortSignal): Promise<QaAnswersResponse> {
-  const response = await fetch(`${localApiUrl}/api/qa-answers`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/qa-answers`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal QA answers API returned ${response.status}`);
   }
@@ -7587,7 +7618,7 @@ export async function fetchQaAnswers(signal?: AbortSignal): Promise<QaAnswersRes
 }
 
 export async function fetchCompletionAudit(signal?: AbortSignal): Promise<CompletionAuditResponse> {
-  const response = await fetch(`${localApiUrl}/api/completion-audit`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/completion-audit`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal completion audit API returned ${response.status}`);
   }
@@ -7595,7 +7626,7 @@ export async function fetchCompletionAudit(signal?: AbortSignal): Promise<Comple
 }
 
 export async function fetchAgentHandoff(signal?: AbortSignal): Promise<LocalAgentHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/agent-handoff`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/agent-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal agent handoff API returned ${response.status}`);
   }
@@ -7603,7 +7634,7 @@ export async function fetchAgentHandoff(signal?: AbortSignal): Promise<LocalAgen
 }
 
 export async function fetchBackendHandoff(signal?: AbortSignal): Promise<BackendHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/backend-handoff`, { credentials: localApiCredentials, signal });
+  const response = await fetch(`${localApiUrl}/api/backend-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Signal backend handoff API returned ${response.status}`);
   }
@@ -7611,7 +7642,7 @@ export async function fetchBackendHandoff(signal?: AbortSignal): Promise<Backend
 }
 
 export async function fetchProviderSandbox(signal?: AbortSignal): Promise<ProviderSandboxResponse> {
-  const response = await fetch(`${localApiUrl}/api/integrations/sandbox`, { credentials: localApiCredentials, method: 'POST', signal });
+  const response = await fetch(`${localApiUrl}/api/integrations/sandbox`, { credentials: localApiCredentials, headers: localActorHeaders(), method: 'POST', signal });
   if (!response.ok) {
     throw new Error(`Signal sandbox validation API returned ${response.status}`);
   }
@@ -7644,6 +7675,7 @@ export async function mutateSignalState(action: SignalMutationAction, args: Reco
     body: JSON.stringify({ action, actorUserId, args }),
     credentials: localApiCredentials,
     headers: {
+      'X-Signal-Actor': actorUserId ?? localApiActorUserId,
       'Content-Type': 'application/json',
     },
     method: 'POST',
@@ -7662,6 +7694,7 @@ export async function registerSignalWorkspace(args: Record<string, unknown>): Pr
     body: JSON.stringify(args),
     credentials: localApiCredentials,
     headers: {
+      ...localActorHeaders(),
       'Content-Type': 'application/json',
     },
     method: 'POST',
@@ -7680,6 +7713,7 @@ export async function claimSignalInvite(args: Record<string, unknown>): Promise<
     body: JSON.stringify(args),
     credentials: localApiCredentials,
     headers: {
+      ...localActorHeaders(),
       'Content-Type': 'application/json',
     },
     method: 'POST',

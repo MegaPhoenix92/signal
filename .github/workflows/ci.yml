@@ -1,13 +1,13 @@
 name: CI
 
 on:
+  pull_request:
   push:
     branches:
       - main
-  pull_request:
 
 jobs:
-  test:
+  build-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,6 +15,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm run build
-      - run: npm run test:local
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Chromium
+        run: sudo apt-get update && sudo apt-get install -y chromium
+      - name: Build
+        run: npm run build
+      - name: Test
+        env:
+          SIGNAL_CHROME_BIN: /usr/bin/chromium
+          SIGNAL_CHROME_NO_SANDBOX: "true"
+        run: npm run test:local

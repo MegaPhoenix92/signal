@@ -5,6 +5,9 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  createLogger,
+} from './signal-logger.mjs';
 
 export const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const allowedBackends = ['file', 'postgres'];
@@ -27,9 +30,14 @@ export function createStateServiceConfig(env = process.env) {
   const stateFile = path.resolve(env.SIGNAL_STATE_SERVICE_FILE ?? path.join(rootDir, 'data', 'signal-state-service.json'));
   const backupDir = path.resolve(env.SIGNAL_STATE_SERVICE_BACKUP_DIR ?? path.join(path.dirname(stateFile), 'signal-state-service-backups'));
   const databaseUrl = env.SIGNAL_STATE_SERVICE_DATABASE_URL ?? env.DATABASE_URL ?? '';
+  const migrationsDir = path.resolve(env.SIGNAL_STATE_SERVICE_MIGRATIONS_DIR ?? path.join(rootDir, 'scripts', 'migrations'));
+  const migrationTable = env.SIGNAL_STATE_SERVICE_MIGRATION_TABLE ?? 'signal_schema_migrations';
   const tablePrefix = env.SIGNAL_STATE_SERVICE_TABLE_PREFIX ?? 'signal_state';
   const stateId = env.SIGNAL_STATE_SERVICE_STATE_ID ?? 'default';
   const migrate = env.SIGNAL_STATE_SERVICE_MIGRATE !== 'false';
+  const rls = env.SIGNAL_STATE_SERVICE_RLS === 'true'
+    || env.SIGNAL_STATE_SERVICE_ENABLE_RLS === 'true'
+    || env.SIGNAL_TENANT_ISOLATION_MODE === 'rls';
 
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     throw new Error(`Invalid SIGNAL_STATE_SERVICE_PORT: ${env.SIGNAL_STATE_SERVICE_PORT}`);
@@ -42,6 +50,9 @@ export function createStateServiceConfig(env = process.env) {
   }
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(tablePrefix)) {
     throw new Error('SIGNAL_STATE_SERVICE_TABLE_PREFIX must be a safe SQL identifier prefix.');
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(migrationTable)) {
+    throw new Error('SIGNAL_STATE_SERVICE_MIGRATION_TABLE must be a safe SQL identifier.');
   }
   if (!stateId || stateId.length > 120) {
     throw new Error('SIGNAL_STATE_SERVICE_STATE_ID must be between 1 and 120 characters.');
@@ -58,7 +69,10 @@ export function createStateServiceConfig(env = process.env) {
     databaseUrl,
     host,
     migrate,
+    migrationsDir,
+    migrationTable,
     port,
+    rls,
     stateFile,
     stateId,
     stateTable: `${tablePrefix}_current`,
@@ -162,6 +176,183 @@ function quoteIdentifier(identifier) {
     throw new Error(`Unsafe SQL identifier: ${identifier}`);
   }
   return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function migrationVersionFromFile(name) {
+  const match = name.match(/^(\d+)-([A-Za-z0-9_-]+)\.sql$/);
+  if (!match) {
+    return null;
+  }
+  return {
+    version: Number(match[1]),
+    name: match[2],
+  };
+}
+
+function splitSqlStatements(sql) {
+  return sql
+    .split(/;\s*(?:\n|$)/)
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+}
+
+async function loadMigrationFiles(config) {
+  const entries = await fs.readdir(config.migrationsDir);
+  const migrations = [];
+  for (const entry of entries) {
+    const parsed = migrationVersionFromFile(entry);
+    if (!parsed) {
+      continue;
+    }
+    const rawSql = await fs.readFile(path.join(config.migrationsDir, entry), 'utf8');
+    const sql = rawSql
+      .replaceAll('{{STATE_TABLE}}', quoteIdentifier(config.stateTable))
+      .replaceAll('{{BACKUP_TABLE}}', quoteIdentifier(config.backupTable))
+      .replaceAll('{{BACKUP_INDEX}}', quoteIdentifier(`${config.backupTable}_state_idx`));
+    migrations.push({
+      ...parsed,
+      checksum: digest(rawSql),
+      file: entry,
+      sql,
+    });
+  }
+  return migrations.sort((left, right) => left.version - right.version);
+}
+
+async function migrationTableExists(config, pool) {
+  const result = await pool.query('SELECT to_regclass($1) AS regclass', [config.migrationTable]);
+  return Boolean(result.rows?.[0]?.regclass);
+}
+
+async function ensureMigrationTable(config, pool) {
+  const migrationTable = quoteIdentifier(config.migrationTable);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ${migrationTable} (
+      version integer PRIMARY KEY,
+      name text NOT NULL,
+      applied_at timestamptz NOT NULL DEFAULT now(),
+      checksum text NOT NULL
+    )
+  `);
+}
+
+async function appliedMigrations(config, pool) {
+  if (!(await migrationTableExists(config, pool))) {
+    return [];
+  }
+  const result = await pool.query(`
+    SELECT version, name, checksum, applied_at
+    FROM ${quoteIdentifier(config.migrationTable)}
+    ORDER BY version
+  `);
+  return result.rows ?? [];
+}
+
+export async function postgresMigrationStatus(config, pool) {
+  const files = await loadMigrationFiles(config);
+  const applied = await appliedMigrations(config, pool);
+  const appliedByVersion = new Map(applied.map((row) => [Number(row.version), row]));
+  const rows = files.map((file) => {
+    const row = appliedByVersion.get(file.version);
+    return {
+      version: file.version,
+      name: file.name,
+      checksum: file.checksum,
+      appliedAt: timestamp(row?.applied_at),
+      appliedChecksum: row?.checksum ?? null,
+      status: row ? (row.checksum === file.checksum ? 'applied' : 'checksum_mismatch') : 'pending',
+    };
+  });
+  return {
+    applied: rows.filter((row) => row.status === 'applied').length,
+    pending: rows.filter((row) => row.status === 'pending').length,
+    ok: rows.every((row) => row.status === 'applied'),
+    rows,
+  };
+}
+
+async function runPostgresMigrations(config, pool, { migrate }) {
+  const files = await loadMigrationFiles(config);
+  if (migrate) {
+    await ensureMigrationTable(config, pool);
+  }
+  const applied = await appliedMigrations(config, pool);
+  const appliedByVersion = new Map(applied.map((row) => [Number(row.version), row]));
+  for (const file of files) {
+    const row = appliedByVersion.get(file.version);
+    if (row && row.checksum !== file.checksum) {
+      throw new StateServiceError(`Applied migration checksum changed for ${file.file}.`, {
+        code: 'STATE_SERVICE_MIGRATION_CHECKSUM_CHANGED',
+        status: 500,
+      });
+    }
+  }
+  const pending = files.filter((file) => !appliedByVersion.has(file.version));
+  if (!migrate && pending.length > 0) {
+    throw new StateServiceError(`Postgres state schema has ${pending.length} pending migration(s). Set SIGNAL_STATE_SERVICE_MIGRATE=true before startup.`, {
+      code: 'STATE_SERVICE_MIGRATIONS_PENDING',
+      status: 503,
+    });
+  }
+  for (const file of pending) {
+    await pool.query('BEGIN');
+    try {
+      for (const statement of splitSqlStatements(file.sql)) {
+        await pool.query(statement);
+      }
+      await pool.query(
+        `INSERT INTO ${quoteIdentifier(config.migrationTable)} (version, name, checksum) VALUES ($1, $2, $3)`,
+        [file.version, file.name, file.checksum],
+      );
+      await pool.query('COMMIT');
+    } catch (error) {
+      await pool.query('ROLLBACK').catch(() => {});
+      throw error;
+    }
+  }
+  return postgresMigrationStatus(config, pool);
+}
+
+function rlsPolicyName(tableName) {
+  return `${tableName}_service_role_policy`;
+}
+
+export async function verifyPostgresRlsPolicies(config, pool) {
+  const tableNames = [config.stateTable, config.backupTable];
+  const policyRows = await pool.query(
+    `SELECT tablename, policyname
+     FROM pg_policies
+     WHERE tablename = ANY($1)`,
+    [tableNames],
+  );
+  const rlsRows = await pool.query(
+    `SELECT relname, relrowsecurity
+     FROM pg_class
+     WHERE relname = ANY($1)`,
+    [tableNames],
+  );
+  const policiesByTable = new Map();
+  for (const row of policyRows.rows ?? []) {
+    if (!policiesByTable.has(row.tablename)) {
+      policiesByTable.set(row.tablename, []);
+    }
+    policiesByTable.get(row.tablename).push(row.policyname);
+  }
+  const rlsByTable = new Map((rlsRows.rows ?? []).map((row) => [row.relname, Boolean(row.relrowsecurity)]));
+  const tables = tableNames.map((tableName) => {
+    const policies = policiesByTable.get(tableName) ?? [];
+    return {
+      table: tableName,
+      rlsEnabled: rlsByTable.get(tableName) === true,
+      policies,
+      policyCount: policies.length,
+    };
+  });
+  const ok = tables.every((table) => table.rlsEnabled && table.policyCount > 0);
+  return {
+    ok,
+    tables,
+  };
 }
 
 function serializePgBody(value) {
@@ -274,35 +465,42 @@ export class PostgresStateStore {
     this.pool = pool;
     this.stateTable = quoteIdentifier(config.stateTable);
     this.backupTable = quoteIdentifier(config.backupTable);
+    this.rlsStatus = null;
+    this.migrationsStatus = null;
   }
 
   async init() {
-    if (!this.config.migrate) {
-      return;
+    this.migrationsStatus = await runPostgresMigrations(this.config, this.pool, { migrate: this.config.migrate });
+    if (this.config.rls) {
+      if (this.config.migrate) {
+        await this.applyRlsPolicies();
+      }
+      this.rlsStatus = await verifyPostgresRlsPolicies(this.config, this.pool);
+      if (!this.rlsStatus.ok) {
+        throw new StateServiceError('Postgres RLS mode is enabled, but state-service RLS policies are not installed for every state table.', {
+          code: 'STATE_SERVICE_RLS_NOT_VERIFIED',
+          status: 500,
+        });
+      }
     }
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS ${this.stateTable} (
-        id text PRIMARY KEY,
-        body jsonb NOT NULL,
-        revision integer NOT NULL DEFAULT 1,
-        body_digest text NOT NULL,
-        updated_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS ${this.backupTable} (
-        backup_id bigserial PRIMARY KEY,
-        state_id text NOT NULL,
-        revision integer NOT NULL,
-        body jsonb NOT NULL,
-        body_digest text NOT NULL,
-        backed_up_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-    await this.pool.query(`
-      CREATE INDEX IF NOT EXISTS ${quoteIdentifier(`${this.config.backupTable}_state_idx`)}
-      ON ${this.backupTable} (state_id, revision)
-    `);
+  }
+
+  async applyRlsPolicies() {
+    for (const [tableName, quotedTable] of [
+      [this.config.stateTable, this.stateTable],
+      [this.config.backupTable, this.backupTable],
+    ]) {
+      const quotedPolicy = quoteIdentifier(rlsPolicyName(tableName));
+      await this.pool.query(`ALTER TABLE ${quotedTable} ENABLE ROW LEVEL SECURITY`);
+      await this.pool.query(`DROP POLICY IF EXISTS ${quotedPolicy} ON ${quotedTable}`);
+      await this.pool.query(`
+        CREATE POLICY ${quotedPolicy}
+        ON ${quotedTable}
+        FOR ALL
+        USING (true)
+        WITH CHECK (true)
+      `);
+    }
   }
 
   async meta() {
@@ -327,6 +525,8 @@ export class PostgresStateStore {
         stateId: this.config.stateId,
         stateTable: this.config.stateTable,
         backupTable: this.config.backupTable,
+        rls: this.rlsStatus,
+        migrations: this.migrationsStatus,
       };
     }
     const row = result.rows[0];
@@ -340,6 +540,8 @@ export class PostgresStateStore {
       sizeBytes: Number(row.size_bytes ?? 0),
       stateId: this.config.stateId,
       stateTable: this.config.stateTable,
+      rls: this.rlsStatus,
+      migrations: this.migrationsStatus,
       updatedAt: timestamp(row.updated_at),
     };
   }
@@ -417,6 +619,11 @@ export class PostgresStateStore {
   async close() {
     await this.pool.end?.();
   }
+
+  async migrations() {
+    this.migrationsStatus = await postgresMigrationStatus(this.config, this.pool);
+    return this.migrationsStatus;
+  }
 }
 
 export async function createStateStore(config, { pgPool } = {}) {
@@ -468,7 +675,58 @@ async function route(req, res, config, store) {
       service: 'signal-state-service',
       authenticated: !config.allowUnauthenticated,
       storage: storageSummary(config),
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/ready') {
+    try {
+      json(res, 200, {
+        ok: true,
+        service: 'signal-state-service',
+        authenticated: !config.allowUnauthenticated,
+        storage: storageSummary(config),
+        state: await store.meta(),
+      });
+    } catch (error) {
+      json(res, 503, {
+        ok: false,
+        service: 'signal-state-service',
+        code: 'STATE_SERVICE_NOT_READY',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/status') {
+    json(res, 200, {
+      ok: true,
+      service: 'signal-state-service',
+      authenticated: !config.allowUnauthenticated,
+      storage: storageSummary(config),
       state: await store.meta(),
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/migrations') {
+    if (!authorized(req, config)) {
+      json(res, 401, { ok: false, code: 'UNAUTHORIZED', error: 'State service bearer token is required.' });
+      return;
+    }
+    if (config.backend !== 'postgres') {
+      json(res, 200, {
+        ok: true,
+        backend: config.backend,
+        migrations: { applied: 0, pending: 0, ok: true, rows: [] },
+      });
+      return;
+    }
+    json(res, 200, {
+      ok: true,
+      backend: config.backend,
+      migrations: await store.migrations(),
     });
     return;
   }
@@ -531,6 +789,7 @@ function storageSummary(config) {
     return {
       backend: 'postgres',
       migrate: config.migrate,
+      rls: config.rls,
       stateId: config.stateId,
       stateTable: config.stateTable,
       backupTable: config.backupTable,
@@ -565,21 +824,18 @@ function closeServer(server) {
   });
 }
 
-export async function startStateService({ env = process.env, log = console.log, pgPool } = {}) {
+export async function startStateService({ env = process.env, log, pgPool } = {}) {
+  const logger = createLogger({ env, service: 'signal-state-service', sink: log ?? console.log });
   const config = createStateServiceConfig(env);
   const store = await createStateStore(config, { pgPool });
   await store.init();
   const server = createStateServiceServer(config, store);
   await listen(server, config.port, config.host);
-  log(`Signal state service listening on http://${config.host}:${config.port}`);
+  logger.info('listening', { host: config.host, port: config.port });
   if (config.backend === 'postgres') {
-    log(`Backend: postgres`);
-    log(`State table: ${config.stateTable}`);
-    log(`Backup table: ${config.backupTable}`);
+    logger.info('storage', { backend: 'postgres', backupTable: config.backupTable, rls: config.rls, stateTable: config.stateTable });
   } else {
-    log(`Backend: file`);
-    log(`State: ${config.stateFile}`);
-    log(`Backups: ${config.backupDir}`);
+    logger.info('storage', { backend: 'file', backupDir: config.backupDir, stateFile: config.stateFile });
   }
   return {
     config,
@@ -609,7 +865,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   startStateService().then((service) => {
     running = service;
   }).catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
+    createLogger({ service: 'signal-state-service', sink: console.error }).error('fatal', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     process.exit(1);
   });
 }
