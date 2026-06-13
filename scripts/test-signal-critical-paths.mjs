@@ -184,6 +184,51 @@ test('HTTP API scopes tenant B state away from tenant A users and blocks cross-t
   assert.equal(crossTenantRoleChange.payload.code, 'FORBIDDEN');
 });
 
+test('HTTP API scopes member state away from same-tenant peer mailbox source and signal records', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-critical-member-state-http-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const sessionSecret = 'signal_critical_member_secret_32chars!';
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const productToken = (await issueSessionToken('usr_product', {
+    actorUserId: 'usr_product',
+    env: { SIGNAL_SESSION_SECRET: sessionSecret },
+    statePath,
+    ttlSeconds: 900,
+  })).details.token;
+
+  api = await startApi({
+    emailWebhookSecret: 'email_critical_webhook_secret',
+    port,
+    sendGridPublicKey: crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).publicKey.export({ format: 'pem', type: 'spki' }),
+    sessionSecret,
+    statePath,
+    stripeWebhookSecret: 'stripe_critical_webhook_secret',
+  });
+
+  const scopedState = await requestApi(api.apiBaseUrl, '/api/state', { token: productToken });
+  assert.equal(scopedState.status, 200);
+  const state = scopedState.payload.state;
+
+  assert(state.mailboxes.some((mailbox) => mailbox.id === 'mbx_gmail_product'), 'member API state should include owned mailbox records');
+  assert(state.sourceMessages.some((message) => message.mailboxId === 'mbx_gmail_product'), 'member API state should include owned source snippets');
+  assert(state.signals.some((signal) => signal.id === 'sig_product_001'), 'member API state should include owned signal records');
+
+  assert.equal(state.mailboxes.some((mailbox) => mailbox.ownerUserId === 'usr_sales'), false, 'member API state must not include peer-owned mailboxes');
+  assert.equal(state.sourceMessages.some((message) => message.mailboxId === 'mbx_gmail_sales'), false, 'member API state must not include peer-owned source snippets');
+  assert.equal(state.signals.some((signal) => signal.ownerUserId === 'usr_sales'), false, 'member API state must not include peer-owned signals');
+  assert.equal(state.users.find((user) => user.id === 'usr_product')?.email, 'priya@acme.example');
+  assert.equal(state.users.find((user) => user.id === 'usr_sales')?.email, null);
+  assert.equal(state.users.find((user) => user.id === 'usr_sales')?.name, 'Mia Chen');
+});
+
 test('signed Stripe webhook replay with the same provider event id is a no-op duplicate', async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-critical-stripe-dup-'));
   const statePath = path.join(tempDir, 'signal-state.json');

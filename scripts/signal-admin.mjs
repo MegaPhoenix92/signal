@@ -1628,7 +1628,7 @@ async function listDashboardAudit() {
   const state = await loadState();
   const { env, source: envSource } = await readinessEnv();
   const backend = backendReadiness({ env, statePath: resolveStatePath() });
-  const audit = dashboardAuditReport(state, { backend, statePath: resolveStatePath() });
+  const audit = dashboardAuditReport(state, { actorUserId, backend, statePath: resolveStatePath() });
   const rows = audit.rows.map((row) => ({
     area: row.area,
     check: row.check,
@@ -1714,7 +1714,7 @@ async function listTenantIsolation() {
   const { env, source: envSource } = await readinessEnv();
   const statePath = resolveStatePath();
   const backend = backendReadiness({ env, statePath });
-  const isolation = tenantIsolationAuditReport(state, { backend, statePath });
+  const isolation = tenantIsolationAuditReport(state, { actorUserId, backend, statePath });
   const rows = isolation.rows.map((row) => ({
     area: row.area,
     status: row.status,

@@ -128,6 +128,19 @@
       }
     },
     {
+      "id": "mbx_gmail_product",
+      "tenantId": "tenant_demo",
+      "ownerUserId": "usr_product",
+      "provider": "gmail",
+      "status": "paused",
+      "selectedScopes": ["thread_metadata", "selected_label_snippets"],
+      "syncPolicy": {
+        "labels": ["Customers", "Product"],
+        "lookbackDays": 90,
+        "rawRetentionDays": 14
+      }
+    },
+    {
       "id": "mbx_outlook_success",
       "tenantId": "tenant_demo",
       "ownerUserId": "usr_admin",
@@ -163,6 +176,16 @@
       "status": "active",
       "cursor": "gmail-history-1780502400",
       "lastSyncedAt": "2026-06-03T00:00:00.000Z",
+      "lastReplayAt": null,
+      "windowStartAt": "2026-03-05T00:00:00.000Z"
+    },
+    {
+      "id": "cur_mbx_gmail_product",
+      "mailboxId": "mbx_gmail_product",
+      "provider": "gmail",
+      "status": "blocked",
+      "cursor": "gmail-history-product-1780502400",
+      "lastSyncedAt": null,
       "lastReplayAt": null,
       "windowStartAt": "2026-03-05T00:00:00.000Z"
     },
@@ -269,6 +292,19 @@
       "snippet": "The board packet workflow pain is still manual. We need a CSV export need and Salesforce integration ask before month end.",
       "receivedAt": "2026-06-02T16:42:00.000Z",
       "labels": ["Customers"],
+      "processedFlowIds": []
+    },
+    {
+      "id": "msg_product_roadmap_001",
+      "tenantId": "tenant_demo",
+      "mailboxId": "mbx_gmail_product",
+      "providerThreadId": "gmail-thread-product-roadmap",
+      "account": "VentureWorks",
+      "from": "riley@ventureworks.example",
+      "subject": "Roadmap planning follow-up",
+      "snippet": "The product team needs the latest customer context before roadmap planning. Please share the research notes before Friday.",
+      "receivedAt": "2026-06-02T17:05:00.000Z",
+      "labels": ["Customers", "Product"],
       "processedFlowIds": []
     },
     {

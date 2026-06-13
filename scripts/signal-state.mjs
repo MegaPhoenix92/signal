@@ -632,6 +632,142 @@ function scopeAuditEventsForActor(state, scoped, actor) {
   return (state.auditEvents ?? []).filter((event) => actorIds.has(event.actor) || targetIds.has(event.targetId));
 }
 
+function tenantActorContext(state, actor, tenantId) {
+  const membership = activeMembershipForUser(state, actor?.id, tenantId);
+  return {
+    membership,
+    role: membership?.role ?? (tenantId === actor?.tenantId ? actor.role : null),
+    team: membership?.team ?? (tenantId === actor?.tenantId ? actor.team ?? null : null),
+  };
+}
+
+function adminTenantIdsForActor(state, actor, tenantIds) {
+  const adminTenantIds = new Set();
+  for (const tenantId of tenantIds) {
+    const membership = activeMembershipForUser(state, actor?.id, tenantId);
+    if (membership?.role === 'admin' || (!membership && tenantId === actor?.tenantId && actor.role === 'admin')) {
+      adminTenantIds.add(tenantId);
+    }
+  }
+  return adminTenantIds;
+}
+
+function accountVisibilityKey(tenantId, account) {
+  return `${tenantId ?? 'global'}::${account ?? ''}`;
+}
+
+function narrowMemberScopedState(state, scoped, actor, {
+  adminTenantIds,
+  memberTenantIds,
+  tenantIds,
+}) {
+  const tenantContexts = new Map([...tenantIds].map((tenantId) => [tenantId, tenantActorContext(state, actor, tenantId)]));
+  const tenantsById = new Map((state.tenants ?? []).map((tenant) => [tenant.id, tenant]));
+  const mailboxTenantIds = new Map((state.mailboxes ?? []).map((mailbox) => [mailbox.id, mailbox.tenantId]));
+  const flowTenantIds = new Map((state.emailFlows ?? []).map((flow) => [flow.id, flow.tenantId]));
+  const signalTenantIds = new Map((state.signals ?? []).map((signal) => [signal.id, signal.tenantId]));
+  const userTenantIds = new Map((state.users ?? []).map((user) => [user.id, user.tenantId]));
+  const isAdminTenant = (tenantId) => Boolean(tenantId && adminTenantIds.has(tenantId));
+  const isKnownScopedTenant = (tenantId) => !tenantId || tenantIds.has(tenantId);
+  const keepTenantRecord = (tenantId, memberPredicate) => {
+    if (!isKnownScopedTenant(tenantId)) {
+      return false;
+    }
+    if (isAdminTenant(tenantId)) {
+      return true;
+    }
+    return memberPredicate();
+  };
+  const actorTeamForTenant = (tenantId) => tenantContexts.get(tenantId)?.team ?? null;
+  const canManageBilling = (tenantId) => {
+    const tenant = tenantsById.get(tenantId);
+    return Boolean(tenant && (actor.id === tenant.billingOwnerUserId || actor.id === tenant.ownerUserId));
+  };
+
+  scoped.mailboxes = (scoped.mailboxes ?? []).filter((mailbox) =>
+    keepTenantRecord(mailbox.tenantId, () => mailbox.ownerUserId === actor.id));
+  const visibleMailboxIds = new Set((scoped.mailboxes ?? []).map((mailbox) => mailbox.id));
+  const keepMailboxDerived = (item) => {
+    const tenantId = item.tenantId ?? mailboxTenantIds.get(item.mailboxId);
+    return keepTenantRecord(tenantId, () => visibleMailboxIds.has(item.mailboxId));
+  };
+  scoped.mailboxConnectionSessions = (scoped.mailboxConnectionSessions ?? []).filter(keepMailboxDerived);
+  scoped.emailSyncCursors = (scoped.emailSyncCursors ?? []).filter(keepMailboxDerived);
+  scoped.emailWatchSubscriptions = (scoped.emailWatchSubscriptions ?? []).filter(keepMailboxDerived);
+
+  const visibleFlowIds = new Set((scoped.emailFlows ?? []).map((flow) => flow.id));
+  scoped.routingRules = (scoped.routingRules ?? []).filter((rule) => {
+    const tenantId = rule.tenantId ?? flowTenantIds.get(rule.flowId);
+    return keepTenantRecord(tenantId, () => visibleFlowIds.has(rule.flowId));
+  });
+  scoped.sourceMessages = (scoped.sourceMessages ?? []).filter((message) => {
+    const tenantId = message.tenantId ?? mailboxTenantIds.get(message.mailboxId);
+    return keepTenantRecord(tenantId, () => visibleMailboxIds.has(message.mailboxId));
+  });
+
+  scoped.signals = (scoped.signals ?? []).filter((signal) =>
+    keepTenantRecord(signal.tenantId, () => signal.ownerUserId === actor.id || signal.routeTo === actorTeamForTenant(signal.tenantId)));
+  const visibleSignalIds = new Set((scoped.signals ?? []).map((signal) => signal.id));
+  scoped.signalHandoffs = (scoped.signalHandoffs ?? []).filter((handoff) => {
+    const tenantId = handoff.tenantId ?? signalTenantIds.get(handoff.signalId);
+    return keepTenantRecord(tenantId, () => visibleSignalIds.has(handoff.signalId));
+  });
+  scoped.signalFeedback = (scoped.signalFeedback ?? []).filter((feedback) => {
+    const tenantId = feedback.tenantId ?? signalTenantIds.get(feedback.signalId) ?? userTenantIds.get(feedback.userId);
+    return keepTenantRecord(tenantId, () => feedback.userId === actor.id || visibleSignalIds.has(feedback.signalId));
+  });
+
+  const visibleAccountKeys = new Set(
+    (scoped.signals ?? [])
+      .filter((signal) => signal.account)
+      .map((signal) => accountVisibilityKey(signal.tenantId, signal.account)),
+  );
+  (state.accountActions ?? [])
+    .filter((action) => memberTenantIds.has(action.tenantId) && action.ownerUserId === actor.id && action.account)
+    .forEach((action) => visibleAccountKeys.add(accountVisibilityKey(action.tenantId, action.account)));
+  const keepAccountRecord = (item, accountField = 'account') => {
+    const accountName = item[accountField];
+    return keepTenantRecord(item.tenantId, () =>
+      item.ownerUserId === actor.id ||
+      (accountName && visibleAccountKeys.has(accountVisibilityKey(item.tenantId, accountName))));
+  };
+  scoped.accountProfiles = (scoped.accountProfiles ?? []).filter((account) => keepAccountRecord(account, 'name'));
+  scoped.accountEvents = (scoped.accountEvents ?? []).filter((event) => keepAccountRecord(event));
+  scoped.accountActions = (scoped.accountActions ?? []).filter((action) => keepAccountRecord(action));
+  scoped.accountReviews = (scoped.accountReviews ?? []).filter((review) => keepAccountRecord(review));
+  scoped.accountRecommendations = (scoped.accountRecommendations ?? []).filter((recommendation) => keepAccountRecord(recommendation));
+
+  const keepUserRecord = (item) => {
+    const tenantId = item.tenantId ?? userTenantIds.get(item.userId);
+    return keepTenantRecord(tenantId, () => item.userId === actor.id);
+  };
+  scoped.notificationPreferences = (scoped.notificationPreferences ?? []).filter(keepUserRecord);
+  scoped.notificationEvents = (scoped.notificationEvents ?? []).filter(keepUserRecord);
+  scoped.emailDeliveryMessages = (scoped.emailDeliveryMessages ?? []).filter(keepUserRecord);
+  scoped.apiSessions = (scoped.apiSessions ?? []).filter((session) => session.userId === actor.id || isAdminTenant(userTenantIds.get(session.userId)));
+
+  scoped.lifecycleNotices = (scoped.lifecycleNotices ?? []).filter((notice) => {
+    const tenantId = notice.tenantId ?? notice.sourceIds?.tenantId ?? mailboxTenantIds.get(notice.sourceIds?.mailboxId);
+    return keepTenantRecord(tenantId, () =>
+      notice.ownerUserId === actor.id ||
+      (notice.sourceIds?.mailboxId && visibleMailboxIds.has(notice.sourceIds.mailboxId)) ||
+      (notice.category === 'payment' && canManageBilling(tenantId)));
+  });
+
+  // Product default (#96): peer emails hidden for non-admin members; flip to a directory model if product decides otherwise.
+  scoped.users = (scoped.users ?? []).map((user) => {
+    if (user.id === actor.id || isAdminTenant(user.tenantId)) {
+      return user;
+    }
+    return {
+      ...user,
+      email: null,
+    };
+  });
+
+  return scoped;
+}
+
 export function scopeStateForActor(state, actorOrUserId) {
   const actor = typeof actorOrUserId === 'string'
     ? (state.users ?? []).find((user) => user.id === actorOrUserId)
@@ -651,6 +787,8 @@ export function scopeStateForActor(state, actorOrUserId) {
       .filter((membership) => membership.userId === actor.id && membership.status === 'active')
       .map((membership) => membership.tenantId),
   ].filter(Boolean));
+  const adminTenantIds = adminTenantIdsForActor(state, actor, tenantIds);
+  const memberTenantIds = new Set([...tenantIds].filter((tenantId) => !adminTenantIds.has(tenantId)));
   const scoped = structuredClone(state);
   const belongsToTenant = (item) => !item?.tenantId || tenantIds.has(item.tenantId);
   scoped.tenants = (state.tenants ?? []).filter((item) => tenantIds.has(item.id));
@@ -699,6 +837,13 @@ export function scopeStateForActor(state, actorOrUserId) {
   scoped.deadLetter = (state.deadLetter ?? []).filter(belongsToTenant);
   scoped.apiSessions = (state.apiSessions ?? []).filter((item) => userIds.has(item.userId));
   scoped.webhookEvents = (state.webhookEvents ?? []).filter((item) => !item.tenantId || tenantIds.has(item.tenantId));
+  if (memberTenantIds.size > 0) {
+    narrowMemberScopedState(state, scoped, actor, {
+      adminTenantIds,
+      memberTenantIds,
+      tenantIds,
+    });
+  }
   scoped.auditEvents = scopeAuditEventsForActor(state, scoped, actor);
   if (!scoped.auditEvents) {
     delete scoped.auditEvents;
@@ -738,9 +883,21 @@ function dashboardAuditRow({
   };
 }
 
+function reportStateForActor(state, actorUserId) {
+  const actor = getActor(state, actorUserId ?? state.session?.activeUserId, { allowMissing: true });
+  if (!actor) {
+    return { actor: null, state };
+  }
+  const scopedState = scopeStateForActor(state, actor);
+  return {
+    actor: getActor(scopedState, actor.id, { allowMissing: true }) ?? actor,
+    state: scopedState,
+  };
+}
+
 function visibleDashboardScope(state, actor, tenantId) {
-  const membership = membershipForUser(state, actor?.id, tenantId);
-  const role = membership?.role ?? null;
+  const membership = activeMembershipForUser(state, actor?.id, tenantId);
+  const role = membership?.role ?? actor?.role ?? null;
   const team = membership?.team ?? actor?.team ?? null;
   const isAdmin = role === 'admin';
   const visibleSignals = (state.signals ?? []).filter((signal) =>
@@ -794,22 +951,25 @@ function visibleDashboardScope(state, actor, tenantId) {
 }
 
 export function dashboardAuditReport(state, {
+  actorUserId = null,
   backend = null,
   statePath = resolveStatePath(),
 } = {}) {
-  const summary = summarizeState(state, statePath);
-  const tenantId = defaultTenantId(state);
-  const actor = getActor(state, state.session?.activeUserId, { allowMissing: true });
-  const scope = visibleDashboardScope(state, actor, tenantId);
-  const globalOpenSignals = (state.signals ?? []).filter((signal) => signal.status === 'open');
-  const globalAccounts = state.accountProfiles ?? [];
-  const globalMailboxes = state.mailboxes ?? [];
-  const globalSourceMessages = state.sourceMessages ?? [];
-  const globalUnreadNotifications = (state.notificationEvents ?? []).filter((event) => event.status === 'unread');
-  const globalActiveMemberships = (state.memberships ?? []).filter((membership) => membership.status === 'active');
-  const globalPendingInvites = (state.invites ?? []).filter((invite) => invite.status === 'pending');
-  const globalOpenInvoices = (state.invoices ?? []).filter((invoice) => ['open', 'past_due'].includes(invoice.status));
-  const globalOpenLifecycleNotices = (state.lifecycleNotices ?? []).filter((notice) => notice.status === 'open');
+  const report = reportStateForActor(state, actorUserId);
+  const reportState = report.state;
+  const summary = summarizeState(reportState, statePath);
+  const tenantId = report.actor?.tenantId ?? defaultTenantId(reportState);
+  const actor = report.actor;
+  const scope = visibleDashboardScope(reportState, actor, tenantId);
+  const globalOpenSignals = (reportState.signals ?? []).filter((signal) => signal.status === 'open');
+  const globalAccounts = reportState.accountProfiles ?? [];
+  const globalMailboxes = reportState.mailboxes ?? [];
+  const globalSourceMessages = reportState.sourceMessages ?? [];
+  const globalUnreadNotifications = (reportState.notificationEvents ?? []).filter((event) => event.status === 'unread');
+  const globalActiveMemberships = (reportState.memberships ?? []).filter((membership) => membership.status === 'active');
+  const globalPendingInvites = (reportState.invites ?? []).filter((invite) => invite.status === 'pending');
+  const globalOpenInvoices = (reportState.invoices ?? []).filter((invoice) => ['open', 'past_due'].includes(invoice.status));
+  const globalOpenLifecycleNotices = (reportState.lifecycleNotices ?? []).filter((notice) => notice.status === 'open');
   const rows = [
     dashboardAuditRow({
       area: 'user_workspace',
@@ -1182,34 +1342,37 @@ function tenantIsolationAuditRow({
 }
 
 export function tenantIsolationAuditReport(state, {
+  actorUserId = null,
   backend = null,
   statePath = resolveStatePath(),
 } = {}) {
-  const summary = summarizeState(state, statePath);
-  const tenantId = defaultTenantId(state);
-  const tenant = (state.tenants ?? []).find((item) => item.id === tenantId) ?? state.tenants?.[0] ?? null;
-  const actor = getActor(state, state.session?.activeUserId, { allowMissing: true });
-  const scope = visibleDashboardScope(state, actor, tenant?.id ?? tenantId);
-  const memberships = state.memberships ?? [];
+  const report = reportStateForActor(state, actorUserId);
+  const reportState = report.state;
+  const summary = summarizeState(reportState, statePath);
+  const tenantId = report.actor?.tenantId ?? defaultTenantId(reportState);
+  const tenant = (reportState.tenants ?? []).find((item) => item.id === tenantId) ?? reportState.tenants?.[0] ?? null;
+  const actor = report.actor;
+  const scope = visibleDashboardScope(reportState, actor, tenant?.id ?? tenantId);
+  const memberships = reportState.memberships ?? [];
   const tenantMemberships = memberships.filter((membership) => !tenant?.id || membership.tenantId === tenant.id);
   const activeMemberships = tenantMemberships.filter((membership) =>
     membership.status === 'active' &&
-    (state.users ?? []).some((user) => user.id === membership.userId && user.status === 'active'));
+    (reportState.users ?? []).some((user) => user.id === membership.userId && user.status === 'active'));
   const activeAdmins = activeMemberships.filter((membership) => membership.role === 'admin');
   const activeMembers = activeMemberships.filter((membership) => membership.role === 'member');
   const orphanMemberships = memberships.filter((membership) =>
-    !(state.users ?? []).some((user) => user.id === membership.userId) ||
-    !(state.tenants ?? []).some((candidate) => candidate.id === membership.tenantId));
+    !(reportState.users ?? []).some((user) => user.id === membership.userId) ||
+    !(reportState.tenants ?? []).some((candidate) => candidate.id === membership.tenantId));
   const actorMembership = tenantMemberships.find((membership) => membership.userId === actor?.id && membership.status === 'active');
-  const tenantUsers = (state.users ?? []).filter((user) => !tenant?.id || user.tenantId === tenant.id);
+  const tenantUsers = (reportState.users ?? []).filter((user) => !tenant?.id || user.tenantId === tenant.id);
   const tenantOwnedUserIds = new Set(activeMemberships.map((membership) => membership.userId));
-  const tenantMailboxes = (state.mailboxes ?? []).filter((mailbox) => !tenant?.id || mailbox.tenantId === tenant.id);
-  const tenantSignals = (state.signals ?? []).filter((signal) => !tenant?.id || signal.tenantId === tenant.id);
-  const tenantActions = (state.accountActions ?? []).filter((action) => !tenant?.id || action.tenantId === tenant.id);
-  const tenantRecommendations = (state.accountRecommendations ?? []).filter((recommendation) => !tenant?.id || recommendation.tenantId === tenant.id);
-  const tenantRoutingRules = (state.routingRules ?? []).filter((rule) => !tenant?.id || rule.tenantId === tenant.id);
-  const tenantNotifications = (state.notificationEvents ?? []).filter((event) => !tenant?.id || event.tenantId === tenant.id);
-  const tenantSources = (state.sourceMessages ?? []).filter((message) => !tenant?.id || message.tenantId === tenant.id);
+  const tenantMailboxes = (reportState.mailboxes ?? []).filter((mailbox) => !tenant?.id || mailbox.tenantId === tenant.id);
+  const tenantSignals = (reportState.signals ?? []).filter((signal) => !tenant?.id || signal.tenantId === tenant.id);
+  const tenantActions = (reportState.accountActions ?? []).filter((action) => !tenant?.id || action.tenantId === tenant.id);
+  const tenantRecommendations = (reportState.accountRecommendations ?? []).filter((recommendation) => !tenant?.id || recommendation.tenantId === tenant.id);
+  const tenantRoutingRules = (reportState.routingRules ?? []).filter((rule) => !tenant?.id || rule.tenantId === tenant.id);
+  const tenantNotifications = (reportState.notificationEvents ?? []).filter((event) => !tenant?.id || event.tenantId === tenant.id);
+  const tenantSources = (reportState.sourceMessages ?? []).filter((message) => !tenant?.id || message.tenantId === tenant.id);
   const visibleWithinTenant = scope.visibleSignals.length <= tenantSignals.length &&
     scope.visibleMailboxes.length <= tenantMailboxes.length &&
     scope.visibleSourceMessages.length <= tenantSources.length &&
@@ -1221,7 +1384,7 @@ export function tenantIsolationAuditReport(state, {
     ...tenantRecommendations.map((recommendation) => recommendation.ownerUserId),
     ...tenantRoutingRules.map((rule) => rule.ownerUserId).filter(Boolean),
   ].every((userId) => tenantOwnedUserIds.has(userId));
-  const mutationAuditActions = new Set((state.auditEvents ?? [])
+  const mutationAuditActions = new Set((reportState.auditEvents ?? [])
     .filter((event) => !tenant?.id || event.tenantId === tenant.id)
     .map((event) => event.action));
   const adminMutationEvidence = [
@@ -1302,7 +1465,7 @@ export function tenantIsolationAuditReport(state, {
         `${summary.apiSessions ?? 0} API session record(s)`,
         `${summary.auditEvents ?? 0} audit event(s)`,
       ],
-      localOk: activeAdmins.length > 0 && Boolean(actorMembership) && actorMembership.role === 'admin',
+      localOk: activeAdmins.length > 0 && Boolean(actorMembership),
       productionOk: Boolean(signedSession?.ok && productionAuth?.ok),
       recommendation: 'Keep admin setup, role changes, billing overrides, and source controls behind signed admin sessions; keep registration as the only public workspace creation path.',
       commands: ['npm run admin -- session list --json', 'npm run admin -- export --json'],
