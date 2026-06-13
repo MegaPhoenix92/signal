@@ -68,8 +68,9 @@ test('frontend source guards empty live state and non-JSON POST failures', async
   assert.match(appSource, /Workspace data unavailable/);
   assert.match(appSource, /if \(!currentActor \|\| !tenant\)/);
   assert.match(appSource, /Admin data unavailable/);
+  assert.match(dataSource, /async function getJson<T>/);
   assert.match(dataSource, /async function readJsonPayload\(response: Response\)/);
-  assert.equal((dataSource.match(/await readJsonPayload\(response\)/g) ?? []).length, 5);
+  assert.equal((dataSource.match(/return getJson</g) ?? []).length, 28);
   assert.equal((dataSource.match(/response\.json\(\)\.catch\(\(\) => null\)/g) ?? []).length, 1);
 });
 

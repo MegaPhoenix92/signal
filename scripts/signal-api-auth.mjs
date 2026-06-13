@@ -12,6 +12,19 @@ import {
 
 export const SIGNAL_SESSION_COOKIE_NAME = 'signal_session';
 
+export class ApiAuthError extends Error {
+  constructor(message, { code = 'API_AUTH_CONFIG_INVALID', details = {} } = {}) {
+    super(message);
+    this.name = 'ApiAuthError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function authConfigError(message, code, details = {}) {
+  throw new ApiAuthError(message, { code, details });
+}
+
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -116,72 +129,78 @@ export function assertApiSecurityConfig(env = process.env) {
   const loopback = isLoopbackApiHost(host);
 
   if (localActorAllowed(env) && productionModeEnabled(env)) {
-    throw new Error('SIGNAL_ALLOW_LOCAL_ACTOR=true is not allowed in production mode.');
+    authConfigError('SIGNAL_ALLOW_LOCAL_ACTOR=true is not allowed in production mode.', 'LOCAL_ACTOR_PRODUCTION_FORBIDDEN');
   }
 
   if (!loopback && !authEnforced) {
-    throw new Error(
+    authConfigError(
       'SIGNAL_API_HOST is not loopback but signed-session/JWKS auth is not enabled. '
       + 'Set SIGNAL_REQUIRE_SIGNED_SESSION=true with SIGNAL_SESSION_SECRET, or SIGNAL_AUTH_PROVIDER=jwks with SIGNAL_AUTH_JWKS_URL.',
+      'API_AUTH_NOT_CONFIGURED',
     );
   }
 
   if (!loopback && localActorAllowed(env)) {
-    throw new Error('SIGNAL_ALLOW_LOCAL_ACTOR=true is not allowed on non-loopback hosts.');
+    authConfigError('SIGNAL_ALLOW_LOCAL_ACTOR=true is not allowed on non-loopback hosts.', 'LOCAL_ACTOR_NON_LOOPBACK_FORBIDDEN');
   }
 
   if (!loopback && !env.SIGNAL_WEBHOOK_ACTOR) {
-    throw new Error('Non-loopback hosts require SIGNAL_WEBHOOK_ACTOR for webhook mutations.');
+    authConfigError('Non-loopback hosts require SIGNAL_WEBHOOK_ACTOR for webhook mutations.', 'WEBHOOK_ACTOR_REQUIRED');
   }
 
   if (!loopback && !env.SIGNAL_OAUTH_ACTOR) {
-    throw new Error('Non-loopback hosts require SIGNAL_OAUTH_ACTOR for OAuth callback mutations.');
+    authConfigError('Non-loopback hosts require SIGNAL_OAUTH_ACTOR for OAuth callback mutations.', 'OAUTH_ACTOR_REQUIRED');
   }
 
   if (!loopback && signedSessionRequired(env) && !sessionCookieSecure(env)) {
-    throw new Error(
+    authConfigError(
       'Non-loopback signed-session mode requires SIGNAL_COOKIE_SECURE=true or an HTTPS SIGNAL_APP_BASE_URL.',
+      'SIGNED_SESSION_COOKIE_INSECURE',
     );
   }
 
   if (!loopback && !isHttpStatePath(stateTargetForEnv(env))) {
-    throw new Error(
+    authConfigError(
       'Non-loopback hosts must use an HTTP state-service URL (SIGNAL_STATE_SERVICE_URL), not local file-backed state.',
+      'FILE_BACKED_STATE_NON_LOOPBACK_FORBIDDEN',
     );
   }
 
   if (productionAuthProvider(env) === 'jwks' && !env.SIGNAL_AUTH_JWKS_URL) {
-    throw new Error('SIGNAL_AUTH_PROVIDER=jwks requires SIGNAL_AUTH_JWKS_URL.');
+    authConfigError('SIGNAL_AUTH_PROVIDER=jwks requires SIGNAL_AUTH_JWKS_URL.', 'JWKS_URL_REQUIRED');
   }
 
   if (signedSessionRequired(env) && !env.SIGNAL_SESSION_SECRET) {
-    throw new Error('SIGNAL_REQUIRE_SIGNED_SESSION=true requires SIGNAL_SESSION_SECRET.');
+    authConfigError('SIGNAL_REQUIRE_SIGNED_SESSION=true requires SIGNAL_SESSION_SECRET.', 'SESSION_SECRET_REQUIRED');
   }
 
   if (env.SIGNAL_SESSION_SECRET && env.SIGNAL_SESSION_SECRET.length < SIGNAL_MIN_SESSION_SECRET_LENGTH) {
-    throw new Error(
+    authConfigError(
       `SIGNAL_SESSION_SECRET must be at least ${SIGNAL_MIN_SESSION_SECRET_LENGTH} characters.`,
+      'SESSION_SECRET_TOO_SHORT',
+      { minLength: SIGNAL_MIN_SESSION_SECRET_LENGTH },
     );
   }
 
   if (oauthProviderConfigured(env) && !env.SIGNAL_OAUTH_STATE_KEY) {
-    throw new Error('OAuth provider client IDs are configured but SIGNAL_OAUTH_STATE_KEY is missing.');
+    authConfigError('OAuth provider client IDs are configured but SIGNAL_OAUTH_STATE_KEY is missing.', 'OAUTH_STATE_KEY_REQUIRED');
   }
 
   if (!loopback) {
     const corsOrigins = configuredCorsOrigins(env);
     if (corsOrigins.includes('*')) {
-      throw new Error(
+      authConfigError(
         'SIGNAL_API_CORS_ORIGINS cannot include * on non-loopback hosts when credentialed CORS is enabled.',
+        'CORS_WILDCARD_FORBIDDEN',
       );
     }
     if (corsOrigins.length === 0) {
-      throw new Error('Non-loopback hosts require explicit SIGNAL_API_CORS_ORIGINS.');
+      authConfigError('Non-loopback hosts require explicit SIGNAL_API_CORS_ORIGINS.', 'CORS_ORIGINS_REQUIRED');
     }
   }
 
   if (!loopback && gmailWebhookConfigured(env) && !env.SIGNAL_GMAIL_WEBHOOK_AUDIENCE) {
-    throw new Error('Non-loopback Gmail webhook intake requires SIGNAL_GMAIL_WEBHOOK_AUDIENCE.');
+    authConfigError('Non-loopback Gmail webhook intake requires SIGNAL_GMAIL_WEBHOOK_AUDIENCE.', 'GMAIL_WEBHOOK_AUDIENCE_REQUIRED');
   }
 }
 
