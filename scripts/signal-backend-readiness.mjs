@@ -1,3 +1,8 @@
+import {
+  isLoopbackApiHost,
+  sessionCookieSecure,
+} from './signal-api-auth.mjs';
+
 const backendModes = ['local-json', 'production-node', 'external-service'];
 const productionAuthProviders = ['managed', 'jwks', 'session'];
 const stateServiceBackendModes = ['file', 'postgres'];
@@ -32,6 +37,21 @@ function productionModeEnabled(env) {
     || env.SIGNAL_BACKEND_MODE === 'production-node'
     || env.SIGNAL_BACKEND_MODE === 'external-service'
     || env.SIGNAL_RUNTIME_ENV === 'production';
+}
+
+function productionApiBootChecksRequired(env) {
+  const mode = backendModes.includes(env.SIGNAL_BACKEND_MODE) ? env.SIGNAL_BACKEND_MODE : 'local-json';
+  return mode !== 'local-json' || !isLoopbackApiHost(env.SIGNAL_API_HOST ?? '127.0.0.1');
+}
+
+function configuredCookieSecureEnv(env) {
+  if (env.SIGNAL_COOKIE_SECURE === 'true') {
+    return ['SIGNAL_COOKIE_SECURE'];
+  }
+  if (/^https:\/\//i.test(env.SIGNAL_APP_BASE_URL ?? '')) {
+    return ['SIGNAL_APP_BASE_URL'];
+  }
+  return [];
 }
 
 function check({
@@ -75,6 +95,8 @@ export function backendReadiness({ env = process.env, statePath } = {}) {
   const tenantIsolationMode = env.SIGNAL_TENANT_ISOLATION_MODE;
   const stateServiceRlsEnabled = env.SIGNAL_STATE_SERVICE_RLS === 'true' || env.SIGNAL_STATE_SERVICE_ENABLE_RLS === 'true';
   const signedSessionRequired = env.SIGNAL_REQUIRE_SIGNED_SESSION === 'true';
+  const apiBootChecksRequired = productionApiBootChecksRequired(env);
+  const cookieSecureReady = sessionCookieSecure(env);
   const localActorProductionBlocked = !(env.SIGNAL_ALLOW_LOCAL_ACTOR === 'true' && productionModeEnabled(env));
   const corsProductionReady = corsOrigins.length > 0 && !corsOrigins.includes('*') && corsOrigins.every((origin) => !isLoopbackOrigin(origin));
   const externalStateService = mode === 'external-service';
@@ -149,6 +171,49 @@ export function backendReadiness({ env = process.env, statePath } = {}) {
       requiredEnv: ['SIGNAL_REQUIRE_SIGNED_SESSION', 'SIGNAL_SESSION_SECRET'],
       configured: configuredEnv(env, ['SIGNAL_REQUIRE_SIGNED_SESSION', 'SIGNAL_SESSION_SECRET']),
       missing: missingEnv(env, ['SIGNAL_REQUIRE_SIGNED_SESSION', 'SIGNAL_SESSION_SECRET']),
+    }),
+    check({
+      id: 'session_cookie_secure',
+      label: 'Secure session cookies',
+      ok: !apiBootChecksRequired || !signedSessionRequired || cookieSecureReady,
+      message: !apiBootChecksRequired || !signedSessionRequired
+        ? 'Secure session cookies are only required for non-loopback signed-session API boot.'
+        : (cookieSecureReady
+          ? 'Signed-session cookies are marked secure for non-loopback API boot.'
+          : 'Non-loopback signed-session mode requires SIGNAL_COOKIE_SECURE=true or an HTTPS SIGNAL_APP_BASE_URL.'),
+      requiredEnv: apiBootChecksRequired && signedSessionRequired
+        ? ['SIGNAL_COOKIE_SECURE', 'SIGNAL_APP_BASE_URL']
+        : [],
+      configured: configuredCookieSecureEnv(env),
+      missing: apiBootChecksRequired && signedSessionRequired && !cookieSecureReady
+        ? ['SIGNAL_COOKIE_SECURE']
+        : [],
+    }),
+    check({
+      id: 'system_webhook_actor',
+      label: 'Webhook system actor',
+      ok: !apiBootChecksRequired || Boolean(env.SIGNAL_WEBHOOK_ACTOR),
+      message: !apiBootChecksRequired
+        ? 'Webhook system actor is only required for non-loopback API boot.'
+        : (env.SIGNAL_WEBHOOK_ACTOR
+          ? 'Webhook mutations use a configured system actor on non-loopback hosts.'
+          : 'Non-loopback hosts require SIGNAL_WEBHOOK_ACTOR for webhook mutations.'),
+      requiredEnv: apiBootChecksRequired ? ['SIGNAL_WEBHOOK_ACTOR'] : [],
+      configured: env.SIGNAL_WEBHOOK_ACTOR ? ['SIGNAL_WEBHOOK_ACTOR'] : [],
+      missing: apiBootChecksRequired && !env.SIGNAL_WEBHOOK_ACTOR ? ['SIGNAL_WEBHOOK_ACTOR'] : [],
+    }),
+    check({
+      id: 'system_oauth_actor',
+      label: 'OAuth callback system actor',
+      ok: !apiBootChecksRequired || Boolean(env.SIGNAL_OAUTH_ACTOR),
+      message: !apiBootChecksRequired
+        ? 'OAuth callback system actor is only required for non-loopback API boot.'
+        : (env.SIGNAL_OAUTH_ACTOR
+          ? 'OAuth callback mutations use a configured system actor on non-loopback hosts.'
+          : 'Non-loopback hosts require SIGNAL_OAUTH_ACTOR for OAuth callback mutations.'),
+      requiredEnv: apiBootChecksRequired ? ['SIGNAL_OAUTH_ACTOR'] : [],
+      configured: env.SIGNAL_OAUTH_ACTOR ? ['SIGNAL_OAUTH_ACTOR'] : [],
+      missing: apiBootChecksRequired && !env.SIGNAL_OAUTH_ACTOR ? ['SIGNAL_OAUTH_ACTOR'] : [],
     }),
     check({
       id: 'local_actor_disabled',

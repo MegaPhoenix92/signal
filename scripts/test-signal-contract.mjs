@@ -933,6 +933,9 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
       'DATABASE_URL=postgres://signal:db_password@db.example/signal',
       'SIGNAL_REQUIRE_SIGNED_SESSION=true',
       'SIGNAL_SESSION_SECRET=super_secret_session_value_32chars!',
+      'SIGNAL_COOKIE_SECURE=true',
+      'SIGNAL_WEBHOOK_ACTOR=usr_system_webhook',
+      'SIGNAL_OAUTH_ACTOR=usr_system_oauth',
       'SIGNAL_AUTH_PROVIDER=jwks',
       'SIGNAL_AUTH_JWKS_URL=https://idp.example/.well-known/jwks.json',
       'SIGNAL_API_CORS_ORIGINS=https://signal.example',
@@ -973,6 +976,32 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(launchGatePreflight.envSource.path, envFilePath);
     assert(launchGatePreflight.envSource.keys.includes('DATABASE_URL'));
     assert(launchGatePreflight.launchGate.gates.some((gate) => gate.id === 'production_backend' && gate.status === 'pass'));
+    const incompleteBootEnvPath = path.join(tempDir, 'signal-production-boot-incomplete.env');
+    await fs.writeFile(incompleteBootEnvPath, [
+      'SIGNAL_BACKEND_MODE=external-service',
+      'SIGNAL_STATE_SERVICE_BACKEND=postgres',
+      'SIGNAL_STATE_SERVICE_URL=https://state.signal.example/state',
+      'SIGNAL_STATE_SERVICE_TOKEN=state_service_secret_value',
+      'DATABASE_URL=postgres://signal:db_password@db.example/signal',
+      'SIGNAL_REQUIRE_SIGNED_SESSION=true',
+      'SIGNAL_SESSION_SECRET=super_secret_session_value_32chars!',
+      'SIGNAL_AUTH_PROVIDER=jwks',
+      'SIGNAL_AUTH_JWKS_URL=https://idp.example/.well-known/jwks.json',
+      'SIGNAL_API_CORS_ORIGINS=https://signal.example',
+      'SIGNAL_JOB_SCHEDULER=signal-scheduler',
+      'SIGNAL_PROVIDER_VALIDATION_SCHEDULER=signal-scheduler',
+      'SIGNAL_TENANT_ISOLATION_MODE=rls',
+      'SIGNAL_STATE_SERVICE_RLS=true',
+      '',
+    ].join('\n'), 'utf8');
+    const launchGateIncompleteBoot = await runCli(['launch-gate', '--env-file', incompleteBootEnvPath, '--json'], blankSandboxProviderEnv);
+    assert.equal(launchGateIncompleteBoot.launchGate.goLiveReady, false);
+    assert(launchGateIncompleteBoot.launchGate.gates.some((gate) =>
+      gate.id === 'production_backend' &&
+      gate.status === 'blocked' &&
+      gate.requiredEnv.includes('SIGNAL_COOKIE_SECURE') &&
+      gate.requiredEnv.includes('SIGNAL_WEBHOOK_ACTOR') &&
+      gate.requiredEnv.includes('SIGNAL_OAUTH_ACTOR')));
     assert(launchGatePreflight.launchGate.gates.some((gate) => gate.id === 'tenant_isolation' && gate.status === 'pass'));
     assert(launchGatePreflight.launchGate.gates.some((gate) => gate.id === 'provider_configuration' && gate.status === 'pass'));
     assert(launchGatePreflight.launchGate.gates.some((gate) => gate.id === 'provider_sandbox_evidence' && gate.status === 'blocked'));

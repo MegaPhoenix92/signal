@@ -2811,6 +2811,36 @@ export function fallbackBackendReadiness(): BackendReadiness {
       requiredEnv: ['SIGNAL_REQUIRE_SIGNED_SESSION', 'SIGNAL_SESSION_SECRET'],
     },
     {
+      id: 'session_cookie_secure',
+      label: 'Secure session cookies',
+      ok: false,
+      localOk: true,
+      message: 'Non-loopback signed-session mode requires SIGNAL_COOKIE_SECURE=true or an HTTPS SIGNAL_APP_BASE_URL.',
+      configuredEnv: [],
+      missingEnv: ['SIGNAL_COOKIE_SECURE'],
+      requiredEnv: ['SIGNAL_COOKIE_SECURE', 'SIGNAL_APP_BASE_URL'],
+    },
+    {
+      id: 'system_webhook_actor',
+      label: 'Webhook system actor',
+      ok: false,
+      localOk: true,
+      message: 'Non-loopback hosts require SIGNAL_WEBHOOK_ACTOR for webhook mutations.',
+      configuredEnv: [],
+      missingEnv: ['SIGNAL_WEBHOOK_ACTOR'],
+      requiredEnv: ['SIGNAL_WEBHOOK_ACTOR'],
+    },
+    {
+      id: 'system_oauth_actor',
+      label: 'OAuth callback system actor',
+      ok: false,
+      localOk: true,
+      message: 'Non-loopback hosts require SIGNAL_OAUTH_ACTOR for OAuth callback mutations.',
+      configuredEnv: [],
+      missingEnv: ['SIGNAL_OAUTH_ACTOR'],
+      requiredEnv: ['SIGNAL_OAUTH_ACTOR'],
+    },
+    {
       id: 'production_auth_provider',
       label: 'Production auth provider',
       ok: false,
@@ -3954,6 +3984,9 @@ export function fallbackProductionDrill(
   const durableState = checkById('durable_state');
   const stateServiceStorage = checkById('state_service_storage');
   const signedSession = checkById('signed_session_enforced');
+  const sessionCookieSecureCheck = checkById('session_cookie_secure');
+  const webhookActorCheck = checkById('system_webhook_actor');
+  const oauthActorCheck = checkById('system_oauth_actor');
   const productionAuth = checkById('production_auth_provider');
   const tenantIsolation = checkById('tenant_isolation');
   const scheduler = checkById('job_scheduler');
@@ -3961,7 +3994,14 @@ export function fallbackProductionDrill(
   const activeProviderSchedules = data.providerValidationSchedules?.filter((schedule) => schedule.status === 'active').length ?? 0;
   const providerSandboxPassed = latestProviderRun?.status === 'passed';
   const stateServiceReady = backend.mode === 'external-service' && Boolean(durableState?.ok && stateServiceStorage?.ok);
-  const identityReady = Boolean(signedSession?.ok && productionAuth?.ok && tenantIsolation?.ok);
+  const identityReady = Boolean(
+    signedSession?.ok &&
+    sessionCookieSecureCheck?.ok &&
+    webhookActorCheck?.ok &&
+    oauthActorCheck?.ok &&
+    productionAuth?.ok &&
+    tenantIsolation?.ok,
+  );
   const schedulerReady = Boolean(scheduler?.ok && summary.failedJobs === 0 && activeProviderSchedules >= 4);
   const liveProviderSchedulerReady = Boolean(provider.ok && providerSandboxPassed && activeProviderSchedules >= 4);
   const rows = [
@@ -4013,11 +4053,25 @@ export function fallbackProductionDrill(
       area: 'identity_tenant_isolation',
       check: 'Managed/JWKS identity, signed sessions, durable membership mapping, and tenant isolation are all configured.',
       commands: ['npm run admin -- backend --env-file ./.env.production --json', 'npm run test:jwks-auth'],
-      evidence: [signedSession?.message ?? 'Signed session not evaluated', productionAuth?.message ?? 'Production auth not evaluated', tenantIsolation?.message ?? 'Tenant isolation not evaluated'],
+      evidence: [
+        signedSession?.message ?? 'Signed session not evaluated',
+        sessionCookieSecureCheck?.message ?? 'Secure session cookies not evaluated',
+        webhookActorCheck?.message ?? 'Webhook system actor not evaluated',
+        oauthActorCheck?.message ?? 'OAuth callback system actor not evaluated',
+        productionAuth?.message ?? 'Production auth not evaluated',
+        tenantIsolation?.message ?? 'Tenant isolation not evaluated',
+      ],
       owner: 'security',
       productionOk: identityReady,
       recommendation: 'Do not support many customer orgs on one backend until server-verified role and tenant claims match durable memberships.',
-      requiredEnv: [...(signedSession?.missingEnv ?? []), ...(productionAuth?.missingEnv ?? []), ...(tenantIsolation?.missingEnv ?? [])],
+      requiredEnv: [
+        ...(signedSession?.missingEnv ?? []),
+        ...(sessionCookieSecureCheck?.missingEnv ?? []),
+        ...(webhookActorCheck?.missingEnv ?? []),
+        ...(oauthActorCheck?.missingEnv ?? []),
+        ...(productionAuth?.missingEnv ?? []),
+        ...(tenantIsolation?.missingEnv ?? []),
+      ],
     }),
     productionDrillRow({
       area: 'scheduler_daemon',
@@ -6821,6 +6875,9 @@ function backendHandoffPriority(id: string) {
     durable_state: 20,
     state_service_storage: 30,
     signed_session_enforced: 40,
+    session_cookie_secure: 45,
+    system_webhook_actor: 46,
+    system_oauth_actor: 47,
     production_auth_provider: 50,
     cors_origins: 60,
     tenant_isolation: 70,
@@ -6840,6 +6897,9 @@ function backendActionFromCheck(check: BackendReadinessCheck): BackendHandoffAct
     durable_state: 'SIGNAL_BACKEND_MODE=external-service SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run admin -- backend --json',
     state_service_storage: 'SIGNAL_STATE_SERVICE_BACKEND=postgres DATABASE_URL=postgres://... SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service',
     signed_session_enforced: 'SIGNAL_REQUIRE_SIGNED_SESSION=true SIGNAL_SESSION_SECRET=<local-session-secret> npm run admin -- backend --json',
+    session_cookie_secure: 'SIGNAL_COOKIE_SECURE=true npm run admin -- backend --env-file ./.env.production --json',
+    system_webhook_actor: 'SIGNAL_WEBHOOK_ACTOR=<webhook-actor> npm run admin -- backend --env-file ./.env.production --json',
+    system_oauth_actor: 'SIGNAL_OAUTH_ACTOR=<oauth-actor> npm run admin -- backend --env-file ./.env.production --json',
     production_auth_provider: 'SIGNAL_AUTH_PROVIDER=jwks SIGNAL_AUTH_JWKS_URL=<jwks-url> npm run test:jwks-auth',
     cors_origins: 'SIGNAL_API_CORS_ORIGINS=https://app.example.com npm run admin -- backend --json',
     job_scheduler: 'SIGNAL_JOB_SCHEDULER=signal-scheduler SIGNAL_PROVIDER_VALIDATION_SCHEDULER=signal-scheduler npm run scheduler -- --once --dry-run --json',
@@ -6848,7 +6908,7 @@ function backendActionFromCheck(check: BackendReadinessCheck): BackendHandoffAct
   return {
     id: check.id,
     label: check.label,
-    owner: ['signed_session_enforced', 'production_auth_provider', 'tenant_isolation'].includes(check.id) ? 'security' : check.id === 'job_scheduler' ? 'operations' : 'platform',
+    owner: ['signed_session_enforced', 'session_cookie_secure', 'system_webhook_actor', 'system_oauth_actor', 'production_auth_provider', 'tenant_isolation'].includes(check.id) ? 'security' : check.id === 'job_scheduler' ? 'operations' : 'platform',
     status: check.ok ? 'ready' : 'blocked',
     priority: backendHandoffPriority(check.id),
     blocker: check.ok ? 'No blocker.' : check.message,
@@ -7011,12 +7071,19 @@ export function fallbackBackendCutover(
   const drillRows = Object.fromEntries(productionDrill.rows.map((row) => [row.area, row]));
   const stateServiceEnv = ['SIGNAL_BACKEND_MODE', 'SIGNAL_STATE_SERVICE_URL', 'SIGNAL_STATE_SERVICE_TOKEN'];
   const postgresEnv = ['SIGNAL_STATE_SERVICE_BACKEND', 'DATABASE_URL'];
-  const identityEnv = ['SIGNAL_REQUIRE_SIGNED_SESSION', 'SIGNAL_SESSION_SECRET', 'SIGNAL_AUTH_PROVIDER', 'SIGNAL_AUTH_JWKS_URL', 'SIGNAL_TENANT_ISOLATION_MODE'];
+  const identityEnv = ['SIGNAL_REQUIRE_SIGNED_SESSION', 'SIGNAL_SESSION_SECRET', 'SIGNAL_COOKIE_SECURE', 'SIGNAL_WEBHOOK_ACTOR', 'SIGNAL_OAUTH_ACTOR', 'SIGNAL_AUTH_PROVIDER', 'SIGNAL_AUTH_JWKS_URL', 'SIGNAL_TENANT_ISOLATION_MODE'];
   const corsEnv = ['SIGNAL_API_CORS_ORIGINS'];
   const schedulerEnv = ['SIGNAL_JOB_SCHEDULER', 'SIGNAL_PROVIDER_VALIDATION_SCHEDULER', 'SIGNAL_SCHEDULER_LOCK_POLICY'];
   const backupEnv = ['SIGNAL_STATE_BACKUP_SCHEDULE', 'SIGNAL_STATE_BACKUP_RETENTION_DAYS', 'SIGNAL_STATE_RESTORE_REHEARSAL_AT', 'SIGNAL_STATE_MIGRATION_ROLLOUT_PLAN'];
   const stateServiceReady = Boolean(checks.backend_mode?.ok && checks.durable_state?.ok && checks.state_service_storage?.ok);
-  const identityReady = Boolean(checks.signed_session_enforced?.ok && checks.production_auth_provider?.ok && checks.tenant_isolation?.ok);
+  const identityReady = Boolean(
+    checks.signed_session_enforced?.ok &&
+    checks.session_cookie_secure?.ok &&
+    checks.system_webhook_actor?.ok &&
+    checks.system_oauth_actor?.ok &&
+    checks.production_auth_provider?.ok &&
+    checks.tenant_isolation?.ok,
+  );
   const schedulerReady = Boolean(checks.job_scheduler?.ok && drillRows.scheduler_daemon?.productionOk);
   const backupReady = Boolean(drillRows.backup_restore_rehearsal?.productionOk && drillRows.migration_rollout?.productionOk);
   const rows = [
@@ -7087,10 +7154,13 @@ export function fallbackBackendCutover(
       env,
       evidence: [
         checks.signed_session_enforced?.message ?? 'Signed session not evaluated',
+        checks.session_cookie_secure?.message ?? 'Secure session cookies not evaluated',
+        checks.system_webhook_actor?.message ?? 'Webhook system actor not evaluated',
+        checks.system_oauth_actor?.message ?? 'OAuth callback system actor not evaluated',
         checks.production_auth_provider?.message ?? 'Production auth provider not evaluated',
         checks.tenant_isolation?.message ?? 'Tenant isolation not evaluated',
       ],
-      command: 'SIGNAL_REQUIRE_SIGNED_SESSION=true SIGNAL_AUTH_PROVIDER=jwks SIGNAL_AUTH_JWKS_URL=<jwks-url> SIGNAL_TENANT_ISOLATION_MODE=rls npm run test:jwks-auth',
+      command: 'SIGNAL_REQUIRE_SIGNED_SESSION=true SIGNAL_COOKIE_SECURE=true SIGNAL_WEBHOOK_ACTOR=<webhook-actor> SIGNAL_OAUTH_ACTOR=<oauth-actor> SIGNAL_AUTH_PROVIDER=jwks SIGNAL_AUTH_JWKS_URL=<jwks-url> SIGNAL_TENANT_ISOLATION_MODE=rls npm run test:jwks-auth',
       rollbackCommand: 'Keep raw actor fallback disabled in production; if JWKS fails, remove production traffic from the deployment rather than loosening auth.',
       completion: 'JWKS auth, signed-session enforcement, role/tenant claim mapping, and tenant-isolation mode all pass.',
     }),
