@@ -148,16 +148,61 @@ test('tenant scope fails closed on records with missing tenantId and doctor repo
       tenantId: 'tenant_missing',
     },
   ];
+  state.users = [
+    ...(state.users ?? []),
+    {
+      id: 'usr_tenant_admin_only',
+      tenantId: 'tenant_demo',
+      name: 'Demo Tenant Admin',
+      email: 'demo.admin@acme.example',
+      role: 'admin',
+      status: 'active',
+    },
+  ];
+  state.memberships = [
+    ...(state.memberships ?? []),
+    {
+      id: 'mem_tenant_demo_usr_tenant_admin_only',
+      tenantId: 'tenant_demo',
+      userId: 'usr_tenant_admin_only',
+      role: 'admin',
+      team: 'ops',
+      status: 'active',
+      createdAt: '2026-06-03T00:00:00.000Z',
+      createdByUserId: 'usr_admin',
+    },
+  ];
+  state.accountRecommendations = [
+    ...(state.accountRecommendations ?? []),
+    {
+      id: 'rec_orphan_missing_tenant',
+      account: 'Orphan Account',
+      accountId: 'acct_orphan',
+      ownerUserId: 'usr_tenant_admin_only',
+      title: 'orphan recommendation',
+      rationale: 'test',
+      strategy: 'test',
+      priority: 'low',
+      status: 'open',
+      evidenceSignalIds: [],
+      evidenceActionIds: [],
+      stakeholderIds: [],
+    },
+  ];
   await saveState(state, { statePath });
 
   const scoped = scopeStateForActor(state, tenantB.actor.id);
   assert.equal(scoped.webhookEvents.some((event) => event.id === 'wh_orphan_missing_tenant'), false);
   assert.equal(scoped.webhookEvents.some((event) => event.id === 'wh_orphan_unknown_tenant'), false);
   assert.equal(scoped.webhookEvents.some((event) => event.id === 'wh_seed_stripe_accepted'), false);
+  assert.equal(scoped.accountRecommendations.some((item) => item.id === 'rec_orphan_missing_tenant'), false);
+
+  const tenantAdminScoped = scopeStateForActor(state, 'usr_tenant_admin_only');
+  assert.equal(tenantAdminScoped.accountRecommendations.some((item) => item.id === 'rec_orphan_missing_tenant'), false);
 
   const report = doctor(state);
   const tenantScopedCheck = report.checks.find((check) => check.id === 'tenant_scoped_records');
   assert(tenantScopedCheck);
   assert.equal(tenantScopedCheck.ok, false);
-  assert.equal(tenantScopedCheck.details?.orphans?.length, 2);
+  assert.equal(tenantScopedCheck.details?.orphans?.length, 3);
 });

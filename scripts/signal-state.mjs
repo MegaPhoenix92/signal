@@ -812,9 +812,9 @@ export function scopeStateForActor(state, actorOrUserId) {
   scoped.flowRuns = (state.flowRuns ?? []).filter(belongsToTenant);
   scoped.accountProfiles = (state.accountProfiles ?? []).filter(belongsToTenant);
   scoped.accountEvents = (state.accountEvents ?? []).filter(belongsToTenant);
-  scoped.accountActions = (state.accountActions ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.ownerUserId));
-  scoped.accountReviews = (state.accountReviews ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.ownerUserId));
-  scoped.accountRecommendations = (state.accountRecommendations ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.ownerUserId));
+  scoped.accountActions = (state.accountActions ?? []).filter(belongsToTenant);
+  scoped.accountReviews = (state.accountReviews ?? []).filter(belongsToTenant);
+  scoped.accountRecommendations = (state.accountRecommendations ?? []).filter(belongsToTenant);
   scoped.notificationPreferences = (state.notificationPreferences ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.userId));
   scoped.notificationEvents = (state.notificationEvents ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.userId));
   scoped.notificationDigestRuns = (state.notificationDigestRuns ?? []).filter(belongsToTenant);
@@ -2267,6 +2267,8 @@ const TENANT_SCOPED_COLLECTIONS = [
   'accountActions',
   'accountEvents',
   'accountProfiles',
+  'accountRecommendations',
+  'accountReviews',
   'billingOverrides',
   'billingSessions',
   'dataRequests',
