@@ -164,6 +164,7 @@ import {
   AccountRecommendationCard,
   AccountReviewCard,
   AdminTable,
+  BarViz,
   BusyLabel,
   CheckItem,
   CommandStrip,
@@ -180,6 +181,7 @@ import {
   NotificationEventCard,
   PanelHead,
   ProductHeader,
+  ProgressViz,
   resolveTeamCheckoutPlanId,
   SeedReadOnlyCallout,
   SignalRow,
@@ -1064,7 +1066,7 @@ function MarketingPage() {
 }
 
 function RegistrationOnboarding({ liveState }: { liveState: LiveState }) {
-  const { actorUserId, backendReadiness, claimInvite, data, error, isLoading, isMutating, lastMutation, mutate, onboardingReadiness: loadedOnboardingReadiness, refresh, registerWorkspace, setActorUserId, source, summary } = liveState;
+  const { actorUserId, backendReadiness, claimInvite, data, error, isLoading, isMutating, lastMutation, lastUpdatedAt, mutate, onboardingReadiness: loadedOnboardingReadiness, pollingIntervalMs, refresh, registerWorkspace, setActorUserId, source, summary } = liveState;
   const onboardingReadiness = loadedOnboardingReadiness ?? fallbackOnboardingReadiness(data, backendReadiness);
   const currentActor = data.users.find((user) => user.id === actorUserId) ?? data.users[0];
   const tenant = data.tenants.find((item) => item.id === currentActor?.tenantId) ?? data.tenants[0];
@@ -1297,7 +1299,7 @@ function RegistrationOnboarding({ liveState }: { liveState: LiveState }) {
     <div className="product-shell">
       <ProductHeader active="register" />
       <main className="product-main">
-        <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+        <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} lastUpdatedAt={lastUpdatedAt} onActorChange={setActorUserId} onRefresh={refresh} pollingIntervalMs={pollingIntervalMs} source={source} summary={summary} />
         <section className="product-hero-panel registration-hero" data-reveal>
           <div>
             <p className="kicker">
@@ -1638,8 +1640,9 @@ function prioritySortValue(priority: 'critical' | 'high' | 'medium' | 'low') {
 
 
 function UserWorkspace({ liveState }: { liveState: LiveState }) {
-  const { actorUserId, backendReadiness, data, error, isLoading, isMutating, lastMutation, mutate, onboardingReadiness: loadedOnboardingReadiness, refresh, setActorUserId, source, summary } = liveState;
+  const { actorUserId, backendReadiness, data, digestionPipeline: loadedDigestionPipeline, error, isLoading, isMutating, lastMutation, lastUpdatedAt, mutate, onboardingReadiness: loadedOnboardingReadiness, pollingIntervalMs, refresh, setActorUserId, source, summary } = liveState;
   const onboardingReadiness = loadedOnboardingReadiness ?? fallbackOnboardingReadiness(data, backendReadiness);
+  const digestionPipeline = loadedDigestionPipeline ?? fallbackSignalDigestionPipeline(data, backendReadiness);
   const users = data.users;
   const currentUser = users.find((user) => user.id === actorUserId) ?? users.find((user) => user.team === 'sales') ?? users[0];
   const tenant = data.tenants.find((item) => item.id === currentUser?.tenantId) ?? data.tenants[0];
@@ -1648,7 +1651,7 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
       <div className="product-shell">
         <ProductHeader active="workspace" />
         <main className="product-main">
-          <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+          <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} lastUpdatedAt={lastUpdatedAt} onActorChange={setActorUserId} onRefresh={refresh} pollingIntervalMs={pollingIntervalMs} source={source} summary={summary} />
           {source === 'seed' && <SeedReadOnlyCallout area="workspace" />}
           <section className="ops-panel empty-state" data-reveal>
             <h3>Workspace data unavailable</h3>
@@ -1805,6 +1808,40 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
     ['Mailboxes', `${visibleMailboxes.length} visible / ${summary.mailboxes} total summary`],
     ['Source snippets', `${visibleSourceMessages.length} visible source messages`],
   ];
+  const pipelineVizItems = digestionPipeline.rows.map((row) => ({
+    accent: row.localOk ? 'lime' as const : 'gold' as const,
+    detail: row.localOk ? 'Ready' : 'Attention',
+    label: titleize(row.area),
+    total: 1,
+    value: row.localOk ? 1 : 0,
+  }));
+  const signalTypeVizItems = ['buying_intent', 'product_idea', 'relationship_risk', 'customer_risk'].map((type, index) => ({
+    accent: (['lime', 'gold', 'cyan', 'coral'] as const)[index],
+    label: titleize(type),
+    value: visibleSignals.filter((signal) => signal.type === type).length,
+  }));
+  const accountHealthVizItems = [
+    {
+      accent: 'lime' as const,
+      label: '80+',
+      value: accounts.filter((account) => account.healthScore >= 80).length,
+    },
+    {
+      accent: 'cyan' as const,
+      label: '60-79',
+      value: accounts.filter((account) => account.healthScore >= 60 && account.healthScore < 80).length,
+    },
+    {
+      accent: 'gold' as const,
+      label: '40-59',
+      value: accounts.filter((account) => account.healthScore >= 40 && account.healthScore < 60).length,
+    },
+    {
+      accent: 'coral' as const,
+      label: '<40',
+      value: accounts.filter((account) => account.healthScore < 40).length,
+    },
+  ];
 
   const updatePreference = (patch: Partial<NotificationPreference>) =>
     mutate('notifications.preference', {
@@ -1822,7 +1859,7 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
     <div className="product-shell">
       <ProductHeader active="workspace" />
       <main className="product-main">
-        <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+        <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} lastUpdatedAt={lastUpdatedAt} onActorChange={setActorUserId} onRefresh={refresh} pollingIntervalMs={pollingIntervalMs} source={source} summary={summary} />
         {source === 'seed' && <SeedReadOnlyCallout area="workspace" />}
         <section className="product-hero-panel workspace-hero" data-reveal>
           <div>
@@ -1911,6 +1948,12 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
           <MetricCard icon={Brain} label="Strategy recs" value={String(openAccountRecommendations.length)} detail="Source-backed account guidance" accent="cyan" />
           <MetricCard icon={BellRing} label="Unread alerts" value={String(unreadNotifications.length)} detail={`${summary.digestRuns ?? data.notificationDigestRuns?.length ?? 0} digest runs`} accent="lime" />
           <MetricCard icon={AlertTriangle} label="Lifecycle notices" value={String(visibleLifecycleNotices.filter((notice) => notice.status === 'open').length)} detail="Billing, source, and provider state" accent="coral" />
+        </section>
+
+        <section className="viz-grid" aria-label="Workspace visualizations">
+          <ProgressViz title="Digestion pipeline" items={pipelineVizItems} />
+          <BarViz title="Signals by type" items={signalTypeVizItems} />
+          <BarViz title="Account health bands" items={accountHealthVizItems} />
         </section>
 
         <section className="account-monitor-grid" aria-label="Account relationship monitor">
@@ -2424,6 +2467,11 @@ function App() {
   return <MarketingPage />;
 }
 
+function signalPollingIntervalMs() {
+  const configured = Number(import.meta.env.VITE_SIGNAL_POLL_INTERVAL_MS ?? 45_000);
+  return Number.isFinite(configured) && configured >= 0 ? configured : 45_000;
+}
+
 function useSignalAppState(mode: AppMode) {
   const [response, setResponse] = useState(fallbackStateResponse);
   const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness>(fallbackProviderReadiness);
@@ -2433,7 +2481,9 @@ function useSignalAppState(mode: AppMode) {
   const [isLoading, setIsLoading] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
   const [isValidatingSandbox, setIsValidatingSandbox] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState(() => new Date().toISOString());
   const [lastMutation, setLastMutation] = useState<string | null>(null);
+  const pollingIntervalMs = signalPollingIntervalMs();
   const [actorUserId, setActorUserIdState] = useState<string>(() => activeUserIdFromResponse(fallbackStateResponse()));
   const [sectionLoading, setSectionLoading] = useState<Partial<Record<AdminReportSection, boolean>>>({});
   const responseRef = useRef(response);
@@ -2454,6 +2504,10 @@ function useSignalAppState(mode: AppMode) {
     setSectionLoading({});
   }
 
+  function markStateUpdated() {
+    setLastUpdatedAt(new Date().toISOString());
+  }
+
   async function refresh() {
     setIsLoading(true);
     setError(null);
@@ -2465,6 +2519,7 @@ function useSignalAppState(mode: AppMode) {
       setProviderReadiness(next.readiness);
       setActorUserIdState(activeUserIdFromResponse(next.response));
       setSource('api');
+      markStateUpdated();
     } catch (refreshError) {
       const fallback = fallbackStateResponse();
       setSource('seed');
@@ -2475,6 +2530,7 @@ function useSignalAppState(mode: AppMode) {
       setProviderSandbox(null);
       setActorUserIdState(activeUserIdFromResponse(fallback));
       setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
+      markStateUpdated();
     } finally {
       setIsLoading(false);
     }
@@ -2505,6 +2561,7 @@ function useSignalAppState(mode: AppMode) {
       }
       setLastMutation(result.details.message);
       setSource('api');
+      markStateUpdated();
       return { ok: true } as const;
     } catch (mutationError) {
       const message = mutationError instanceof Error ? mutationError.message : String(mutationError);
@@ -2540,6 +2597,7 @@ function useSignalAppState(mode: AppMode) {
       }
       setLastMutation(result.details.message);
       setSource('api');
+      markStateUpdated();
       return { ok: true } as const;
     } catch (claimError) {
       const message = claimError instanceof Error ? claimError.message : String(claimError);
@@ -2575,6 +2633,7 @@ function useSignalAppState(mode: AppMode) {
       }
       setLastMutation(result.details.message);
       setSource('api');
+      markStateUpdated();
       return { ok: true } as const;
     } catch (registrationError) {
       const message = registrationError instanceof Error ? registrationError.message : String(registrationError);
@@ -2590,6 +2649,7 @@ function useSignalAppState(mode: AppMode) {
       setActorUserIdState(userId);
       const user = response.state.users.find((item) => item.id === userId);
       setLastMutation(user ? `Seed session switched to ${user.email}` : 'Seed session switched');
+      markStateUpdated();
       return;
     }
 
@@ -2617,6 +2677,7 @@ function useSignalAppState(mode: AppMode) {
       }
       setLastMutation(result.details.message);
       setSource('api');
+      markStateUpdated();
     } catch (sessionError) {
       setError(sessionError instanceof Error ? sessionError.message : String(sessionError));
     } finally {
@@ -2643,12 +2704,14 @@ function useSignalAppState(mode: AppMode) {
         responseRef.current = nextResponse;
         resetAdminSectionCache(nextResponse);
         setActorUserIdState(activeUserIdFromResponse({ state: result.state, summary: result.summary }));
+        markStateUpdated();
       }
       setLastMutation(
         result.recorded
           ? `Recorded sandbox validation ${result.recorded.status}: ${result.sandbox.summary.passed}/${result.sandbox.summary.total} providers passed`
           : `Sandbox validation: ${result.sandbox.summary.passed}/${result.sandbox.summary.total} providers passed`,
       );
+      markStateUpdated();
     } catch (sandboxError) {
       setError(sandboxError instanceof Error ? sandboxError.message : String(sandboxError));
     } finally {
@@ -2677,6 +2740,7 @@ function useSignalAppState(mode: AppMode) {
         responseRef.current = nextResponse;
         resetAdminSectionCache(nextResponse);
         setActorUserIdState(activeUserIdFromResponse({ state: result.state, summary: result.summary }));
+        markStateUpdated();
       }
       try {
         const readiness = await fetchProviderReadiness();
@@ -2692,6 +2756,7 @@ function useSignalAppState(mode: AppMode) {
             : 'Scheduled sandbox validation completed',
       );
       setSource('api');
+      markStateUpdated();
     } catch (scheduledError) {
       setError(scheduledError instanceof Error ? scheduledError.message : String(scheduledError));
     } finally {
@@ -2715,6 +2780,7 @@ function useSignalAppState(mode: AppMode) {
         setProviderReadiness(next.readiness);
         setActorUserIdState(activeUserIdFromResponse(next.response));
         setSource('api');
+        markStateUpdated();
       })
       .catch((loadError) => {
         if (abortController.signal.aborted) {
@@ -2729,6 +2795,7 @@ function useSignalAppState(mode: AppMode) {
         setActorUserIdState(activeUserIdFromResponse(fallback));
         setSource('seed');
         setError(loadError instanceof Error ? loadError.message : String(loadError));
+        markStateUpdated();
       })
       .finally(() => {
         if (!abortController.signal.aborted) {
@@ -2738,6 +2805,21 @@ function useSignalAppState(mode: AppMode) {
 
     return () => abortController.abort();
   }, [mode]);
+
+  useEffect(() => {
+    if (mode === 'marketing' || pollingIntervalMs <= 0 || isLoading || isMutating) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+      void refresh();
+    }, pollingIntervalMs);
+
+    return () => window.clearInterval(intervalId);
+  }, [mode, pollingIntervalMs, isLoading, isMutating]);
 
   const loadAdminSection = useCallback(async (section: AdminReportSection) => {
     if (mode !== 'admin' || source === 'seed') {
@@ -2815,6 +2897,7 @@ function useSignalAppState(mode: AppMode) {
     lifecyclePlaybook: response.lifecyclePlaybook,
     digestionPipeline: response.digestionPipeline,
     lastMutation,
+    lastUpdatedAt,
     loadAdminSection,
     mutate,
     onboardingReadiness: response.onboardingReadiness,
@@ -2831,6 +2914,7 @@ function useSignalAppState(mode: AppMode) {
     qaAnswers: response.qaAnswers,
     providerReadiness,
     providerSandbox,
+    pollingIntervalMs,
     registerWorkspace,
     refresh,
     actorUserId,

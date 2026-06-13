@@ -66,11 +66,13 @@ export type LiveState = {
   isMutating: boolean;
   isValidatingSandbox: boolean;
   claimInvite: (args: Record<string, unknown>) => Promise<MutationOutcome>;
+  lastUpdatedAt: string;
   lastMutation: string | null;
   loadAdminSection: (section: AdminReportSection) => Promise<void>;
   mutate: (action: SignalMutationAction, args: Record<string, unknown>) => Promise<MutationOutcome>;
   providerReadiness: ProviderReadiness;
   providerSandbox: ProviderSandboxReport | null;
+  pollingIntervalMs: number;
   registerWorkspace: (args: Record<string, unknown>) => Promise<MutationOutcome>;
   refresh: () => Promise<void>;
   actorUserId: string;

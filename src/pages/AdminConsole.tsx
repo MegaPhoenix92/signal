@@ -43,6 +43,7 @@ import {
   AccountEventRow,
   AccountRecommendationCard,
   AccountReviewCard,
+  BarViz,
   billingOverrideValue,
   CheckItem,
   CommandStrip,
@@ -69,6 +70,7 @@ import {
   InlineError,
   PanelHead,
   ProductHeader,
+  ProgressViz,
   ProviderReadinessCard,
   RedactionRuleCard,
   resolveTeamCheckoutPlanId,
@@ -446,6 +448,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     isValidatingSandbox,
     lifecyclePlaybook,
     lastMutation,
+    lastUpdatedAt,
     loadAdminSection,
     mutate,
     onboardingReadiness,
@@ -462,6 +465,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     qaAnswers,
     providerReadiness,
     providerSandbox,
+    pollingIntervalMs,
     refresh,
     runScheduledValidation,
     sectionLoading,
@@ -595,7 +599,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
       <div className="product-shell admin-shell">
         <ProductHeader active="admin" />
         <main className="product-main">
-          <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+          <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} lastUpdatedAt={lastUpdatedAt} onActorChange={setActorUserId} onRefresh={refresh} pollingIntervalMs={pollingIntervalMs} source={source} summary={summary} />
           {source === 'seed' && <SeedReadOnlyCallout area="admin" />}
           <section className="ops-panel empty-state" data-reveal>
             <h3>Admin data unavailable</h3>
@@ -669,6 +673,40 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
   const latestFlowRuns = [...tenantFlowRuns].slice(-5).reverse();
   const latestSourceMessages = [...tenantSourceMessages].slice(-5).reverse();
   const generatedSignals = tenantSignals.filter((signal) => signal.sourceMessageId && signal.flowId);
+  const pipelineVizItems = (digestionPipeline?.rows ?? []).map((row) => ({
+    accent: row.localOk ? 'lime' as const : 'gold' as const,
+    detail: row.productionOk ? 'Production proof ready' : row.localOk ? 'Local proof ready' : 'Needs evidence',
+    label: titleize(row.area),
+    total: 1,
+    value: row.localOk ? 1 : 0,
+  }));
+  const adminSignalTypeVizItems = ['buying_intent', 'product_idea', 'relationship_risk', 'customer_risk'].map((type, index) => ({
+    accent: (['lime', 'gold', 'cyan', 'coral'] as const)[index],
+    label: titleize(type),
+    value: tenantSignals.filter((signal) => signal.type === type).length,
+  }));
+  const adminAccountHealthVizItems = [
+    {
+      accent: 'lime' as const,
+      label: '80+',
+      value: tenantAccountProfiles.filter((account) => account.healthScore >= 80).length,
+    },
+    {
+      accent: 'cyan' as const,
+      label: '60-79',
+      value: tenantAccountProfiles.filter((account) => account.healthScore >= 60 && account.healthScore < 80).length,
+    },
+    {
+      accent: 'gold' as const,
+      label: '40-59',
+      value: tenantAccountProfiles.filter((account) => account.healthScore >= 40 && account.healthScore < 60).length,
+    },
+    {
+      accent: 'coral' as const,
+      label: '<40',
+      value: tenantAccountProfiles.filter((account) => account.healthScore < 40).length,
+    },
+  ];
   const unreadNotifications = tenantNotificationEvents.filter((event) => event.status === 'unread');
   const mutedNotifications = tenantNotificationEvents.filter((event) => event.status === 'muted');
   const latestDigestRuns = [...tenantDigestRuns].slice(-5).reverse();
@@ -960,7 +998,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
       <div className="product-shell admin-shell">
         <ProductHeader active="admin" />
         <main className="product-main">
-          <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+          <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} lastUpdatedAt={lastUpdatedAt} onActorChange={setActorUserId} onRefresh={refresh} pollingIntervalMs={pollingIntervalMs} source={source} summary={summary} />
           {source === 'seed' && <SeedReadOnlyCallout area="admin" />}
           <section className="admin-hero access-denied-panel">
             <div>
@@ -1022,9 +1060,11 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
           isLoading={isLoading}
           isMutating={isMutating}
           lastMutation={lastMutation}
+          lastUpdatedAt={lastUpdatedAt}
           onActorChange={setActorUserId}
           onContextTenantChange={selectAdminContextTenant}
           onRefresh={refresh}
+          pollingIntervalMs={pollingIntervalMs}
           source={source}
           summary={summary}
         />
@@ -1330,6 +1370,11 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
             <MetricCard icon={RefreshCw} label="Sandbox runs" value={String(summary.providerValidationRuns ?? providerValidationRuns.length)} detail={summary.latestProviderValidationStatus ? `${titleize(summary.latestProviderValidationStatus)} latest` : 'Not recorded'} accent="lime" />
             <MetricCard icon={RefreshCw} label="Validation schedules" value={`${summary.activeProviderValidationSchedules ?? providerValidationSchedules.filter((schedule) => schedule.status === 'active').length}/${summary.providerValidationSchedules ?? providerValidationSchedules.length}`} detail={`${summary.dueProviderValidationSchedules ?? dueProviderValidationSchedules.length} due`} accent="cyan" />
             <MetricCard icon={Database} label="Backend mode" value={titleize(backendReadiness.mode)} detail={backendReadiness.productionReady ? 'Production ready' : `${backendReadiness.summary.readyChecks}/${backendReadiness.summary.totalChecks} production checks ready`} accent={backendReadiness.productionReady ? 'lime' : 'gold'} />
+            <section className="viz-grid admin-viz-grid" aria-label="Admin dashboard visualizations">
+              <ProgressViz title="Digestion pipeline" items={pipelineVizItems} />
+              <BarViz title="Signal volume" items={adminSignalTypeVizItems} />
+              <BarViz title="Account health bands" items={adminAccountHealthVizItems} />
+            </section>
             <article className="ops-panel wide-panel">
               <PanelHead icon={AlertTriangle} title="Readiness checks" action="CLI doctor parity" />
               <div className="check-list">
@@ -1361,7 +1406,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   row.ok ? 'Pass' : 'Mismatch',
                 ])}
               />
-              <CommandStrip commands={['npm run admin -- dashboard-audit --json', 'curl http://127.0.0.1:8787/api/dashboard-audit', 'npm run admin -- dashboard-audit --env-file ./.env.production --json']} />
+              <CommandStrip commands={['npm run admin -- dashboard-audit --json', 'curl http://127.0.0.1:8787/api/dashboard-audit', 'npm run admin -- dashboard-audit --env-file ./.env.production --json']} feedback={mutationFeedback} />
             </article>
           </section>
         )}
@@ -1653,7 +1698,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   String(watch.notificationCount ?? 0),
                 ])}
               />
-              <CommandStrip commands={['npm run admin -- mailboxes connect-url tenant_demo outlook usr_admin mbx_outlook_success', 'npm run admin -- mailboxes callback outlook <code> <state>', 'npm run admin -- mailboxes watch mbx_gmail_sales', 'npm run admin -- mailboxes renew-watch watch_gmail_mbx_gmail_sales', 'curl -X POST http://127.0.0.1:8787/api/webhooks/gmail', 'npm run admin -- mailboxes sync mbx_gmail_sales', 'npm run admin -- mailboxes replay mbx_gmail_sales']} />
+              <CommandStrip commands={['npm run admin -- mailboxes connect-url tenant_demo outlook usr_admin mbx_outlook_success', 'npm run admin -- mailboxes callback outlook <code> <state>', 'npm run admin -- mailboxes watch mbx_gmail_sales', 'npm run admin -- mailboxes renew-watch watch_gmail_mbx_gmail_sales', 'curl -X POST http://127.0.0.1:8787/api/webhooks/gmail', 'npm run admin -- mailboxes sync mbx_gmail_sales', 'npm run admin -- mailboxes replay mbx_gmail_sales']} feedback={mutationFeedback} />
             </article>
             {emailHandoff ? (
               <article className="ops-panel">
@@ -1860,7 +1905,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   </div>
                 </div>
               )}
-              <CommandStrip commands={['npm run admin -- email-flows run', 'npm run admin -- email-flows route flow_buying_intent founder usr_admin Founder_review', 'npm run admin -- email-flows route flow_product_ideas crm usr_sales CRM_followup', 'npm run admin -- signals handoff sig_product_001 crm CRM_followup', 'npm run admin -- quality threshold tenant_demo 0.85', 'npm run admin -- quality suppress tenant_demo domain internal.example', 'npm run admin -- digestion-pipeline --json', 'curl http://127.0.0.1:8787/api/digestion-pipeline', 'npm run admin -- models --json', 'npm run admin -- models policy tenant_demo opt_in_tuning Governance_reviewed', 'npm run admin -- signals feedback sig_risk_001 useful']} />
+              <CommandStrip commands={['npm run admin -- email-flows run', 'npm run admin -- email-flows route flow_buying_intent founder usr_admin Founder_review', 'npm run admin -- email-flows route flow_product_ideas crm usr_sales CRM_followup', 'npm run admin -- signals handoff sig_product_001 crm CRM_followup', 'npm run admin -- quality threshold tenant_demo 0.85', 'npm run admin -- quality suppress tenant_demo domain internal.example', 'npm run admin -- digestion-pipeline --json', 'curl http://127.0.0.1:8787/api/digestion-pipeline', 'npm run admin -- models --json', 'npm run admin -- models policy tenant_demo opt_in_tuning Governance_reviewed', 'npm run admin -- signals feedback sig_risk_001 useful']} feedback={mutationFeedback} />
             </article>
           </section>
         )}
@@ -2661,7 +2706,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                 )}
               </div>
               <InlineError message={mutationFeedback.errorFor('admin-payment-checkout', 'admin-payment-portal', 'admin-payment-sync', 'admin-payment-beta-comp', 'admin-payment-webhook-failed', 'admin-payment-webhook-paid', 'admin-payment-cancel')} />
-              <CommandStrip commands={['npm run admin -- payments sync tenant_demo', 'npm run admin -- payments checkout tenant_demo plan_team', 'npm run admin -- payments checkout tenant_demo plan_team --live-provider', 'npm run admin -- payments portal tenant_demo --live-provider', 'npm run admin -- payments override tenant_demo beta_access Beta_extension plan_beta', 'npm run admin -- payments webhook invoice.payment_failed sub_demo', 'npm run admin -- payments webhook subscription.updated sub_demo past_due', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments cancel sub_demo']} />
+              <CommandStrip commands={['npm run admin -- payments sync tenant_demo', 'npm run admin -- payments checkout tenant_demo plan_team', 'npm run admin -- payments checkout tenant_demo plan_team --live-provider', 'npm run admin -- payments portal tenant_demo --live-provider', 'npm run admin -- payments override tenant_demo beta_access Beta_extension plan_beta', 'npm run admin -- payments webhook invoice.payment_failed sub_demo', 'npm run admin -- payments webhook subscription.updated sub_demo past_due', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments cancel sub_demo']} feedback={mutationFeedback} />
             </article>
             {paymentHandoff ? (
               <article className="ops-panel">
@@ -2729,7 +2774,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   columns={['Flow', 'Status', 'Owner', 'Notices', 'Admin action', 'Command']}
                   rows={lifecyclePlaybookRows}
                 />
-                <CommandStrip commands={['npm run admin -- lifecycle-playbook --json', 'curl http://127.0.0.1:8787/api/lifecycle-playbook', 'npm run admin -- onboarding-readiness --json', 'npm run admin -- mailboxes disconnect <mailboxId>', 'npm run admin -- notifications digest tenant_demo', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments checkout tenant_demo plan_team', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>']} />
+                <CommandStrip commands={['npm run admin -- lifecycle-playbook --json', 'curl http://127.0.0.1:8787/api/lifecycle-playbook', 'npm run admin -- onboarding-readiness --json', 'npm run admin -- mailboxes disconnect <mailboxId>', 'npm run admin -- notifications digest tenant_demo', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments checkout tenant_demo plan_team', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>']} feedback={mutationFeedback} />
               </article>
             ) : (
               <ReportLoadingPanel icon={Workflow} title="Lifecycle playbook" />
@@ -3198,7 +3243,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   Drain billing webhooks
                 </button>
               </div>
-              <CommandStrip commands={['npm run admin -- jobs --json', 'npm run admin -- jobs run', 'npm run scheduler -- --once --dry-run --json', 'SIGNAL_JOB_SCHEDULER=signal-scheduler npm run scheduler', 'npm run admin -- jobs run provider_validation --limit 1', 'npm run admin -- jobs run signal_handoff --limit 5', 'npm run admin -- jobs drain billing_webhook']} />
+              <CommandStrip commands={['npm run admin -- jobs --json', 'npm run admin -- jobs run', 'npm run scheduler -- --once --dry-run --json', 'SIGNAL_JOB_SCHEDULER=signal-scheduler npm run scheduler', 'npm run admin -- jobs run provider_validation --limit 1', 'npm run admin -- jobs run signal_handoff --limit 5', 'npm run admin -- jobs drain billing_webhook']} feedback={mutationFeedback} />
             </article>
             <article className="ops-panel">
               <PanelHead icon={Gauge} title="Provider operations" action="Email + payment queues" />
@@ -3320,7 +3365,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   String((preference.mutedAccounts?.length ?? 0) + (preference.mutedSignalTypes?.length ?? 0)),
                 ])}
               />
-              <CommandStrip commands={['npm run admin -- notifications --json', 'npm run admin -- notifications digest tenant_demo', 'SIGNAL_EMAIL_PROVIDER=sendgrid SIGNAL_EMAIL_PROVIDER_MODE=live SIGNAL_SENDGRID_ASM_GROUP_ID=... SIGNAL_SENDGRID_CATEGORIES=sales_signal,product_ideas npm run admin -- jobs run outbound_email --limit 1', 'SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET=<email-webhook-secret> npm run admin -- notifications webhook-signed ./email-event.json <Signal-Email-Signature>', 'SIGNAL_SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY=... npm run admin -- notifications sendgrid-webhook-signed ./sendgrid-events.json <signature> <timestamp>', 'npm run admin -- notifications unsubscribe usr_product']} />
+              <CommandStrip commands={['npm run admin -- notifications --json', 'npm run admin -- notifications digest tenant_demo', 'SIGNAL_EMAIL_PROVIDER=sendgrid SIGNAL_EMAIL_PROVIDER_MODE=live SIGNAL_SENDGRID_ASM_GROUP_ID=... SIGNAL_SENDGRID_CATEGORIES=sales_signal,product_ideas npm run admin -- jobs run outbound_email --limit 1', 'SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET=<email-webhook-secret> npm run admin -- notifications webhook-signed ./email-event.json <Signal-Email-Signature>', 'SIGNAL_SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY=... npm run admin -- notifications sendgrid-webhook-signed ./sendgrid-events.json <signature> <timestamp>', 'npm run admin -- notifications unsubscribe usr_product']} feedback={mutationFeedback} />
             </article>
             </>
             )}
