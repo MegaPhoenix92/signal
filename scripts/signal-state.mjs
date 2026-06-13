@@ -465,6 +465,7 @@ export function normalizeState(state) {
   state.notificationDigestRuns = state.notificationDigestRuns ?? [];
   state.emailDeliveryMessages = state.emailDeliveryMessages ?? defaultEmailDeliveryMessages(state);
   state.emailWatchSubscriptions = state.emailWatchSubscriptions ?? [];
+  state.driftEvents = state.driftEvents ?? [];
   refreshNotificationQueue(state);
   state.signalQualitySettings = state.signalQualitySettings ?? defaultSignalQualitySettings(state);
   ensureDefaultSignalQualitySettings(state);
@@ -568,6 +569,9 @@ export function summarizeState(state, statePath = resolveStatePath()) {
     lifecycleNotices: state.lifecycleNotices?.length ?? 0,
     openLifecycleNotices: state.lifecycleNotices?.filter((notice) => notice.status === 'open').length ?? 0,
     criticalLifecycleNotices: state.lifecycleNotices?.filter((notice) => notice.status === 'open' && notice.severity === 'critical').length ?? 0,
+    driftEvents: state.driftEvents?.length ?? 0,
+    openDriftEvents: state.driftEvents?.filter((event) => event.status === 'open').length ?? 0,
+    resolvedDriftEvents: state.driftEvents?.filter((event) => event.status === 'resolved').length ?? 0,
     activeEntitlements: state.entitlements?.filter((entitlement) => entitlement.status === 'active').length ?? 0,
     jobs: state.jobs?.length ?? 0,
     failedJobs: state.jobs?.filter((job) => job.status === 'failed').length ?? 0,
@@ -757,6 +761,12 @@ function narrowMemberScopedState(state, scoped, actor, {
       (notice.sourceIds?.mailboxId && visibleMailboxIds.has(notice.sourceIds.mailboxId)) ||
       (notice.category === 'payment' && canManageBilling(tenantId)));
   });
+  scoped.driftEvents = (scoped.driftEvents ?? []).filter((event) =>
+    keepTenantRecord(event.tenantId, () =>
+      event.ownerUserId === actor.id ||
+      (event.mailboxId && visibleMailboxIds.has(event.mailboxId)) ||
+      (event.signalId && visibleSignalIds.has(event.signalId)) ||
+      (event.account && visibleAccountKeys.has(accountVisibilityKey(event.tenantId, event.account)))));
 
   // Product default (#96): peer emails hidden for non-admin members; flip to a directory model if product decides otherwise.
   scoped.users = (scoped.users ?? []).map((user) => {
@@ -837,6 +847,7 @@ export function scopeStateForActor(state, actorOrUserId) {
   scoped.invoices = (state.invoices ?? []).filter(belongsToTenant);
   scoped.paymentEvents = (state.paymentEvents ?? []).filter(belongsToTenant);
   scoped.lifecycleNotices = (state.lifecycleNotices ?? []).filter(belongsToTenant);
+  scoped.driftEvents = (state.driftEvents ?? []).filter(belongsToTenant);
   scoped.jobs = (state.jobs ?? []).filter(belongsToTenant);
   scoped.deadLetter = (state.deadLetter ?? []).filter(belongsToTenant);
   scoped.apiSessions = (state.apiSessions ?? []).filter((item) => userIds.has(item.userId));
@@ -1603,6 +1614,7 @@ const operationsWebhookCatalog = [
 const operationsQueues = [
   'email_sync',
   'signal_detection',
+  'account_sync',
   'notification_digest',
   'outbound_email',
   'billing_webhook',
@@ -1835,6 +1847,7 @@ export function operationsHealthReport(state, {
   const blockingQueues = new Set(['billing_webhook', 'outbound_email']);
   const failedQueues = queues.filter((queue) => (queue.failed > 0 || queue.deadLetter > 0) && blockingQueues.has(queue.queue));
   const failedDeliveries = (state.emailDeliveryMessages ?? []).filter((message) => ['failed', 'bounced'].includes(message.status));
+  const openDriftEvents = (state.driftEvents ?? []).filter((event) => event.status === 'open');
   const activeBackoffs = rateLimits.filter((row) => row.active);
   const blockingLifecycleCategories = new Set(['payment', 'access']);
   const criticalLifecycle = lifecycle.categories.filter((category) => category.critical > 0 && blockingLifecycleCategories.has(category.category));
@@ -1842,6 +1855,7 @@ export function operationsHealthReport(state, {
     ...webhooks.filter((row) => !row.localOk).map((row) => `${row.channel}: ${row.label} is ${row.status}`),
     ...failedQueues.map((row) => `${row.queue}: ${row.failed} failed job(s), ${row.deadLetter} dead-letter job(s)`),
     ...failedDeliveries.map((message) => `outbound_email: ${message.id} is ${message.status}`),
+    ...openDriftEvents.map((event) => `drift:${event.domain}: ${event.entityType ?? 'record'} ${event.entityId ?? event.id} differs from provider`),
     ...activeBackoffs.map((row) => `${row.kind}:${row.targetId} backoff until ${row.retryAfterAt}`),
     ...criticalLifecycle.map((row) => `${row.category}: ${row.critical} critical open lifecycle notice(s)`),
     ...freshness.blockers.map((blocker) => `freshness: ${blocker.message}`),
@@ -1865,6 +1879,7 @@ export function operationsHealthReport(state, {
       activeBackoffs: activeBackoffs.length,
       criticalLifecycle: criticalLifecycle.reduce((total, row) => total + row.critical, 0),
       failedDeliveries: failedDeliveries.length,
+      openDriftEvents: openDriftEvents.length,
       freshnessBlocked: freshness.blockers.length,
       failedQueues: failedQueues.length,
       failedJobs: summary.failedJobs ?? 0,
@@ -2282,6 +2297,7 @@ const TENANT_SCOPED_COLLECTIONS = [
   'billingSessions',
   'dataRequests',
   'deadLetter',
+  'driftEvents',
   'emailDeliveryMessages',
   'emailFlows',
   'entitlements',
@@ -2558,6 +2574,18 @@ export function doctor(state) {
         (state.lifecycleNotices ?? []).some((notice) => notice.category === 'payment') &&
         (state.lifecycleNotices ?? []).some((notice) => notice.category === 'source'),
       message: 'Lifecycle notices are auditable records linked to billing, source, notification, and provider state.',
+    },
+    {
+      id: 'drift_events_audited',
+      ok: (state.driftEvents ?? []).every((event) =>
+        event.id &&
+        event.tenantId &&
+        ['email', 'signal', 'account'].includes(event.domain) &&
+        event.entityType &&
+        event.entityId &&
+        event.driftType &&
+        ['open', 'resolved'].includes(event.status)),
+      message: 'Provider drift events are tenant-scoped audit records linked to email, signal, or account reconciliation.',
     },
     {
       id: 'no_local_secrets',
@@ -3126,6 +3154,8 @@ export function launchGateReport(state, {
   const providerMissingEnv = provider?.providers?.flatMap?.((item) => item.missingRequired ?? []) ?? [];
   const emailProviderMissingEnv = [gmail, outlook, outboundEmail].flatMap((item) => item?.missingRequired ?? []);
   const activeProviderSchedules = state.providerValidationSchedules?.filter((schedule) => schedule.status === 'active').length ?? 0;
+  const openLaunchDriftEvents = (state.driftEvents ?? []).filter((event) =>
+    event.status === 'open' && ['email', 'signal', 'account'].includes(event.domain));
   const providerSandboxPassed = latestProviderRun?.status === 'passed';
   const freshnessBlockersById = (id) => freshness.blockers.filter((blocker) => blocker.id === id).map((blocker) => blocker.message);
   const backupFreshnessBlockers = freshnessBlockersById('backup_rehearsal_stale');
@@ -3230,6 +3260,27 @@ export function launchGateReport(state, {
       commands: [
         'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json',
         'npm run admin -- integrations evidence-export latest ./signal-provider-evidence.json --json',
+      ],
+    }),
+    launchGateItem({
+      id: 'provider_parity_drift',
+      label: 'Provider parity drift reconciliation',
+      owner: 'operations',
+      status: openLaunchDriftEvents.length === 0 ? 'pass' : 'blocked',
+      evidence: [
+        `${openLaunchDriftEvents.length} open email/signal/account drift event(s)`,
+        `${summary.driftEvents ?? 0} total drift event(s)`,
+        `${summary.openLifecycleNotices ?? 0} open lifecycle notice(s)`,
+      ],
+      blockers: openLaunchDriftEvents.length === 0
+        ? []
+        : [`Resolve ${openLaunchDriftEvents.length} open provider drift event(s) before launch evidence.`],
+      requiredEnv: ['SIGNAL_GMAIL_ACCESS_TOKEN', 'SIGNAL_OUTLOOK_ACCESS_TOKEN', 'SIGNAL_STATE_SERVICE_URL'],
+      commands: [
+        'npm run admin -- email-flows sync tenant_demo --live-provider',
+        'npm run admin -- signals sync tenant_demo --live-provider',
+        'npm run admin -- accounts sync tenant_demo --live-provider',
+        'npm run admin -- operations-health --json',
       ],
     }),
     launchGateItem({
@@ -4203,6 +4254,29 @@ const lifecyclePlaybookCatalog = [
     localOk: (state, summary) => (summary.failedJobs ?? 0) === 0,
   },
   {
+    id: 'provider_parity_drift',
+    label: 'Provider parity drift reconciliation',
+    category: 'provider',
+    triggers: ['email_drift_detected', 'signal_drift_detected', 'account_drift_detected'],
+    owner: 'operations',
+    severity: 'watch',
+    notificationFlow: 'Admin and workspace surfaces show open provider drift until a live-provider sync proves the local state matches the source of truth.',
+    userAction: 'Review the affected source, signal, or account and wait for an admin reconciliation if provider state changed externally.',
+    adminAction: 'Run the relevant provider parity sync and keep the drift notice open until the next live-provider run resolves it.',
+    commands: [
+      'npm run admin -- email-flows sync tenant_demo --live-provider',
+      'npm run admin -- signals sync tenant_demo --live-provider',
+      'npm run admin -- accounts sync tenant_demo --live-provider',
+      'npm run admin -- operations-health --json',
+    ],
+    evidence: (_state, summary) => [
+      `${summary.openDriftEvents ?? 0}/${summary.driftEvents ?? 0} open drift event(s)`,
+      `${summary.openLifecycleNotices ?? 0}/${summary.lifecycleNotices ?? 0} open lifecycle notice(s)`,
+      `${summary.failedJobs ?? 0} failed job(s)`,
+    ],
+    localOk: (_state, summary) => (summary.openDriftEvents ?? 0) === 0,
+  },
+  {
     id: 'outbound_email_delivery',
     label: 'Email notification delivery, unsubscribe, and webhook reconciliation',
     category: 'notification',
@@ -5077,6 +5151,8 @@ export function emailHandoffReport(state, {
   const activeEmailProviderSchedules = (state.providerValidationSchedules ?? []).filter((schedule) =>
     ['gmail', 'outlook', 'outbound-email'].includes(schedule.providerId) &&
     schedule.status === 'active').length;
+  const openEmailDriftEvents = (state.driftEvents ?? []).filter((event) => event.domain === 'email' && event.status === 'open');
+  const emailParitySyncJobs = (state.jobs ?? []).filter((job) => job.type === 'email.provider_sync' && job.status === 'succeeded');
   const providerLaunchReady = emailRows.length === 3 && emailRows.every((row) => row.launchReady);
   const emailSandboxPassed = emailRows.length === 3 && emailRows.every((row) => row.sandboxStatus === 'passed');
   const watchProofReady = Boolean(
@@ -5170,6 +5246,24 @@ export function emailHandoffReport(state, {
       followUpCommands: ['npm run admin -- integrations evidence-export latest ./signal-provider-evidence.json --json', 'npm run admin -- integrations run-scheduled --force --json'],
       rollbackCommand: 'Do not package email launch evidence until sanitized provider evidence imports/exports cleanly.',
       completion: 'Saved sandbox evidence proves Gmail watch, Outlook notification, outbound send, and active validation schedules.',
+    }),
+    emailHandoffStep({
+      id: 'provider_parity_drift',
+      label: 'Reconcile email provider state with local admin state',
+      priority: 45,
+      env,
+      productionOk: Boolean(emailLaunchReady && openEmailDriftEvents.length === 0 && emailParitySyncJobs.length > 0),
+      requiredEnv: uniqueValues([...gmailRequiredEnv, ...outlookRequiredEnv, ...outboundRequiredEnv]),
+      evidence: [
+        `${openEmailDriftEvents.length} open email drift event(s)`,
+        `${emailParitySyncJobs.length} email provider parity sync job(s)`,
+        `${summary.openLifecycleNotices ?? 0} open lifecycle notice(s)`,
+      ],
+      blocker: openEmailDriftEvents.length === 0 ? 'None' : 'Open email provider drift must be reconciled before launch evidence.',
+      command: 'npm run admin -- email-flows sync tenant_demo --live-provider',
+      followUpCommands: ['npm run admin -- operations-health --json', 'npm run admin -- digestion-pipeline --json'],
+      rollbackCommand: 'Keep live email sends and source sync disabled until provider parity drift is resolved.',
+      completion: 'Email provider parity sync has run and no open email drift events remain.',
     }),
     emailHandoffStep({
       id: 'prove_watch_and_sync_launch',
@@ -5335,7 +5429,7 @@ export function emailHandoffReport(state, {
     },
   };
   report.summary.secretSafe = providerLaunchUnsafePaths(report).length === 0;
-  report.ok = report.summary.secretSafe && rows.length === 8 && operationsOk;
+  report.ok = report.summary.secretSafe && rows.length === 9 && operationsOk;
   return report;
 }
 
@@ -5699,6 +5793,7 @@ export function productionSetupPlanReport(state, {
     tenantIsolation: launchGateById(gate, 'tenant_isolation'),
     providerConfiguration: launchGateById(gate, 'provider_configuration'),
     providerSandbox: launchGateById(gate, 'provider_sandbox_evidence'),
+    providerParityDrift: launchGateById(gate, 'provider_parity_drift'),
     email: launchGateById(gate, 'email_notification_launch'),
     payment: launchGateById(gate, 'payment_launch'),
     scheduler: launchGateById(gate, 'scheduler_operations'),
@@ -5864,6 +5959,26 @@ export function productionSetupPlanReport(state, {
       dependsOn: ['provider_configuration'],
     }),
     productionPlanRow({
+      id: 'provider_parity_drift',
+      phase: 'Provider parity drift reconciliation',
+      owner: 'operations',
+      productionOk: gateRows.providerParityDrift?.status === 'pass',
+      evidence: gateRows.providerParityDrift?.evidence ?? [],
+      blockers: gateRows.providerParityDrift?.blockers ?? [],
+      requiredEnv: gateRows.providerParityDrift?.requiredEnv ?? [],
+      commands: [
+        ...(gateRows.providerParityDrift?.commands ?? []),
+        'npm run admin -- lifecycle-playbook --json',
+        'npm run admin -- completion-audit --json',
+      ],
+      completionCriteria: [
+        'Email, signal, and account provider parity syncs have run after admin overrides.',
+        'No open provider drift events remain for launch-scoped domains.',
+        'Lifecycle drift notices are resolved by a subsequent live-provider sync.',
+      ],
+      dependsOn: ['provider_sandbox_evidence'],
+    }),
+    productionPlanRow({
       id: 'email_launch',
       phase: 'Gmail, Outlook, and outbound email launch',
       owner: 'integrations',
@@ -5888,7 +6003,7 @@ export function productionSetupPlanReport(state, {
         'Outbound email digest send succeeds.',
         'Signed email delivery webhook replay updates delivery ledger.',
       ],
-      dependsOn: ['provider_sandbox_evidence'],
+      dependsOn: ['provider_sandbox_evidence', 'provider_parity_drift'],
     }),
     productionPlanRow({
       id: 'payment_launch',
@@ -5947,7 +6062,7 @@ export function productionSetupPlanReport(state, {
         'Operations alert channel and runbook URL are configured.',
         'Failed jobs and active provider backoffs are clear.',
       ],
-      dependsOn: ['durable_backend_storage', 'provider_sandbox_evidence'],
+      dependsOn: ['durable_backend_storage', 'provider_sandbox_evidence', 'provider_parity_drift'],
     }),
     productionPlanRow({
       id: 'launch_evidence_package',
@@ -5973,7 +6088,7 @@ export function productionSetupPlanReport(state, {
         'Provider launch matrix is production-ready.',
         'Launch evidence package verifies and contains no secret values.',
       ],
-      dependsOn: ['email_launch', 'payment_launch', 'scheduler_alerting'],
+      dependsOn: ['provider_parity_drift', 'email_launch', 'payment_launch', 'scheduler_alerting'],
     }),
   ];
   const missingRequiredEnv = uniqueValues(rows.flatMap((row) => row.productionOk ? [] : row.requiredEnv));
@@ -6000,7 +6115,7 @@ export function productionSetupPlanReport(state, {
     },
   };
   report.summary.secretSafe = providerLaunchUnsafePaths(report).length === 0;
-  report.ok = report.summary.secretSafe && rows.length === 9;
+  report.ok = report.summary.secretSafe && rows.length === 10;
   return report;
 }
 
@@ -6245,6 +6360,7 @@ function localAgentHandoffPriority(row) {
       tenant_isolation: 20,
       provider_configuration: 30,
       provider_sandbox_evidence: 40,
+      provider_parity_drift: 45,
       email_notification_launch: 50,
       payment_launch: 60,
       scheduler_operations: 70,
@@ -7208,6 +7324,8 @@ export function completionAuditReport(state, {
   const relationshipQa = qaRow('contact_relationship_strategy');
   const emailQa = qaRow('email_notification_admin_monitoring');
   const paymentQa = qaRow('payment_lifecycle_handling');
+  const openDomainDriftEvents = (state.driftEvents ?? []).filter((event) => event.status === 'open' && ['email', 'signal', 'account'].includes(event.domain));
+  const openEmailDriftEvents = openDomainDriftEvents.filter((event) => event.domain === 'email');
   const rows = [
     completionAuditRow({
       id: 'public_product_entry',
@@ -7264,7 +7382,8 @@ export function completionAuditReport(state, {
         readinessRow('relationship_dashboard_and_recommendations')?.localOk &&
         readinessRow('notifications_and_admin_monitoring')?.localOk &&
         readinessRow('payment_lifecycle_and_entitlements')?.localOk &&
-        relationshipQa?.localOk
+        relationshipQa?.localOk &&
+        openDomainDriftEvents.length === 0
       ),
       productionOk: Boolean(currentBackend?.productionReady && launch.summary.passed === launch.summary.total),
       evidence: [
@@ -7272,8 +7391,11 @@ export function completionAuditReport(state, {
         `${pipeline.summary.localReady}/${pipeline.summary.total} digestion pipeline stage(s) locally ready`,
         `${summary.openSignals} open signal(s), ${summary.openAccountRecommendations ?? 0}/${summary.accountRecommendations ?? 0} open recommendation(s)`,
         `${payment.summary.localReady}/${payment.summary.total} payment lifecycle check(s) locally ready`,
+        `${openDomainDriftEvents.length} open email/signal/account drift event(s)`,
       ],
-      blockers: currentBackend?.productionReady && launch.summary.passed === launch.summary.total ? [] : ['Production user workspace needs durable backend, tenant isolation, provider launch, and scheduler evidence.'],
+      blockers: openDomainDriftEvents.length > 0
+        ? ['Open provider drift must be reconciled before treating the workspace as complete.']
+        : currentBackend?.productionReady && launch.summary.passed === launch.summary.total ? [] : ['Production user workspace needs durable backend, tenant isolation, provider launch, and scheduler evidence.'],
       commands: ['npm run admin -- dashboard-audit --json', 'npm run admin -- digestion-pipeline --json', 'npm run admin -- payment-lifecycle --json', 'npm run test:browser-routes'],
       api: '/api/dashboard-audit',
     }),
@@ -7320,6 +7442,7 @@ export function completionAuditReport(state, {
         `${email.summary.total - email.summary.blocked}/${email.summary.total} email handoff step(s) launch-ready`,
         `${summary.activeEmailWatchSubscriptions ?? 0}/${summary.emailWatchSubscriptions ?? 0} active watch subscription(s)`,
         `${summary.failedEmailDeliveries ?? 0}/${summary.emailDeliveries ?? 0} failed email delivery record(s)`,
+        `${openEmailDriftEvents.length} open email drift event(s)`,
       ],
       blockers: email.productionReady ? [] : [email.nextStep.blocker],
       commands: ['npm run admin -- email-handoff --json', 'npm run admin -- operations-health --json', 'npm run admin -- notifications digest tenant_demo'],
@@ -8468,6 +8591,38 @@ function lifecycleNoticeForPaymentDriftEvent(state, event) {
   });
 }
 
+function lifecycleNoticeForDriftEvent(state, event) {
+  if (!event || event.status === 'resolved') {
+    return null;
+  }
+  const domain = event.domain ?? 'provider';
+  const commandDomain = domain === 'email' ? 'email-flows' : `${domain}s`;
+  const syncCommand = `${commandDomain} sync ${event.tenantId ?? defaultTenantId(state)} --live-provider`;
+  return lifecycleNotice({
+    actionLabel: 'Reconcile provider',
+    actionTarget: syncCommand,
+    body: `${event.provider ?? 'provider'} ${domain} state differed from local ${event.entityType ?? 'record'} ${event.entityId ?? event.targetId ?? 'unknown'}; run provider sync and review the drift ledger.`,
+    category: domain === 'email' ? 'source' : 'provider',
+    createdAt: event.createdAt,
+    id: `lcn_drift_${event.id}`,
+    ownerUserId: event.ownerUserId ?? lifecycleOwnerForTenant(state, event.tenantId ?? defaultTenantId(state)),
+    provider: event.provider,
+    severity: event.severity ?? 'watch',
+    sourceIds: {
+      account: event.account ?? null,
+      driftEventId: event.id,
+      mailboxId: event.mailboxId ?? null,
+      signalId: event.signalId ?? null,
+      tenantId: event.tenantId ?? defaultTenantId(state),
+    },
+    status: 'open',
+    tenantId: event.tenantId ?? defaultTenantId(state),
+    title: `${lifecycleText(domain)} provider drift detected`,
+    trigger: `${domain}_drift_detected`,
+    updatedAt: event.lastSeenAt ?? event.createdAt,
+  });
+}
+
 function lifecycleNoticeForBillingSession(state, session) {
   const subscription = (state.subscriptions ?? []).find((candidate) => candidate.id === session.subscriptionId || candidate.tenantId === session.tenantId);
   const isExpired = Number.isFinite(Date.parse(session.expiresAt ?? '')) && Date.parse(session.expiresAt) <= Date.now();
@@ -8645,6 +8800,10 @@ function deriveLifecycleNotices(state) {
     .forEach((invoice) => notices.push(lifecycleNoticeForInvoice(state, invoice)));
   (state.paymentEvents ?? [])
     .map((event) => lifecycleNoticeForPaymentDriftEvent(state, event))
+    .filter(Boolean)
+    .forEach((notice) => notices.push(notice));
+  (state.driftEvents ?? [])
+    .map((event) => lifecycleNoticeForDriftEvent(state, event))
     .filter(Boolean)
     .forEach((notice) => notices.push(notice));
   for (const tenant of state.tenants ?? []) {
@@ -9212,6 +9371,10 @@ export function signalDigestionPipelineReport(state, {
   const redactionRules = tenantScoped(state.redactionRules ?? []);
   const openRecommendations = tenantScoped(state.accountRecommendations ?? []).filter((recommendation) => recommendation.status === 'open');
   const openActions = tenantScoped(state.accountActions ?? []).filter((action) => action.status === 'open');
+  const openDomainDriftEvents = tenantScoped(state.driftEvents ?? []).filter((event) =>
+    event.status === 'open' && ['email', 'signal', 'account'].includes(event.domain));
+  const driftSyncJobs = tenantScoped(state.jobs ?? []).filter((job) =>
+    ['email.provider_sync', 'signal.provider_sync', 'account.provider_sync'].includes(job.type) && job.status === 'succeeded');
   const backendProductionReady = Boolean(backend?.productionReady);
   const modelBoundaryOk = Boolean(activePolicy &&
     activePolicy.detectorBoundary === 'shared_detector' &&
@@ -9248,6 +9411,20 @@ export function signalDigestionPipelineReport(state, {
       recommendation: 'Use the source-message layer as the digestion ledger; do not train or export from raw provider bodies by default.',
       requiredEnv: ['DATABASE_URL', 'SIGNAL_TENANT_ISOLATION_MODE'],
       commands: ['npm run admin -- governance --json', 'npm run admin -- dashboard-audit --json'],
+    }),
+    digestionPipelineAuditRow({
+      area: 'provider_parity_drift',
+      check: 'Email, signal, and account provider parity sync records proof jobs and opens drift notices when live-provider state differs from local admin state.',
+      evidence: [
+        `${openDomainDriftEvents.length} open email/signal/account drift event(s)`,
+        `${driftSyncJobs.length} provider parity sync job(s)`,
+        `${openDomainDriftEvents.filter((event) => event.domain === 'email').length} email drift, ${openDomainDriftEvents.filter((event) => event.domain === 'signal').length} signal drift, ${openDomainDriftEvents.filter((event) => event.domain === 'account').length} account drift`,
+      ],
+      localOk: openDomainDriftEvents.length === 0,
+      productionOk: backendProductionReady && openDomainDriftEvents.length === 0 && driftSyncJobs.length >= 3,
+      recommendation: 'Run provider parity sync after manual admin overrides; treat --live-provider results as the launch source of truth and resolve drift before packaging evidence.',
+      requiredEnv: ['SIGNAL_GMAIL_ACCESS_TOKEN', 'SIGNAL_OUTLOOK_ACCESS_TOKEN', 'SIGNAL_STATE_SERVICE_URL'],
+      commands: ['npm run admin -- email-flows sync tenant_demo --live-provider', 'npm run admin -- signals sync tenant_demo --live-provider', 'npm run admin -- accounts sync tenant_demo --live-provider'],
     }),
     digestionPipelineAuditRow({
       area: 'detector_execution',
@@ -14674,6 +14851,315 @@ export async function syncPaymentState({ tenantId } = {}, options = {}) {
         tenantIds: results.map((result) => result.tenantId),
       };
     },
+    options,
+  );
+}
+
+function driftComparableValue(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  return typeof value === 'number' ? String(value) : String(value).trim();
+}
+
+function driftCandidate({
+  account,
+  domain,
+  driftType,
+  entityId,
+  entityType,
+  localValue,
+  mailboxId,
+  ownerUserId,
+  provider,
+  providerValue,
+  signalId,
+  tenantId,
+}) {
+  const normalizedLocal = driftComparableValue(localValue);
+  const normalizedProvider = driftComparableValue(providerValue);
+  if (normalizedProvider === null || normalizedLocal === normalizedProvider) {
+    return null;
+  }
+  return {
+    account: account ?? null,
+    domain,
+    driftType,
+    entityId,
+    entityType,
+    localValue: normalizedLocal,
+    mailboxId: mailboxId ?? null,
+    ownerUserId: ownerUserId ?? null,
+    provider: provider ?? 'provider',
+    providerValue: normalizedProvider,
+    signalId: signalId ?? null,
+    tenantId,
+  };
+}
+
+function domainDriftKey(event) {
+  return [event.domain, event.tenantId, event.entityType, event.entityId, event.driftType].join(':');
+}
+
+function upsertDomainDriftEvent(state, candidate) {
+  state.driftEvents = state.driftEvents ?? [];
+  const key = domainDriftKey(candidate);
+  const existing = state.driftEvents.find((event) => event.status === 'open' && domainDriftKey(event) === key);
+  if (existing) {
+    Object.assign(existing, {
+      account: candidate.account,
+      lastSeenAt: nowIso(),
+      localValue: candidate.localValue,
+      mailboxId: candidate.mailboxId,
+      ownerUserId: candidate.ownerUserId,
+      provider: candidate.provider,
+      providerValue: candidate.providerValue,
+      signalId: candidate.signalId,
+      updatedAt: nowIso(),
+    });
+    return existing;
+  }
+  const event = {
+    ...candidate,
+    id: makeId('drift'),
+    severity: 'watch',
+    status: 'open',
+    createdAt: nowIso(),
+    lastSeenAt: nowIso(),
+  };
+  state.driftEvents.push(event);
+  return event;
+}
+
+function resolveDomainDriftEvents(state, { activeKeys, domain, tenantId }) {
+  const resolved = [];
+  for (const event of state.driftEvents ?? []) {
+    if (event.domain !== domain || event.tenantId !== tenantId || event.status !== 'open') {
+      continue;
+    }
+    if (activeKeys.has(domainDriftKey(event))) {
+      continue;
+    }
+    event.status = 'resolved';
+    event.resolvedAt = nowIso();
+    event.updatedAt = event.resolvedAt;
+    resolved.push(event);
+  }
+  return resolved;
+}
+
+function domainDriftCandidates(state, domain, tenant) {
+  if (domain === 'email') {
+    const sourceMessagesByMailbox = new Map();
+    (state.sourceMessages ?? [])
+      .filter((message) => message.tenantId === tenant.id && message.mailboxId)
+      .forEach((message) => {
+        sourceMessagesByMailbox.set(message.mailboxId, (sourceMessagesByMailbox.get(message.mailboxId) ?? 0) + 1);
+      });
+    return [
+      ...(state.mailboxes ?? [])
+        .filter((mailbox) => mailbox.tenantId === tenant.id)
+        .map((mailbox) => driftCandidate({
+          domain,
+          driftType: 'status',
+          entityId: mailbox.id,
+          entityType: 'mailbox',
+          localValue: mailbox.status,
+          mailboxId: mailbox.id,
+          ownerUserId: mailbox.ownerUserId,
+          provider: mailbox.provider,
+          providerValue: mailbox.providerStatus,
+          tenantId: tenant.id,
+        })),
+      ...(state.emailDeliveryMessages ?? [])
+        .filter((message) => message.tenantId === tenant.id)
+        .map((message) => driftCandidate({
+          domain,
+          driftType: 'delivery_status',
+          entityId: message.id,
+          entityType: 'emailDeliveryMessage',
+          localValue: message.status,
+          ownerUserId: message.userId,
+          provider: message.provider,
+          providerValue: message.providerStatus,
+          tenantId: tenant.id,
+        })),
+      ...(state.emailSyncCursors ?? [])
+        .filter((cursor) => cursor.tenantId === tenant.id)
+        .map((cursor) => driftCandidate({
+          domain,
+          driftType: 'message_count',
+          entityId: cursor.id,
+          entityType: 'emailSyncCursor',
+          localValue: sourceMessagesByMailbox.get(cursor.mailboxId) ?? 0,
+          mailboxId: cursor.mailboxId,
+          provider: cursor.provider,
+          providerValue: cursor.lastProviderMessageCount,
+          tenantId: tenant.id,
+        })),
+    ].filter(Boolean);
+  }
+  if (domain === 'signal') {
+    return [
+      ...(state.signals ?? [])
+        .filter((signal) => signal.tenantId === tenant.id)
+        .map((signal) => driftCandidate({
+          account: signal.account,
+          domain,
+          driftType: 'status',
+          entityId: signal.id,
+          entityType: 'signal',
+          localValue: signal.status,
+          ownerUserId: signal.ownerUserId,
+          provider: signal.provider ?? 'signal_provider',
+          providerValue: signal.providerStatus,
+          signalId: signal.id,
+          tenantId: tenant.id,
+        })),
+      ...(state.signalHandoffs ?? [])
+        .filter((handoff) => handoff.tenantId === tenant.id)
+        .map((handoff) => driftCandidate({
+          domain,
+          driftType: 'handoff_status',
+          entityId: handoff.id,
+          entityType: 'signalHandoff',
+          localValue: handoff.status,
+          ownerUserId: handoff.ownerUserId,
+          provider: handoff.provider ?? handoff.target ?? 'signal_handoff',
+          providerValue: handoff.providerStatus,
+          signalId: handoff.signalId,
+          tenantId: tenant.id,
+        })),
+    ].filter(Boolean);
+  }
+  if (domain === 'account') {
+    return [
+      ...(state.accountProfiles ?? [])
+        .filter((account) => account.tenantId === tenant.id)
+        .flatMap((account) => [
+          driftCandidate({
+            account: account.name,
+            domain,
+            driftType: 'health_score',
+            entityId: account.id,
+            entityType: 'accountProfile',
+            localValue: account.healthScore,
+            ownerUserId: account.ownerUserId,
+            provider: account.provider ?? 'account_provider',
+            providerValue: account.providerHealthScore,
+            tenantId: tenant.id,
+          }),
+          driftCandidate({
+            account: account.name,
+            domain,
+            driftType: 'stage',
+            entityId: account.id,
+            entityType: 'accountProfile',
+            localValue: account.stage,
+            ownerUserId: account.ownerUserId,
+            provider: account.provider ?? 'account_provider',
+            providerValue: account.providerStage,
+            tenantId: tenant.id,
+          }),
+        ]),
+      ...(state.accountActions ?? [])
+        .filter((action) => action.tenantId === tenant.id)
+        .map((action) => driftCandidate({
+          account: action.account,
+          domain,
+          driftType: 'action_status',
+          entityId: action.id,
+          entityType: 'accountAction',
+          localValue: action.status,
+          ownerUserId: action.ownerUserId,
+          provider: action.provider ?? 'account_provider',
+          providerValue: action.providerStatus,
+          tenantId: tenant.id,
+        })),
+    ].filter(Boolean);
+  }
+  return [];
+}
+
+function domainSyncQueue(domain) {
+  return {
+    account: 'account_sync',
+    email: 'email_sync',
+    signal: 'signal_detection',
+  }[domain] ?? 'provider_validation';
+}
+
+function syncDomainStateInPlace(state, actor, domain, { tenantId } = {}, options = {}) {
+  const liveProviderSync = Boolean(options.liveProviderSync || options.liveProvider || options[`${domain}ProviderMode`] === 'live');
+  const syncUsage = domain === 'email' ? 'email-flows sync [tenantId]' : `${domain}s sync [tenantId]`;
+  const tenants = tenantId
+    ? [findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', syncUsage), 'Tenant')]
+    : [...(state.tenants ?? [])];
+  if (tenantId) {
+    requireAdmin(actor, `${domain}.sync`, state, tenants[0].id);
+  } else {
+    requirePlatformOperator(actor, `${domain}.sync`);
+  }
+  const results = tenants.map((tenant) => {
+    const candidates = liveProviderSync ? domainDriftCandidates(state, domain, tenant) : [];
+    const activeKeys = new Set(candidates.map(domainDriftKey));
+    const driftEvents = candidates.map((candidate) => upsertDomainDriftEvent(state, candidate));
+    const resolvedEvents = liveProviderSync
+      ? resolveDomainDriftEvents(state, { activeKeys, domain, tenantId: tenant.id })
+      : [];
+    const job = appendJob(state, {
+      tenantId: tenant.id,
+      queue: domainSyncQueue(domain),
+      type: `${domain}.provider_sync`,
+      targetId: tenant.id,
+      status: 'succeeded',
+      attempts: 1,
+      maxAttempts: 3,
+      message: `${liveProviderSync ? 'Live-provider' : 'Local'} ${domain} parity sync recorded ${driftEvents.length} drift event${driftEvents.length === 1 ? '' : 's'} for ${tenant.name}.`,
+      providerValidationStatus: liveProviderSync ? (driftEvents.length ? 'drift_detected' : 'passed') : 'local_only',
+    });
+    return {
+      driftEventIds: driftEvents.map((event) => event.id),
+      jobId: job.id,
+      liveProviderSync,
+      resolvedDriftEventIds: resolvedEvents.map((event) => event.id),
+      tenantId: tenant.id,
+    };
+  });
+  const driftEventIds = results.flatMap((result) => result.driftEventIds);
+  const resolvedDriftEventIds = results.flatMap((result) => result.resolvedDriftEventIds);
+  return {
+    driftEventIds,
+    jobIds: results.map((result) => result.jobId),
+    liveProviderSync,
+    message: `Synced ${domain} provider parity for ${results.length} tenant${results.length === 1 ? '' : 's'}; ${driftEventIds.length} drift event${driftEventIds.length === 1 ? '' : 's'} open; ${resolvedDriftEventIds.length} resolved.`,
+    resolvedDriftEventIds,
+    results,
+    targetId: tenantId ?? `${domain}.sync`,
+    tenantIds: results.map((result) => result.tenantId),
+  };
+}
+
+export async function syncEmailState({ tenantId } = {}, options = {}) {
+  return mutateState(
+    'email.sync',
+    (state, actor) => syncDomainStateInPlace(state, actor, 'email', { tenantId }, options),
+    options,
+  );
+}
+
+export async function syncSignalState({ tenantId } = {}, options = {}) {
+  return mutateState(
+    'signals.sync',
+    (state, actor) => syncDomainStateInPlace(state, actor, 'signal', { tenantId }, options),
+    options,
+  );
+}
+
+export async function syncAccountState({ tenantId } = {}, options = {}) {
+  return mutateState(
+    'accounts.sync',
+    (state, actor) => syncDomainStateInPlace(state, actor, 'account', { tenantId }, options),
     options,
   );
 }

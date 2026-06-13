@@ -502,6 +502,11 @@ test('tenant scope isolates non-payment source, signal, account, notification, a
     { id: 'lcn_scope_theta', tenantId: tenantBId, ownerUserId: tenantBOwnerUserId, category: 'source', title: 'Theta lifecycle', status: 'open', severity: 'info', createdAt: now, sourceIds: { tenantId: tenantBId, mailboxId: 'mbx_scope_theta' } },
   );
   addPair(
+    'driftEvents',
+    { id: 'drift_scope_demo', tenantId: demoTenantId, ownerUserId: demoOwnerUserId, domain: 'email', entityType: 'mailbox', entityId: 'mbx_scope_demo', driftType: 'status', status: 'open', severity: 'watch', createdAt: now, localValue: 'connected', providerValue: 'needs_reauth', mailboxId: 'mbx_scope_demo' },
+    { id: 'drift_scope_theta', tenantId: tenantBId, ownerUserId: tenantBOwnerUserId, domain: 'signal', entityType: 'signal', entityId: 'sig_scope_theta', driftType: 'status', status: 'open', severity: 'watch', createdAt: now, localValue: 'open', providerValue: 'dismissed', signalId: 'sig_scope_theta' },
+  );
+  addPair(
     'jobs',
     { id: 'job_scope_demo', tenantId: demoTenantId, queue: 'signal_detection', status: 'queued', createdAt: now, payload: { sourceMessageId: 'src_scope_demo' } },
     { id: 'job_scope_theta', tenantId: tenantBId, queue: 'signal_detection', status: 'queued', createdAt: now, payload: { sourceMessageId: 'src_scope_theta' } },

@@ -599,9 +599,10 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
   assert.equal(cliProductionPlan.plan.ok, true);
   assert.equal(cliProductionPlan.plan.productionReady, false);
   assert.equal(cliProductionPlan.plan.summary.secretSafe, true);
-  assert.equal(cliProductionPlan.plan.summary.total, 9);
+  assert.equal(cliProductionPlan.plan.summary.total, 10);
   assert(cliProductionPlan.plan.rows.some((row) => row.id === 'durable_backend_storage' && row.status === 'blocked' && row.requiredEnv.includes('DATABASE_URL')));
   assert(cliProductionPlan.plan.rows.some((row) => row.id === 'provider_sandbox_evidence' && row.commands.some((command) => command.includes('validate-sandbox'))));
+  assert(cliProductionPlan.plan.rows.some((row) => row.id === 'provider_parity_drift' && row.commands.some((command) => command.includes('email-flows sync'))));
   assert(cliProductionPlan.plan.rows.some((row) => row.id === 'launch_evidence_package' && row.commands.some((command) => command.includes('launch-gate package'))));
   assert(!JSON.stringify(cliProductionPlan.plan).includes(sessionSecret), 'production setup plan must not serialize local session secrets');
   const cliProviderLaunch = await runCli(['provider-launch', '--json'], blankSandboxProviderEnv);
@@ -1002,7 +1003,7 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(productionPlan.payload.ok, true);
     assert.equal(productionPlan.payload.plan.ok, true);
     assert.equal(productionPlan.payload.plan.productionReady, false);
-    assert.equal(productionPlan.payload.plan.summary.total, 9);
+    assert.equal(productionPlan.payload.plan.summary.total, 10);
     assert.equal(productionPlan.payload.plan.summary.secretSafe, true);
     assert(productionPlan.payload.plan.rows.some((row) => row.id === 'identity_tenant_isolation' && row.owner === 'security'));
     assert(productionPlan.payload.plan.rows.some((row) => row.id === 'email_launch' && row.commands.some((command) => command.includes('mailboxes watch'))));
@@ -1283,7 +1284,7 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
 
     const productionPlanPreflight = await runCli(['production-plan', '--env-file', envFilePath, '--json'], blankSandboxProviderEnv);
     assert.equal(productionPlanPreflight.envSource.type, 'env-file');
-    assert.equal(productionPlanPreflight.plan.summary.total, 9);
+    assert.equal(productionPlanPreflight.plan.summary.total, 10);
     assert.equal(productionPlanPreflight.plan.summary.secretSafe, true);
     assert(productionPlanPreflight.plan.rows.some((row) => row.id === 'durable_backend_storage' && row.productionOk === true));
     assert(productionPlanPreflight.plan.rows.some((row) => row.id === 'provider_sandbox_evidence' && row.status === 'blocked'));

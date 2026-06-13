@@ -181,6 +181,20 @@ npm run admin -- payments sync tenant_demo --live-provider
 
 Expected: `payment-lifecycle.rows` includes local-ready evidence for ignored webhook resilience, all invoice statuses, trial/plan-change events, refund/credit reconciliation, and provider-state parity. Unknown Stripe events should appear as ignored payment events, not failed `billing_webhook` jobs. Any `billing.drift.detected` lifecycle notice must be resolved before final launch evidence is packaged.
 
+## 4b. Reconcile cross-domain provider drift
+
+Before packaging launch evidence, run live-provider parity sync for every domain where admin overrides or provider-side changes can diverge from local state:
+
+```bash
+npm run admin -- email-flows sync tenant_demo --live-provider
+npm run admin -- signals sync tenant_demo --live-provider
+npm run admin -- accounts sync tenant_demo --live-provider
+npm run admin -- operations-health --json
+npm run admin -- digestion-pipeline --json
+```
+
+Expected: `launch-gate` includes `provider_parity_drift`, `operations-health.summary.openDriftEvents` is `0`, `digestion-pipeline.rows` includes `provider_parity_drift`, and any `email_drift_detected`, `signal_drift_detected`, or `account_drift_detected` lifecycle notice is resolved by a subsequent clean live-provider sync. Local runs without `--live-provider` are proof-only and must not require live provider credentials.
+
 ## 5. Deploy the managed scheduler daemon and alerting
 
 OPERATOR-ONLY: Deploy exactly one managed scheduler runner against the production state-service boundary and wire alerts:

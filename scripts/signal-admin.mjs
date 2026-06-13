@@ -107,6 +107,9 @@ import {
   setupMailboxWatch,
   summarizeState,
   tenantIsolationAuditReport,
+  syncAccountState,
+  syncEmailState,
+  syncSignalState,
   syncPaymentState,
   switchSession,
   syncMailbox,
@@ -368,14 +371,14 @@ const commands = [
   ['tenants', 'List workspaces, domains, suspension state, seats, and plans; run: tenants register|create|complete-onboarding|status|domain'],
   ['users', 'List users and invites, or run: users invite|claim|accept|revoke|role|disable|activate'],
   ['mailboxes', 'List sources, or run: mailboxes connect-url|callback|complete|pause|resume|disconnect|sync|replay|watch|renew-watch'],
-  ['email-flows', 'List flows, or run: email-flows route|enable|disable|run'],
+  ['email-flows', 'List flows, or run: email-flows route|enable|disable|run|sync'],
   ['quality', 'Inspect detector thresholds, suppression rules, and feedback; run: quality threshold|suppress|rule'],
   ['models', 'Inspect tenant data digestion and model-learning governance; run: models policy'],
   ['governance', 'Inspect retention, redaction, export/delete requests, and incidents; run: governance policy|redact|request|incident'],
   ['integrations', 'Inspect Gmail, Outlook, SendGrid, and Stripe provider readiness; run: integrations validate-sandbox|refresh-evidence|evidence-export|evidence-import|run-scheduled|schedule'],
-  ['accounts', 'List account health, timeline events, and next actions; run: accounts review|timeline|action'],
+  ['accounts', 'List account health, timeline events, and next actions; run: accounts review|timeline|action|sync'],
   ['notifications', 'List alert events, delivery, and preferences, or run: notifications preference|status|digest|delivery-status|webhook|sendgrid-webhook-signed|unsubscribe|mute-account|mute-type'],
-  ['signals', 'List signals, or run: signals assign|status|feedback|handoff|handoff-status'],
+  ['signals', 'List signals, or run: signals assign|status|feedback|handoff|handoff-status|sync'],
   ['payments', 'List payments, or run: payments sync|override|override-revoke|comp|status|cancel|checkout|portal|recover|webhook|webhook-signed|webhook-sign'],
   ['lifecycle', 'List source-backed lifecycle notices for billing, provider, source, onboarding, and notification states'],
   ['lifecycle-playbook', 'Explain admin/user handling for onboarding, RBAC, disconnects, notifications, failed payment, cancellation, and resubscription'],
@@ -2612,6 +2615,7 @@ async function run() {
         '  npm run admin -- mailboxes replay mbx_gmail_sales',
         '  npm run admin -- email-flows run',
         '  npm run admin -- email-flows run flow_product_ideas mbx_gmail_sales',
+        '  npm run admin -- email-flows sync tenant_demo --live-provider',
         '  npm run admin -- email-flows route flow_buying_intent founder usr_admin Founder_review',
         '  npm run admin -- email-flows disable flow_product_ideas',
         '  npm run admin -- quality threshold tenant_demo 0.80',
@@ -2641,6 +2645,7 @@ async function run() {
         '  npm run admin -- accounts timeline Acme_Health',
         '  npm run admin -- accounts review VentureWorks Product_discovery_review',
         '  npm run admin -- accounts action act_acme_exec_save done',
+        '  npm run admin -- accounts sync tenant_demo --live-provider',
         '  npm run admin -- notifications digest tenant_demo',
         '  npm run admin -- notifications preference usr_sales daily immediate',
         '  npm run admin -- notifications delivery-status <messageId> sent',
@@ -2655,6 +2660,7 @@ async function run() {
         '  npm run admin -- signals feedback sig_risk_001 useful Renewal_save_signal',
         '  npm run admin -- signals handoff sig_product_001 crm CRM_followup',
         '  npm run admin -- signals handoff-status <handoffId> sent crm_task_123 Sent_to_CRM',
+        '  npm run admin -- signals sync tenant_demo --live-provider',
         '  npm run admin -- payments comp tenant_demo plan_beta',
         '  npm run admin -- payments sync tenant_demo',
         '  npm run admin -- payments sync tenant_demo --live-provider',
@@ -3122,6 +3128,10 @@ async function run() {
         emitMutation(await runEmailFlows({ flowId: positionals[2], mailboxId: positionals[3] }, mutationOptions));
         return;
       }
+      if (subcommand === 'sync') {
+        emitMutation(await syncEmailState({ tenantId: positionals[2] }, mutationOptions));
+        return;
+      }
       unknownSubcommand();
       return;
 
@@ -3264,6 +3274,10 @@ async function run() {
         emitMutation(await setAccountActionStatus(positionals[2], positionals[3], mutationOptions));
         return;
       }
+      if (subcommand === 'sync') {
+        emitMutation(await syncAccountState({ tenantId: positionals[2] }, mutationOptions));
+        return;
+      }
       unknownSubcommand();
       return;
 
@@ -3373,6 +3387,10 @@ async function run() {
       }
       if (subcommand === 'handoff-status') {
         emitMutation(await setSignalHandoffStatus(positionals[2], positionals[3], { providerRef: positionals[4], note: positionals.slice(5).join(' ') || undefined }, mutationOptions));
+        return;
+      }
+      if (subcommand === 'sync') {
+        emitMutation(await syncSignalState({ tenantId: positionals[2] }, mutationOptions));
         return;
       }
       unknownSubcommand();
