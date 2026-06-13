@@ -2324,7 +2324,7 @@ async function writeLaunchGatePackage() {
 }
 
 function launchPackageCalculatedDigest(artifact = {}) {
-  const { artifactDigest, ...core } = artifact;
+  const { artifactDigest: _artifactDigest, ...core } = artifact;
   return launchPackageDigest(core);
 }
 

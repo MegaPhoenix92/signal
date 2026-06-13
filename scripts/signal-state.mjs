@@ -5037,7 +5037,7 @@ export function productionSetupPlanReport(state, {
       ],
       blockers: [
         ...(gateRows.local?.blockers ?? []),
-        ...productionPlanDrillBlockers(drillRows.localContracts).filter((item) => !drillRows.localContracts?.localOk),
+        ...productionPlanDrillBlockers(drillRows.localContracts).filter(() => !drillRows.localContracts?.localOk),
       ],
       commands: [
         'npm run test:local',
@@ -6480,7 +6480,7 @@ export function completionAuditReport(state, {
   const localProductGate = launchGateById(gate, 'local_product_surface');
   const emailGate = launchGateById(gate, 'email_notification_launch');
   const paymentGate = launchGateById(gate, 'payment_launch');
-  const dashboardQa = qaRow('dashboard_calculations_backend');
+  const _dashboardQa = qaRow('dashboard_calculations_backend');
   const onboardingQa = qaRow('workspace_registration_invitation');
   const relationshipQa = qaRow('contact_relationship_strategy');
   const emailQa = qaRow('email_notification_admin_monitoring');
@@ -6966,7 +6966,7 @@ function createProviderSandboxEvidenceArtifact(run, { exportedAt = nowIso(), exp
 }
 
 function providerSandboxEvidenceDigest(artifact = {}) {
-  const { artifactDigest, ...core } = artifact;
+  const { artifactDigest: _artifactDigest, ...core } = artifact;
   return sha256Digest(JSON.stringify(core));
 }
 
@@ -8926,7 +8926,7 @@ export function isPredictableUnsubscribeCode(code) {
   return typeof code === 'string' && /^unsub_usr_[a-z0-9_]+$/.test(code);
 }
 
-function unsubscribeCodeForUser(userId) {
+function unsubscribeCodeForUser(_userId) {
   return generateUnsubscribeCode();
 }
 
@@ -11941,7 +11941,7 @@ export async function renewMailboxWatch(watchId, options = {}) {
 export async function handleProviderWatchNotification(provider, payload = {}, options = {}) {
   return mutateState(
     'mailboxes.watch-notification',
-    (state, actor) => {
+    (state, _actor) => {
       const sourceProvider = requireOneOf(provider, ['gmail', 'outlook'], 'provider', 'provider watch notification');
       let notificationCount = 0;
       let mailboxId = null;
@@ -14823,7 +14823,7 @@ export function jobLeaseMs(env = process.env) {
   return numeric;
 }
 
-export function jobClaimable(job, now = Date.now(), leaseMs = jobLeaseMs()) {
+export function jobClaimable(job, now = Date.now(), _leaseMs = jobLeaseMs()) {
   if (job.status === 'queued') {
     return jobIsDue(job, now);
   }

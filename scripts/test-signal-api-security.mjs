@@ -1113,7 +1113,6 @@ test('production webhook route ignores spoofed X-Signal-Actor and uses SIGNAL_WE
   const apiBaseUrl = `http://127.0.0.1:${port}`;
   const stripeWebhookSecret = 'signal_security_stripe_webhook_secret';
   let api = null;
-  let output = '';
 
   t.after(async () => {
     await stopProcess(api?.child);

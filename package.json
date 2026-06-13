@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "admin": "node scripts/signal-admin.mjs",
     "admin:bootstrap": "node scripts/signal-admin.mjs bootstrap",
@@ -13,6 +16,9 @@
     "dev": "vite --host 127.0.0.1",
     "dev:local": "node scripts/dev-local.mjs",
     "build": "tsc -b && vite build",
+    "lint": "eslint scripts",
+    "typecheck": "tsc -b",
+    "typecheck:scripts": "tsc -p tsconfig.scripts.json",
     "preview": "vite preview --host 127.0.0.1",
     "test:api-security": "node --test scripts/test-signal-api-security.mjs",
     "test:client-security": "node --test scripts/test-signal-client-security.mjs",
@@ -37,9 +43,12 @@
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.2",
+    "eslint": "^9.39.4",
+    "globals": "^16.5.0",
     "typescript": "^5.9.3",
     "vite": "^8.0.16"
   }

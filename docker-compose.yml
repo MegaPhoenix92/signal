@@ -1,88 +1,60 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: signal
-      POSTGRES_PASSWORD: signal_dev_password
-      POSTGRES_USER: signal
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U signal -d signal"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    volumes:
-      - signal-postgres:/var/lib/postgresql/data
-
-  state-service:
-    build:
-      context: .
-      target: state-service
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      SIGNAL_STATE_SERVICE_BACKEND: postgres
-      SIGNAL_STATE_SERVICE_DATABASE_URL: postgres://signal:signal_dev_password@postgres:5432/signal
-      SIGNAL_STATE_SERVICE_HOST: 0.0.0.0
-      SIGNAL_STATE_SERVICE_MIGRATE: "true"
-      SIGNAL_STATE_SERVICE_RLS: "true"
-      SIGNAL_STATE_SERVICE_TOKEN: local-state-service-token
-      SIGNAL_TENANT_ISOLATION_MODE: rls
-    ports:
-      - "8791:8791"
-
   api:
-    build:
-      context: .
-      target: api
-    depends_on:
-      state-service:
-        condition: service_started
-    environment:
-      SIGNAL_ADMIN_STATE: http://state-service:8791/state
-      SIGNAL_ALLOW_LOCAL_ACTOR: "true"
-      SIGNAL_API_CORS_ORIGINS: http://localhost:8080
-      SIGNAL_API_HOST: 0.0.0.0
-      SIGNAL_BACKEND_MODE: external-service
-      SIGNAL_OAUTH_STATE_KEY: local-oauth-state-key
-      SIGNAL_STATE_SERVICE_TOKEN: local-state-service-token
-      SIGNAL_STATE_SERVICE_URL: http://state-service:8791/state
+    build: .
     ports:
       - "8787:8787"
-
-  scheduler:
-    build:
-      context: .
-      target: scheduler
-    depends_on:
-      api:
-        condition: service_started
-      postgres:
-        condition: service_healthy
     environment:
-      DATABASE_URL: postgres://signal:signal_dev_password@postgres:5432/signal
-      SIGNAL_ADMIN_ACTOR: usr_admin
-      SIGNAL_ADMIN_STATE: http://state-service:8791/state
-      SIGNAL_PROVIDER_VALIDATION_SCHEDULER: signal-scheduler
-      SIGNAL_SCHEDULER_INTERVAL_MS: "60000"
-      SIGNAL_SCHEDULER_LOCK_BACKEND: postgres
-      SIGNAL_STATE_SERVICE_BACKEND: postgres
-      SIGNAL_STATE_SERVICE_TOKEN: local-state-service-token
-
-  frontend:
-    build:
-      args:
-        VITE_SIGNAL_API_URL: http://localhost:8787
-      context: .
-      target: frontend
+      SIGNAL_ALLOW_LOCAL_ACTOR: "true"
+      SIGNAL_ADMIN_STATE: /app/data/signal-local.json
+      SIGNAL_API_HOST: 0.0.0.0
+      SIGNAL_API_PORT: "8787"
+      SIGNAL_BACKEND_MODE: external-service
+      SIGNAL_STATE_SERVICE_URL: http://state-service:8791/state
+      SIGNAL_STATE_SERVICE_TOKEN: local-compose-state-token
+      SIGNAL_OAUTH_STATE_KEY: signal-compose-oauth-state-key
+      SIGNAL_SESSION_SECRET: signal-compose-session-secret-32chars
+    volumes:
+      - signal-data:/app/data
     depends_on:
-      api:
-        condition: service_started
+      - state-service
+
+  web:
+    build: .
+    command: ["node", "scripts/signal-frontend-server.mjs"]
+    ports:
+      - "5173:8080"
     environment:
       SIGNAL_FRONTEND_HOST: 0.0.0.0
       SIGNAL_FRONTEND_PORT: "8080"
+    depends_on:
+      - api
+
+  scheduler:
+    build: .
+    command: ["node", "scripts/signal-scheduler.mjs", "--once"]
+    environment:
+      SIGNAL_ADMIN_STATE: /app/data/signal-local.json
+      SIGNAL_SCHEDULER_ONCE: "true"
+      SIGNAL_STATE_SERVICE_URL: http://state-service:8791/state
+      SIGNAL_STATE_SERVICE_TOKEN: local-compose-state-token
+    volumes:
+      - signal-data:/app/data
+    depends_on:
+      - state-service
+
+  state-service:
+    build: .
+    command: ["node", "scripts/signal-state-service.mjs"]
     ports:
-      - "8080:8080"
+      - "8791:8791"
+    environment:
+      SIGNAL_STATE_SERVICE_HOST: 0.0.0.0
+      SIGNAL_STATE_SERVICE_PORT: "8791"
+      SIGNAL_STATE_SERVICE_TOKEN: local-compose-state-token
+      SIGNAL_STATE_SERVICE_BACKEND: file
+      SIGNAL_STATE_SERVICE_FILE: /app/data/signal-state-service.json
+    volumes:
+      - signal-data:/app/data
 
 volumes:
-  signal-postgres:
+  signal-data:

@@ -1,8 +1,8 @@
 node_modules
 dist
+data/signal-local.json
+data/signal-state-service.json
 .git
 .github
-data/*.json
-data/*-backups
-npm-debug.log
-signal-launch-evidence*.json
+*.md
+.env*
