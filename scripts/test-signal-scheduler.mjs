@@ -25,6 +25,7 @@ import {
   requeueDeadLetterJobs,
   runJobs,
   saveState,
+  signalDigestionPipelineReport,
   stateCollectionLimits,
 } from './signal-state.mjs';
 import {
@@ -284,6 +285,168 @@ test('Signal scheduler drains due provider validation, governance, and email syn
     queues: ['provider_validation', 'governance', 'email_sync'],
   });
   assert.deepEqual(due.map((queue) => queue.due), [0, 0, 0]);
+});
+
+test('Signal scheduler stress drains concurrent digestion queues and retries billing without double-applying events', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-cross-domain-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const lockFile = path.join(tempDir, 'scheduler.lock');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  let state = await loadState({ statePath });
+  const connectedMailbox = state.mailboxes.find((mailbox) => mailbox.id === 'mbx_gmail_sales' && mailbox.status === 'connected');
+  assert(connectedMailbox, 'scheduler stress requires the seeded connected Gmail mailbox');
+  const paymentEventCount = state.paymentEvents.length;
+  const sourceMessageCount = state.sourceMessages.length;
+  const flowRunCount = state.flowRuns.length;
+  const digestRunCount = state.notificationDigestRuns.length;
+  const deliveryMessageCount = state.emailDeliveryMessages.length;
+  const targetQueues = new Set(['email_sync', 'signal_detection', 'billing_webhook', 'notification_digest']);
+  state.jobs = state.jobs.filter((job) => !targetQueues.has(job.queue));
+  state.invoices.push({
+    id: 'inv_scheduler_matrix_missing_subscription',
+    tenantId: 'tenant_demo',
+    subscriptionId: 'sub_scheduler_matrix_missing',
+    provider: 'local_test',
+    status: 'past_due',
+    amountDueCents: 4900,
+    currency: 'usd',
+    hostedInvoiceUrl: 'signal://billing/invoice/tenant_demo/inv_scheduler_matrix_missing_subscription',
+    createdAt: '2026-06-13T00:00:00.000Z',
+    dueAt: '2026-06-20T00:00:00.000Z',
+    retryCount: 1,
+    nextPaymentAttemptAt: null,
+    creditedCents: 0,
+    refundedCents: 0,
+  });
+  state.jobs.push(
+    {
+      id: 'job_matrix_email_sync',
+      tenantId: 'tenant_demo',
+      queue: 'email_sync',
+      type: 'mailbox.sync',
+      targetId: connectedMailbox.id,
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      nextRunAt: null,
+      message: 'Stress email sync and detector handoff.',
+    },
+    {
+      id: 'job_matrix_signal_detection',
+      tenantId: 'tenant_demo',
+      queue: 'signal_detection',
+      type: 'email_flow.run',
+      targetId: 'tenant_demo',
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      nextRunAt: null,
+      message: 'Stress signal detection worker.',
+    },
+    {
+      id: 'job_matrix_billing_reconcile',
+      tenantId: 'tenant_demo',
+      queue: 'billing_webhook',
+      type: 'payment.webhook.invoice.payment_failed',
+      targetId: 'inv_demo_open',
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      nextRunAt: null,
+      message: 'Stress billing reconciliation without webhook replay.',
+    },
+    {
+      id: 'job_matrix_billing_retry',
+      tenantId: 'tenant_demo',
+      queue: 'billing_webhook',
+      type: 'payment.webhook.invoice.payment_failed',
+      targetId: 'inv_scheduler_matrix_missing_subscription',
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      nextRunAt: null,
+      message: 'Stress billing retry when subscription is temporarily missing.',
+    },
+    {
+      id: 'job_matrix_notification_digest',
+      tenantId: 'tenant_demo',
+      queue: 'notification_digest',
+      type: 'notifications.digest.prepare_delivery',
+      targetId: 'tenant_demo',
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      nextRunAt: null,
+      message: 'Stress notification digest worker.',
+    },
+  );
+  await saveState(state, { statePath });
+
+  const config = createSchedulerConfig({
+    argv: ['--once', '--queues', 'email_sync,signal_detection,billing_webhook,notification_digest', '--limit', '10', '--lock-file', lockFile],
+    env: { SIGNAL_ADMIN_STATE: statePath },
+  });
+  const result = await runSchedulerOnce(config);
+  assert.equal(result.ok, false, 'one billing retry job should fail while the other queues still drain');
+  assert.equal(result.ran, 5);
+  assert.equal(result.outcomes.find((outcome) => outcome.queue === 'email_sync')?.succeeded, 1);
+  assert.equal(result.outcomes.find((outcome) => outcome.queue === 'signal_detection')?.succeeded, 1);
+  assert.equal(result.outcomes.find((outcome) => outcome.queue === 'notification_digest')?.succeeded, 1);
+  assert.equal(result.outcomes.find((outcome) => outcome.queue === 'billing_webhook')?.succeeded, 1);
+  assert.equal(result.outcomes.find((outcome) => outcome.queue === 'billing_webhook')?.failed, 1);
+
+  state = await loadState({ statePath });
+  assert.equal(state.paymentEvents.length, paymentEventCount, 'scheduler billing reconciliation must not append duplicate payment events');
+  assert(state.sourceMessages.length >= sourceMessageCount, 'email sync should preserve or grow source-message state');
+  assert(state.flowRuns.length >= flowRunCount + 2, 'email sync plus signal_detection should record detector flow runs');
+  assert(state.notificationDigestRuns.length > digestRunCount, 'notification digest queue should record a digest run');
+  assert(state.emailDeliveryMessages.length >= deliveryMessageCount, 'notification digest queue should preserve delivery ledger rows');
+  assert.equal(state.jobs.find((job) => job.id === 'job_matrix_email_sync')?.status, 'succeeded');
+  assert.equal(state.jobs.find((job) => job.id === 'job_matrix_signal_detection')?.status, 'succeeded');
+  assert.equal(state.jobs.find((job) => job.id === 'job_matrix_notification_digest')?.status, 'succeeded');
+  assert.equal(state.jobs.find((job) => job.id === 'job_matrix_billing_reconcile')?.status, 'succeeded');
+  const retryJob = state.jobs.find((job) => job.id === 'job_matrix_billing_retry');
+  assert.equal(retryJob?.status, 'queued');
+  assert.equal(retryJob?.attempts, 1);
+  assert(retryJob?.nextAttemptAt, 'failed billing job should be rescheduled with backoff');
+  assert.equal(retryJob?.failureHistory?.length, 1);
+  const pipeline = signalDigestionPipelineReport(state, { statePath });
+  assert(pipeline.rows.some((row) => row.area === 'detector_execution' && row.localOk === true));
+  assert(pipeline.rows.some((row) => row.area === 'routing_and_user_outcomes' && row.localOk === true));
+  assert.equal(state.schedulerHeartbeat?.ok, false, 'failed stress tick should record scheduler heartbeat evidence');
+  assert.equal(state.schedulerHeartbeat?.ran, 5);
+
+  retryJob.nextAttemptAt = '2026-01-01T00:00:00.000Z';
+  retryJob.nextRunAt = retryJob.nextAttemptAt;
+  state.subscriptions.push({
+    id: 'sub_scheduler_matrix_missing',
+    tenantId: 'tenant_demo',
+    provider: 'local_test',
+    planId: 'plan_team',
+    status: 'past_due',
+  });
+  await saveState(state, { statePath });
+
+  const retryConfig = createSchedulerConfig({
+    argv: ['--once', '--queue', 'billing_webhook', '--limit', '10', '--lock-file', lockFile],
+    env: { SIGNAL_ADMIN_STATE: statePath },
+  });
+  const retryRun = await runSchedulerOnce(retryConfig);
+  assert.equal(retryRun.ok, true);
+  assert.equal(retryRun.ran, 1);
+
+  state = await loadState({ statePath });
+  assert.equal(state.jobs.find((job) => job.id === 'job_matrix_billing_retry')?.status, 'succeeded');
+  assert.equal(state.invoices.find((invoice) => invoice.id === 'inv_scheduler_matrix_missing_subscription')?.nextPaymentAttemptAt !== null, true);
+  assert.equal(state.paymentEvents.length, paymentEventCount, 'billing retry should reconcile without replaying payment events');
+  assert.equal(
+    state.jobs.filter((job) => job.id.startsWith('job_matrix_') && ['queued', 'running', 'failed'].includes(job.status)).length,
+    0,
+  );
 });
 
 test('Signal scheduler auto-renews provider watches expiring within 24h', async (t) => {

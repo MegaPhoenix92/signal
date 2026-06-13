@@ -16,6 +16,7 @@ import {
   completeMailboxConnection,
   completeMailboxConnectionFromOAuthCallback,
   compTenant,
+  completionAuditReport,
   createAccountReview,
   createBillingOverride,
   createBillingPortalSession,
@@ -29,6 +30,7 @@ import {
   createSuppressionRule,
   createTenantWorkspace,
   createUserInvite,
+  dashboardAuditReport,
   disconnectMailbox,
   drainJobs,
   doctor,
@@ -42,6 +44,7 @@ import {
   loadState,
   providerReadiness,
   providerValidationSchedulesDue,
+  productReadinessReport,
   recordInvoiceRefund,
   recordProviderSandboxValidation,
   redactClientStateSecrets,
@@ -78,6 +81,7 @@ import {
   setUserRole,
   setUserStatus,
   setupMailboxWatch,
+  signalDigestionPipelineReport,
   syncPaymentState,
   switchSession,
   syncMailbox,
@@ -107,12 +111,27 @@ import {
 } from './signal-backend-readiness.mjs';
 
 
-export async function verifySignalLocal() {
+export async function verifySignalLocal({
+  cleanup = true,
+  registrationStatePath = path.join(os.tmpdir(), `signal-registration-verify-${Date.now()}.json`),
+  statePath = path.join(os.tmpdir(), `signal-verify-${Date.now()}.json`),
+  vaultPath = path.join(os.tmpdir(), `signal-vault-${Date.now()}.json`),
+} = {}) {
 process.env.SIGNAL_OAUTH_STATE_KEY ??= 'signal-local-oauth-state-key';
 
-const statePath = path.join(os.tmpdir(), `signal-verify-${Date.now()}.json`);
-const registrationStatePath = path.join(os.tmpdir(), `signal-registration-verify-${Date.now()}.json`);
-const vaultPath = path.join(os.tmpdir(), `signal-vault-${Date.now()}.json`);
+const localReportEnv = {
+  SIGNAL_EMAIL_PROVIDER_TOKEN: '',
+  SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET: '',
+  SIGNAL_GMAIL_ACCESS_TOKEN: '',
+  SIGNAL_OUTLOOK_ACCESS_TOKEN: '',
+  SIGNAL_PROVIDER_ACCESS_TOKEN: '',
+  SIGNAL_PROVIDER_SANDBOX_TIMEOUT_MS: '1000',
+  SIGNAL_SENDGRID_API_KEY: '',
+  SIGNAL_SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY: '',
+  SIGNAL_STRIPE_PRICE_TEAM: '',
+  STRIPE_SECRET_KEY: '',
+  STRIPE_WEBHOOK_SECRET: '',
+};
 
 const missingProviderReadiness = providerReadiness({});
 assert.equal(missingProviderReadiness.ok, false);
@@ -2088,7 +2107,7 @@ const drainedJobs = await drainJobs('email_sync', { actorUserId: 'usr_admin', st
 assert.equal(drainedJobs.action, 'jobs.drain');
 assert(drainedJobs.details.count >= 1, 'at least one email sync job should be drained');
 
-const state = await loadState({ statePath });
+let state = await loadState({ statePath });
 const report = doctor(state);
 assert.equal(report.ok, true);
 assert(state.auditEvents.length >= 4, 'audit events should be appended for allowed mutations');
@@ -2163,6 +2182,46 @@ if (exposedInvitePaths.length > 0) {
   assert(!JSON.stringify(redactedState).includes(exposedInvite.claimCode), 'redacted client state should not serialize pending claim codes');
 }
 
-await fs.rm(statePath, { force: true });
-await fs.rm(vaultPath, { force: true });
+for (const mailbox of state.mailboxes.filter((mailbox) => mailbox.status !== 'connected')) {
+  await setMailboxStatus(mailbox.id, 'connected', { actorUserId: 'usr_admin', statePath });
+}
+state = await loadState({ statePath });
+for (const mailbox of state.mailboxes) {
+  await syncMailbox(mailbox.id, { actorUserId: 'usr_admin', statePath });
+}
+state = await loadState({ statePath });
+
+const dashboard = dashboardAuditReport(state, { statePath });
+assert.equal(dashboard.ok, true, JSON.stringify(dashboard.rows.filter((row) => !row.localOk)));
+const pipeline = signalDigestionPipelineReport(state, { statePath });
+assert.equal(pipeline.ok, true, JSON.stringify(pipeline.rows.filter((row) => !row.localOk)));
+assert.equal(pipeline.summary.localReady, pipeline.summary.total);
+const readiness = productReadinessReport(state, {
+  backend: localBackendReadiness,
+  provider: providerReadiness(localReportEnv),
+});
+assert.equal(readiness.ok, true, JSON.stringify(readiness.requirements.filter((requirement) => !requirement.localOk)));
+assert.equal(readiness.summary.localReady, readiness.summary.total);
+assert.equal(readiness.summary.total, 10);
+const completion = completionAuditReport(state, {
+  dashboardAudit: dashboard,
+  digestionPipeline: pipeline,
+  backend: localBackendReadiness,
+  env: localReportEnv,
+  provider: providerReadiness(localReportEnv),
+  readiness,
+  statePath,
+});
+assert.equal(completion.rows.length, 8);
+assert.equal(completion.summary.secretSafe, true);
+assert(completion.rows.some((row) => row.id === 'core_user_workspace' && row.localOk), JSON.stringify(completion.rows.filter((row) => !row.localOk)));
+assert(completion.rows.some((row) => row.id === 'payment_processing_architecture' && row.localOk), JSON.stringify(completion.rows.filter((row) => !row.localOk)));
+
+if (cleanup) {
+  await fs.rm(statePath, { force: true });
+  await fs.rm(registrationStatePath, { force: true });
+  await fs.rm(vaultPath, { force: true });
+}
+
+return { registrationStatePath, statePath, vaultPath };
 }

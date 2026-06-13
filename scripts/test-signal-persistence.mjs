@@ -10,8 +10,19 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   bootstrapState,
+  completionAuditReport,
+  dashboardAuditReport,
+  doctor,
   issueSessionToken,
+  loadState,
+  productReadinessReport,
+  providerReadiness,
+  signalDigestionPipelineReport,
 } from './signal-state.mjs';
+import {
+  backendReadiness,
+} from './signal-backend-readiness.mjs';
+import { verifySignalLocal } from './verify-signal-local-core.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -277,4 +288,77 @@ test('Signal local API preserves concurrent mutations without lost updates', asy
     new Set(['usr_admin']),
     'both concurrent domain updates should be attributed to the same actor',
   );
+});
+
+test('Signal local JSON backup/restore preserves full digestion, account, notification, governance, and completion reports', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-persistence-restore-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const registrationStatePath = path.join(tempDir, 'signal-registration-state.json');
+  const vaultPath = path.join(tempDir, 'signal-vault.json');
+  const backupPath = path.join(tempDir, 'signal-state.backup.json');
+  const restoredPath = path.join(tempDir, 'signal-state.restored.json');
+  const reportEnv = {
+    SIGNAL_EMAIL_PROVIDER_TOKEN: '',
+    SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET: '',
+    SIGNAL_GMAIL_ACCESS_TOKEN: '',
+    SIGNAL_OUTLOOK_ACCESS_TOKEN: '',
+    SIGNAL_PROVIDER_ACCESS_TOKEN: '',
+    SIGNAL_PROVIDER_SANDBOX_TIMEOUT_MS: '1000',
+    SIGNAL_SENDGRID_API_KEY: '',
+    SIGNAL_SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY: '',
+    SIGNAL_STRIPE_PRICE_TEAM: '',
+    STRIPE_SECRET_KEY: '',
+    STRIPE_WEBHOOK_SECRET: '',
+  };
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await verifySignalLocal({
+    cleanup: false,
+    registrationStatePath,
+    statePath,
+    vaultPath,
+  });
+
+  await fs.copyFile(statePath, backupPath);
+  await fs.copyFile(backupPath, restoredPath);
+
+  const restored = await loadState({ statePath: restoredPath });
+  assert(restored.sourceMessages.some((message) => message.providerRequestDigest && message.providerResponseDigest), 'restored state should preserve provider-backed source-message digestion provenance');
+  assert(restored.flowRuns.some((run) => run.status === 'succeeded' && run.createdSignalIds.length >= 1), 'restored state should preserve detector flow run output');
+  assert(restored.signals.some((signal) => signal.sourceMessageId && signal.flowId), 'restored state should preserve source-backed signals');
+  assert(restored.accountEvents.some((event) => event.type === 'next_action'), 'restored state should preserve account timeline events');
+  assert(restored.accountRecommendations.some((recommendation) => recommendation.status === 'open' && recommendation.strategy), 'restored state should preserve account recommendations');
+  assert(restored.notificationDigestRuns.length >= 1, 'restored state should preserve notification digest runs');
+  assert(restored.emailDeliveryMessages.some((message) => ['sent', 'bounced', 'suppressed'].includes(message.status)), 'restored state should preserve notification delivery outcomes');
+  assert(restored.governancePolicies.some((policy) => policy.sourceRetentionDays === 30 && policy.redactionMode === 'strict'), 'restored state should preserve governance policy updates');
+  assert(restored.redactionRules.some((rule) => rule.label === 'Executive names' && rule.status === 'disabled'), 'restored state should preserve redaction rule status updates');
+
+  const doctorReport = doctor(restored);
+  assert.equal(doctorReport.ok, true, JSON.stringify(doctorReport.checks.filter((check) => !check.ok)));
+  const dashboard = dashboardAuditReport(restored, { statePath: restoredPath });
+  assert.equal(dashboard.ok, true, JSON.stringify(dashboard.rows.filter((row) => !row.localOk)));
+  const digestion = signalDigestionPipelineReport(restored, { statePath: restoredPath });
+  assert.equal(digestion.ok, true, JSON.stringify(digestion.rows.filter((row) => !row.localOk)));
+  assert.equal(digestion.summary.localReady, digestion.summary.total);
+  const backend = backendReadiness({ env: {}, statePath: restoredPath });
+  const readiness = productReadinessReport(restored, { backend, provider: providerReadiness(reportEnv) });
+  assert.equal(readiness.ok, true, JSON.stringify(readiness.requirements.filter((requirement) => !requirement.localOk)));
+  assert.equal(readiness.summary.localReady, readiness.summary.total);
+  assert.equal(readiness.summary.total, 10);
+  const completion = completionAuditReport(restored, {
+    backend,
+    dashboardAudit: dashboard,
+    digestionPipeline: digestion,
+    env: reportEnv,
+    provider: providerReadiness(reportEnv),
+    readiness,
+    statePath: restoredPath,
+  });
+  assert.equal(completion.rows.length, 8);
+  assert.equal(completion.summary.secretSafe, true);
+  assert(completion.rows.some((row) => row.id === 'core_user_workspace' && row.localOk), JSON.stringify(completion.rows.filter((row) => !row.localOk)));
+  assert(completion.rows.some((row) => row.id === 'payment_processing_architecture' && row.localOk), JSON.stringify(completion.rows.filter((row) => !row.localOk)));
 });
