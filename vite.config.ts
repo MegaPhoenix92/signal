@@ -1,18 +1,21 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const containsPath = (id: string, path: string) => id.indexOf(path) !== -1;
+const hasPathSuffix = (id: string, suffix: string) => id.slice(-suffix.length) === suffix;
+
 export default defineConfig({
   build: {
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes('/node_modules/react') || id.includes('/node_modules/react-dom')) {
+          if (containsPath(id, '/node_modules/react') || containsPath(id, '/node_modules/react-dom')) {
             return 'react-vendor';
           }
-          if (id.includes('/node_modules/lucide-react')) {
+          if (containsPath(id, '/node_modules/lucide-react')) {
             return 'icons';
           }
-          if (id.endsWith('/src/signalData.ts')) {
+          if (hasPathSuffix(id, '/src/signalData.ts')) {
             return 'signal-data';
           }
           return undefined;
