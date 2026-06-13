@@ -743,7 +743,7 @@ async function route(req, res) {
     const { auth, state } = await authenticatedState(req);
     requireAdminRequestAuth(state, auth, 'dashboard.audit');
     const backend = backendReadiness({ statePath });
-    const audit = dashboardAuditReport(state, { backend, statePath });
+    const audit = dashboardAuditReport(state, { actorUserId: auth.actorUserId, backend, statePath });
     sendJson(res, 200, {
       ok: audit.ok,
       audit,
@@ -788,7 +788,7 @@ async function route(req, res) {
     const { auth, state } = await authenticatedState(req);
     requireAdminRequestAuth(state, auth, 'tenant.isolation');
     const backend = backendReadiness({ statePath });
-    const isolation = tenantIsolationAuditReport(state, { backend, statePath });
+    const isolation = tenantIsolationAuditReport(state, { actorUserId: auth.actorUserId, backend, statePath });
     sendJson(res, 200, {
       ok: isolation.ok,
       isolation,
