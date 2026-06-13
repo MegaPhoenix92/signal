@@ -239,7 +239,7 @@ export function StateBanner({
 
 export function SeedReadOnlyCallout({ area }: { area: 'workspace' | 'admin' }) {
   return (
-    <section className="ops-panel seed-mode-callout" aria-live="polite" data-reveal>
+    <section className="ops-panel seed-mode-callout" role="note" aria-label="Read-only seed mode" data-reveal>
       <div className="seed-mode-copy">
         <TerminalSquare size={20} aria-hidden="true" />
         <div>
