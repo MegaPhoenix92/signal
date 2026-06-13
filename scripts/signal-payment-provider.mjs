@@ -436,7 +436,7 @@ function objectCustomerId(object) {
 }
 
 function objectInvoiceId(object) {
-  return object.object === 'invoice' ? objectId(object) : objectId(object.latest_invoice);
+  return object.object === 'invoice' ? objectId(object) : objectId(object.invoice) ?? objectId(object.latest_invoice);
 }
 
 function objectPriceId(object) {
@@ -448,6 +448,47 @@ function objectPriceId(object) {
     ?? objectId(firstLine?.plan)
     ?? objectId(firstItem?.price)
     ?? objectId(firstItem?.plan);
+}
+
+function objectAmountCents(object) {
+  const value = object.amount
+    ?? object.amount_due
+    ?? object.amount_refunded
+    ?? object.amount_paid
+    ?? object.total;
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function ignoredStripeEventMapping({
+  eventType,
+  livemode,
+  providerCustomerId,
+  providerEventId,
+  providerInvoiceId,
+  providerPriceId,
+  providerSubscriptionId,
+  subscriptionId,
+  tenantId,
+  amountCents,
+  providerStatus,
+}) {
+  return {
+    args: {
+      amountCents,
+      providerCustomerId,
+      providerInvoiceId,
+      providerPriceId,
+      providerStatus,
+      providerSubscriptionId,
+      subscriptionId,
+      tenantId,
+    },
+    eventType,
+    livemode,
+    localType: 'provider.event.ignored',
+    provider: 'stripe',
+    providerEventId,
+  };
 }
 
 function unixSecondsToIso(value) {
@@ -496,6 +537,7 @@ export function stripeEventToLocalPaymentWebhook(event) {
   const providerCustomerId = objectCustomerId(object);
   const providerInvoiceId = objectInvoiceId(object);
   const providerPriceId = objectPriceId(object);
+  const amountCents = objectAmountCents(object);
 
   if (eventType === 'checkout.session.completed') {
     return {
@@ -534,6 +576,48 @@ export function stripeEventToLocalPaymentWebhook(event) {
     };
   }
 
+  if (eventType === 'invoice.created' || eventType === 'invoice.finalized') {
+    return {
+      args: {
+        amountDueCents: Number.isFinite(object.amount_due) ? object.amount_due : amountCents,
+        hostedInvoiceUrl: optionalString(object.hosted_invoice_url),
+        nextPaymentAttemptAt: unixSecondsToIso(object.next_payment_attempt),
+        providerCustomerId,
+        providerInvoiceId,
+        providerPriceId,
+        providerStatus: object.status,
+        providerSubscriptionId,
+        subscriptionId: requireMappedValue(subscriptionId, 'subscription id', eventType),
+      },
+      eventType,
+      livemode: Boolean(event.livemode),
+      localType: eventType === 'invoice.created' && object.status === 'draft' ? 'invoice.draft' : 'invoice.open',
+      provider: 'stripe',
+      providerEventId,
+    };
+  }
+
+  if (eventType === 'invoice.marked_uncollectible' || eventType === 'invoice.voided') {
+    return {
+      args: {
+        amountDueCents: Number.isFinite(object.amount_due) ? object.amount_due : amountCents,
+        hostedInvoiceUrl: optionalString(object.hosted_invoice_url),
+        nextPaymentAttemptAt: unixSecondsToIso(object.next_payment_attempt),
+        providerCustomerId,
+        providerInvoiceId,
+        providerPriceId,
+        providerStatus: object.status,
+        providerSubscriptionId,
+        subscriptionId: requireMappedValue(subscriptionId, 'subscription id', eventType),
+      },
+      eventType,
+      livemode: Boolean(event.livemode),
+      localType: eventType === 'invoice.marked_uncollectible' ? 'invoice.uncollectible' : 'invoice.void',
+      provider: 'stripe',
+      providerEventId,
+    };
+  }
+
   if (eventType === 'invoice.payment_failed' || eventType === 'invoice.payment_action_required') {
     return {
       args: {
@@ -554,12 +638,14 @@ export function stripeEventToLocalPaymentWebhook(event) {
     };
   }
 
-  if (eventType === 'customer.subscription.created' || eventType === 'customer.subscription.updated' || eventType === 'customer.subscription.paused' || eventType === 'customer.subscription.resumed') {
+  if (eventType === 'customer.subscription.created' || eventType === 'customer.subscription.updated' || eventType === 'customer.subscription.paused' || eventType === 'customer.subscription.resumed' || eventType === 'customer.subscription.trial_will_end') {
     const mappedStatus = eventType === 'customer.subscription.paused'
       ? 'past_due'
       : eventType === 'customer.subscription.resumed'
         ? 'active'
-        : mapStripeSubscriptionStatus(object.status);
+        : eventType === 'customer.subscription.trial_will_end'
+          ? 'trialing'
+          : mapStripeSubscriptionStatus(object.status);
     return {
       args: {
         status: mappedStatus,
@@ -571,11 +657,12 @@ export function stripeEventToLocalPaymentWebhook(event) {
         providerStatus: object.status,
         providerSubscriptionId,
         currentPeriodEndAt: unixSecondsToIso(object.current_period_end),
+        trialEndsAt: unixSecondsToIso(object.trial_end),
         subscriptionId: requireMappedValue(subscriptionId, 'subscription id', eventType),
       },
       eventType,
       livemode: Boolean(event.livemode),
-      localType: 'subscription.updated',
+      localType: eventType === 'customer.subscription.trial_will_end' ? 'subscription.trial_will_end' : 'subscription.updated',
       provider: 'stripe',
       providerEventId,
     };
@@ -601,9 +688,78 @@ export function stripeEventToLocalPaymentWebhook(event) {
     };
   }
 
-  throw new PaymentProviderError(`Unsupported Stripe webhook event: ${eventType}`, {
-    code: 'PAYMENT_WEBHOOK_UNSUPPORTED_EVENT',
-    details: { eventType },
+  if (eventType === 'charge.refunded' || eventType.startsWith('refund.')) {
+    return {
+      args: {
+        amountCents,
+        providerCustomerId,
+        providerInvoiceId,
+        providerPriceId,
+        providerStatus: object.status,
+        providerSubscriptionId,
+        subscriptionId,
+        tenantId,
+      },
+      eventType,
+      livemode: Boolean(event.livemode),
+      localType: 'invoice.refunded',
+      provider: 'stripe',
+      providerEventId,
+    };
+  }
+
+  if (eventType.startsWith('credit_note.')) {
+    return {
+      args: {
+        amountCents,
+        providerCustomerId,
+        providerInvoiceId,
+        providerPriceId,
+        providerStatus: object.status,
+        providerSubscriptionId,
+        subscriptionId,
+        tenantId,
+      },
+      eventType,
+      livemode: Boolean(event.livemode),
+      localType: 'invoice.credit_applied',
+      provider: 'stripe',
+      providerEventId,
+    };
+  }
+
+  if (eventType.startsWith('customer.balance_transaction.')) {
+    return {
+      args: {
+        amountCents,
+        providerCustomerId,
+        providerInvoiceId,
+        providerPriceId,
+        providerStatus: object.status,
+        providerSubscriptionId,
+        subscriptionId,
+        tenantId,
+      },
+      eventType,
+      livemode: Boolean(event.livemode),
+      localType: 'customer.balance_adjusted',
+      provider: 'stripe',
+      providerEventId,
+    };
+  }
+
+  return ignoredStripeEventMapping({
+    amountCents,
+    eventType,
+    livemode: Boolean(event.livemode),
+    providerCustomerId,
+    providerEventId,
+    providerInvoiceId,
+    providerPriceId,
+    providerStatus: object.status,
+    providerSubscriptionId,
+    subscriptionId,
+    tenantId,
   });
 }
 

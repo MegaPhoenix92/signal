@@ -64,6 +64,7 @@ import {
   providerValidationSchedulesDue,
   productReadinessReport,
   registerTenantWorkspace,
+  recordInvoiceRefund,
   schedulerHandoffReport,
   exportProviderSandboxEvidence,
   importProviderSandboxEvidence,
@@ -155,6 +156,10 @@ const limitFlagIndex = args.findIndex((arg) => arg === '--limit');
 const limit = limitFlagIndex >= 0 ? Number(args[limitFlagIndex + 1]) : undefined;
 const stripeCustomerFlagIndex = args.findIndex((arg) => arg === '--stripe-customer');
 const stripeCustomerId = stripeCustomerFlagIndex >= 0 ? args[stripeCustomerFlagIndex + 1] : undefined;
+const amountValue = optionValue('--amount');
+const planValue = optionValue('--plan');
+const providerInvoiceValue = optionValue('--provider-invoice');
+const providerPriceValue = optionValue('--provider-price');
 const mutationOptions = { actorUserId, livePaymentProvider, liveProviderSync, liveProviderWatch, stripeCustomerId, ttlSeconds };
 
 function positionalArgs(argv) {
@@ -164,6 +169,10 @@ function positionalArgs(argv) {
     '--input',
     '--limit',
     '--output',
+    '--amount',
+    '--plan',
+    '--provider-invoice',
+    '--provider-price',
     '--save-evidence',
     '--stripe-customer',
     '--template',
@@ -2626,6 +2635,7 @@ async function run() {
         '  npm run admin -- signals handoff-status <handoffId> sent crm_task_123 Sent_to_CRM',
         '  npm run admin -- payments comp tenant_demo plan_beta',
         '  npm run admin -- payments sync tenant_demo',
+        '  npm run admin -- payments sync tenant_demo --live-provider',
         '  npm run admin -- payments override tenant_demo beta_access Beta_extension plan_beta',
         '  npm run admin -- payments override tenant_demo support_credit Onboarding_credit 2500',
         '  npm run admin -- payments override tenant_demo manual_entitlement Support_access plan_team',
@@ -2633,6 +2643,7 @@ async function run() {
         '  npm run admin -- payments checkout tenant_demo plan_team',
         '  npm run admin -- payments checkout tenant_demo plan_team --live-provider',
         '  npm run admin -- payments recover <invoiceId>',
+        '  npm run admin -- payments refund <invoiceId> 2500 Courtesy_credit',
         '  npm run admin -- payments cancel sub_demo',
         '  npm run admin -- payments portal tenant_demo --live-provider',
         '  npm run admin -- payments portal tenant_demo --live-provider --stripe-customer cus_... # override stored customer',
@@ -3389,12 +3400,27 @@ async function run() {
         emitMutation(await createInvoiceRecoverySession(positionals[2], mutationOptions));
         return;
       }
+      if (subcommand === 'refund') {
+        emitMutation(await recordInvoiceRefund(positionals[2], {
+          amountCents: positionals[3],
+          reason: positionals.slice(4).join(' ') || undefined,
+        }, mutationOptions));
+        return;
+      }
       if (subcommand === 'webhook') {
         const eventType = positionals[2];
         const webhookArgs =
           eventType === 'checkout.completed'
             ? { tenantId: positionals[3], planId: positionals[4] }
-            : { subscriptionId: positionals[3], status: positionals[4] };
+            : {
+                amountCents: amountValue,
+                amountDueCents: amountValue,
+                planId: planValue ?? positionals[5],
+                providerInvoiceId: providerInvoiceValue,
+                providerPriceId: providerPriceValue,
+                status: positionals[4],
+                subscriptionId: positionals[3],
+              };
         emitMutation(await handlePaymentWebhook(eventType, webhookArgs, mutationOptions));
         return;
       }

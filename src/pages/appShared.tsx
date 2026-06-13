@@ -954,11 +954,19 @@ export function ProviderReadinessCard({ provider }: { provider: ProviderReadines
 }
 
 export function InvoiceCard({ action, invoice }: { action?: ReactNode; invoice: Invoice }) {
+  const hasAdjustments = Boolean((invoice.refundedCents ?? 0) > 0 || (invoice.creditedCents ?? 0) > 0);
   return (
     <div className="invoice-card">
       <div>
         <span>{invoice.provider}</span>
         <strong>{formatCurrency(invoice.amountDueCents)} {invoice.currency.toUpperCase()}</strong>
+        {hasAdjustments && (
+          <small>
+            Net {formatCurrency(invoice.netAmountDueCents ?? invoice.amountDueCents)}
+            {(invoice.creditedCents ?? 0) > 0 ? ` · Credit ${formatCurrency(invoice.creditedCents ?? 0)}` : ''}
+            {(invoice.refundedCents ?? 0) > 0 ? ` · Refunded ${formatCurrency(invoice.refundedCents ?? 0)}` : ''}
+          </small>
+        )}
         <small>
           Due {new Date(invoice.dueAt).toLocaleDateString()} · Retry {invoice.retryCount}
           {invoice.nextPaymentAttemptAt ? ` · Next attempt ${new Date(invoice.nextPaymentAttemptAt).toLocaleDateString()}` : ''}

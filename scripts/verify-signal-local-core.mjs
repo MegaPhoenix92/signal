@@ -42,6 +42,7 @@ import {
   loadState,
   providerReadiness,
   providerValidationSchedulesDue,
+  recordInvoiceRefund,
   recordProviderSandboxValidation,
   redactClientStateSecrets,
   recordSignalFeedback,
@@ -1883,6 +1884,181 @@ const signedUpdatedActivePayment = await handleSignedStripePaymentWebhook(stripe
 assert.equal(signedUpdatedActivePayment.details.status, 'active');
 paymentState = await loadState({ statePath });
 assert.equal(paymentState.entitlements.find((entitlement) => entitlement.tenantId === 'tenant_demo')?.status, 'active');
+
+const stripeUnknownPayload = JSON.stringify({
+  id: 'evt_stripe_unknown_ignored_local',
+  type: 'payment_intent.processing',
+  livemode: false,
+  data: {
+    object: {
+      id: 'pi_unknown_ignored_local',
+      object: 'payment_intent',
+      customer: 'cus_signal_test',
+      metadata: {
+        tenantId: 'tenant_demo',
+      },
+      status: 'processing',
+    },
+  },
+});
+const stripeUnknownHeader = signStripeWebhookPayload(stripeUnknownPayload, stripeWebhookSecret);
+const signedUnknownPayment = await handleSignedStripePaymentWebhook(stripeUnknownPayload, stripeUnknownHeader, { actorUserId: 'usr_admin', endpointSecret: stripeWebhookSecret, statePath });
+assert.equal(signedUnknownPayment.details.status, 'ignored');
+assert.equal(signedUnknownPayment.details.jobId, null);
+paymentState = await loadState({ statePath });
+assert(paymentState.paymentEvents.some((event) => event.providerEventId === 'evt_stripe_unknown_ignored_local' && event.status === 'ignored' && event.appliedType === 'provider.event.ignored'), 'unknown signed Stripe events should be recorded as ignored');
+
+const stripeTrialWillEndPayload = JSON.stringify({
+  id: 'evt_stripe_trial_will_end_local',
+  type: 'customer.subscription.trial_will_end',
+  livemode: false,
+  data: {
+    object: {
+      id: 'sub_stripe_signal_test',
+      object: 'subscription',
+      customer: 'cus_signal_test',
+      status: 'trialing',
+      trial_end: 1781131800,
+      metadata: {
+        planId: 'plan_team',
+        tenantId: 'tenant_demo',
+      },
+    },
+  },
+});
+const stripeTrialWillEndHeader = signStripeWebhookPayload(stripeTrialWillEndPayload, stripeWebhookSecret);
+const signedTrialWillEnd = await handleSignedStripePaymentWebhook(stripeTrialWillEndPayload, stripeTrialWillEndHeader, { actorUserId: 'usr_admin', endpointSecret: stripeWebhookSecret, statePath });
+assert.equal(signedTrialWillEnd.details.status, 'active');
+
+await handlePaymentWebhook('subscription.updated', {
+  planId: 'plan_team',
+  provider: 'stripe',
+  providerPriceId: 'price_signal_team_test',
+  providerSubscriptionId: 'sub_stripe_signal_test',
+  status: 'active',
+  subscriptionId: 'sub_stripe_signal_test',
+  tenantId: 'tenant_demo',
+}, { actorUserId: 'usr_admin', statePath });
+
+const stripePlanChangePayload = JSON.stringify({
+  id: 'evt_stripe_subscription_plan_changed_local',
+  type: 'customer.subscription.updated',
+  livemode: false,
+  data: {
+    object: {
+      id: 'sub_stripe_signal_test',
+      object: 'subscription',
+      customer: 'cus_signal_test',
+      status: 'active',
+      current_period_end: 1781218200,
+      items: {
+        data: [
+          {
+            price: {
+              id: 'price_signal_team_test_v2',
+            },
+          },
+        ],
+      },
+      metadata: {
+        planId: 'plan_team',
+        tenantId: 'tenant_demo',
+      },
+    },
+  },
+});
+const stripePlanChangeHeader = signStripeWebhookPayload(stripePlanChangePayload, stripeWebhookSecret);
+const signedPlanChange = await handleSignedStripePaymentWebhook(stripePlanChangePayload, stripePlanChangeHeader, { actorUserId: 'usr_admin', endpointSecret: stripeWebhookSecret, statePath });
+assert.equal(signedPlanChange.details.status, 'active');
+paymentState = await loadState({ statePath });
+assert(paymentState.subscriptions.some((subscription) => subscription.providerSubscriptionId === 'sub_stripe_signal_test' && subscription.providerPriceId === 'price_signal_team_test_v2'), 'plan-changing provider subscription should store the latest provider price');
+assert(paymentState.paymentEvents.some((event) => event.providerEventId === 'evt_stripe_subscription_plan_changed_local' && event.providerPreviousPriceId), 'plan-changing subscription update should record previous provider price');
+
+for (const [matrixSubscriptionId, invoiceEventType, expectedStatus] of [
+  ['sub_invoice_draft_matrix', 'invoice.created', 'draft'],
+  ['sub_invoice_open_matrix', 'invoice.finalized', 'open'],
+  ['sub_invoice_uncollectible_matrix', 'invoice.marked_uncollectible', 'uncollectible'],
+  ['sub_invoice_void_matrix', 'invoice.voided', 'void'],
+]) {
+  await handlePaymentWebhook('subscription.updated', {
+    planId: 'plan_team',
+    status: 'active',
+    subscriptionId: matrixSubscriptionId,
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+  const invoicePayload = JSON.stringify({
+    id: `evt_stripe_${expectedStatus}_invoice_local`,
+    type: invoiceEventType,
+    livemode: false,
+    data: {
+      object: {
+        id: `in_${expectedStatus}_matrix`,
+        object: 'invoice',
+        amount_due: 4900,
+        customer: 'cus_signal_test',
+        hosted_invoice_url: `https://invoice.stripe.com/i/in_${expectedStatus}_matrix`,
+        status: expectedStatus === 'void' ? 'void' : expectedStatus,
+        subscription: matrixSubscriptionId,
+      },
+    },
+  });
+  const invoiceHeader = signStripeWebhookPayload(invoicePayload, stripeWebhookSecret);
+  const invoiceResult = await handleSignedStripePaymentWebhook(invoicePayload, invoiceHeader, { actorUserId: 'usr_admin', endpointSecret: stripeWebhookSecret, statePath });
+  assert.equal(invoiceResult.details.invoiceId !== null, true);
+}
+
+paymentState = await loadState({ statePath });
+assert(['draft', 'open', 'paid', 'past_due', 'void', 'uncollectible'].every((status) =>
+  paymentState.invoices.some((invoice) => invoice.status === status)), 'payment lifecycle should cover every invoice status');
+assert(paymentState.lifecycleNotices.some((notice) => notice.trigger === 'invoice_uncollectible' && notice.status === 'open'), 'uncollectible invoices should surface as open lifecycle notices');
+
+const refundableInvoice = paymentState.invoices.find((invoice) => invoice.providerInvoiceId === 'in_stripe_failed_local') ?? paymentState.invoices.find((invoice) => invoice.status === 'paid');
+const recordedRefund = await recordInvoiceRefund(refundableInvoice.id, { amountCents: 1200, reason: 'Verifier refund' }, { actorUserId: 'usr_admin', statePath });
+assert.equal(recordedRefund.details.refundedCents >= 1200, true);
+paymentState = await loadState({ statePath });
+const openInvoiceForCredit = paymentState.invoices.find((invoice) => invoice.status === 'open');
+assert(openInvoiceForCredit, 'payment verifier should have an open invoice for support credit proof');
+const lifecycleSupportCredit = await createBillingOverride('tenant_demo', 'support_credit', {
+  amountCents: 1000,
+  reason: 'Verifier credit',
+}, { actorUserId: 'usr_admin', statePath });
+assert.equal(lifecycleSupportCredit.details.creditedInvoiceId, openInvoiceForCredit.id);
+
+const stripeCreditPayload = JSON.stringify({
+  id: 'evt_stripe_credit_note_local',
+  type: 'credit_note.created',
+  livemode: false,
+  data: {
+    object: {
+      id: 'cn_signal_credit_local',
+      object: 'credit_note',
+      amount: 500,
+      invoice: openInvoiceForCredit.providerInvoiceId ?? openInvoiceForCredit.id,
+      customer: 'cus_signal_test',
+    },
+  },
+});
+const stripeCreditHeader = signStripeWebhookPayload(stripeCreditPayload, stripeWebhookSecret);
+const signedCredit = await handleSignedStripePaymentWebhook(stripeCreditPayload, stripeCreditHeader, { actorUserId: 'usr_admin', endpointSecret: stripeWebhookSecret, statePath });
+assert.equal(signedCredit.details.invoiceId, openInvoiceForCredit.id);
+
+const stripeRefundPayload = JSON.stringify({
+  id: 'evt_stripe_refund_local',
+  type: 'refund.created',
+  livemode: false,
+  data: {
+    object: {
+      id: 're_signal_refund_local',
+      object: 'refund',
+      amount: 600,
+      invoice: refundableInvoice.providerInvoiceId ?? refundableInvoice.id,
+      customer: 'cus_signal_test',
+    },
+  },
+});
+const stripeRefundHeader = signStripeWebhookPayload(stripeRefundPayload, stripeWebhookSecret);
+const signedRefund = await handleSignedStripePaymentWebhook(stripeRefundPayload, stripeRefundHeader, { actorUserId: 'usr_admin', endpointSecret: stripeWebhookSecret, statePath });
+assert.equal(signedRefund.details.status, 'paid');
 
 const retryState = await loadState({ statePath });
 const retryTarget = retryState.jobs.find((job) => job.id === 'job_outlook_reauth_001');

@@ -134,6 +134,34 @@ npm run admin -- provider-launch --env-file ./.env.production --json
 
 Expected: `launch.summary.readyProviders` is `5/5`, provider sandbox statuses are passed where required, and no raw credential values are serialized into state or evidence.
 
+## 4a. Rehearse Stripe billing exception handling
+
+Before enabling paid production traffic, run the payment lifecycle audit and verify the exception rows are locally covered:
+
+```bash
+npm run admin -- payment-lifecycle --json
+```
+
+Operational drills:
+
+```bash
+# Valid signed-but-unknown Stripe event: record as ignored, do not fail the webhook worker.
+STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-unknown-event.json <Stripe-Signature>
+
+# Invoice status coverage for local simulation or signed replay fixtures.
+npm run admin -- payments webhook invoice.draft sub_demo --amount 4900
+npm run admin -- payments webhook invoice.uncollectible sub_demo --amount 4900
+
+# Refunds and support credits: record ledger impact without storing card data.
+npm run admin -- payments refund <invoiceId> 2500 Courtesy_credit
+npm run admin -- payments override tenant_demo support_credit Support_credit 2500
+
+# Provider parity: run before launch evidence packaging and after manual billing actions.
+npm run admin -- payments sync tenant_demo --live-provider
+```
+
+Expected: `payment-lifecycle.rows` includes local-ready evidence for ignored webhook resilience, all invoice statuses, trial/plan-change events, refund/credit reconciliation, and provider-state parity. Unknown Stripe events should appear as ignored payment events, not failed `billing_webhook` jobs. Any `billing.drift.detected` lifecycle notice must be resolved before final launch evidence is packaged.
+
 ## 5. Deploy the managed scheduler daemon and alerting
 
 OPERATOR-ONLY: Deploy exactly one managed scheduler runner against the production state-service boundary and wire alerts:

@@ -10,6 +10,8 @@ import {
   createStripeBillingPortalSession,
   createStripeCheckoutSession,
   signStripeWebhookPayload,
+  parseSignedStripeWebhook,
+  stripeEventToLocalPaymentWebhook,
   stripeBillingPortalIdempotencyKey,
   stripeCheckoutIdempotencyKey,
   verifyStripeWebhookSignature,
@@ -276,4 +278,91 @@ test('Stripe webhook verification rejects stale signatures', () => {
     () => verifyStripeWebhookSignature(body, signature, secret),
     (error) => error.code === 'PAYMENT_WEBHOOK_TIMESTAMP_STALE',
   );
+});
+
+test('Stripe mapper records unknown events as ignored instead of throwing', () => {
+  const mapping = stripeEventToLocalPaymentWebhook({
+    id: 'evt_unknown_recorded',
+    type: 'payment_intent.processing',
+    livemode: false,
+    data: {
+      object: {
+        id: 'pi_processing',
+        object: 'payment_intent',
+        customer: 'cus_signal',
+        metadata: {
+          tenantId: 'tenant_demo',
+        },
+        status: 'processing',
+      },
+    },
+  });
+
+  assert.equal(mapping.localType, 'provider.event.ignored');
+  assert.equal(mapping.eventType, 'payment_intent.processing');
+  assert.equal(mapping.args.tenantId, 'tenant_demo');
+  assert.equal(mapping.args.providerCustomerId, 'cus_signal');
+});
+
+test('Stripe mapper supports invoice terminal states, refunds, credits, and trial notices', () => {
+  const baseInvoice = {
+    customer: 'cus_signal',
+    hosted_invoice_url: 'https://invoice.stripe.test/in_123',
+    id: 'in_123',
+    object: 'invoice',
+    subscription: 'sub_stripe_signal',
+  };
+
+  assert.equal(stripeEventToLocalPaymentWebhook({
+    id: 'evt_invoice_draft',
+    type: 'invoice.created',
+    data: { object: { ...baseInvoice, amount_due: 4900, status: 'draft' } },
+  }).localType, 'invoice.draft');
+  assert.equal(stripeEventToLocalPaymentWebhook({
+    id: 'evt_invoice_open',
+    type: 'invoice.finalized',
+    data: { object: { ...baseInvoice, amount_due: 4900, status: 'open' } },
+  }).localType, 'invoice.open');
+  assert.equal(stripeEventToLocalPaymentWebhook({
+    id: 'evt_invoice_uncollectible',
+    type: 'invoice.marked_uncollectible',
+    data: { object: { ...baseInvoice, amount_due: 4900, status: 'uncollectible' } },
+  }).localType, 'invoice.uncollectible');
+  assert.equal(stripeEventToLocalPaymentWebhook({
+    id: 'evt_refund',
+    type: 'refund.created',
+    data: { object: { id: 're_123', amount: 1200, invoice: 'in_123', object: 'refund' } },
+  }).localType, 'invoice.refunded');
+  assert.equal(stripeEventToLocalPaymentWebhook({
+    id: 'evt_credit',
+    type: 'credit_note.created',
+    data: { object: { id: 'cn_123', amount: 900, invoice: 'in_123', object: 'credit_note' } },
+  }).localType, 'invoice.credit_applied');
+  assert.equal(stripeEventToLocalPaymentWebhook({
+    id: 'evt_trial',
+    type: 'customer.subscription.trial_will_end',
+    data: {
+      object: {
+        id: 'sub_stripe_signal',
+        object: 'subscription',
+        status: 'trialing',
+        trial_end: 1780527000,
+      },
+    },
+  }).localType, 'subscription.trial_will_end');
+});
+
+test('signed Stripe parser returns ignored mapping for unknown but valid signed events', () => {
+  const secret = 'whsec_unknown_event_test';
+  const body = JSON.stringify({
+    id: 'evt_unknown_signed',
+    type: 'payment_intent.processing',
+    livemode: false,
+    data: { object: { id: 'pi_processing', object: 'payment_intent' } },
+  });
+  const signature = signStripeWebhookPayload(body, secret);
+  const parsed = parseSignedStripeWebhook(body, signature, secret);
+
+  assert.equal(parsed.mapping.localType, 'provider.event.ignored');
+  assert.equal(parsed.verification.signatureStatus, 'verified');
 });

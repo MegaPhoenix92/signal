@@ -11,8 +11,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   bootstrapState,
+  handlePaymentWebhook,
   issueSessionToken,
+  loadState,
   registerTenantWorkspace,
+  syncPaymentState,
 } from './signal-state.mjs';
 import { parseSignedEmailWebhook, signEmailWebhookPayload, signSendGridWebhookPayload, verifySendGridWebhookSignature } from './signal-email-provider.mjs';
 import { signStripeWebhookPayload } from './signal-payment-provider.mjs';
@@ -305,6 +308,38 @@ test('signed Stripe webhook replay with the same provider event id is a no-op du
     subscriptionStatusAfterFirst,
     'duplicate Stripe webhook must not mutate subscription state',
   );
+});
+
+test('live-provider payment sync records provider/local drift as event and lifecycle notice', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-critical-payment-drift-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  await handlePaymentWebhook('subscription.updated', {
+    planId: 'plan_team',
+    provider: 'stripe',
+    providerStatus: 'past_due',
+    providerSubscriptionId: 'sub_stripe_drift',
+    status: 'active',
+    subscriptionId: 'sub_demo',
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  const sync = await syncPaymentState({ tenantId: 'tenant_demo' }, {
+    actorUserId: 'usr_admin',
+    liveProviderSync: true,
+    statePath,
+  });
+  assert.equal(sync.action, 'payments.sync');
+  assert.equal(sync.details.driftEventIds.length, 1);
+
+  const state = await loadState({ statePath });
+  assert(state.paymentEvents.some((event) => event.type === 'billing.drift.detected' && event.providerStatus === 'past_due'), 'live-provider payment sync should record drift event');
+  assert(state.lifecycleNotices.some((notice) => notice.trigger === 'billing_drift_detected' && notice.status === 'open'), 'live-provider payment sync drift should create an open lifecycle notice');
 });
 
 test('signed webhook verifiers reject tampered Stripe, email, and SendGrid signatures at the HTTP boundary', async (t) => {
