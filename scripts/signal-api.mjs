@@ -144,7 +144,13 @@ function rateLimitKind(pathname) {
   if (pathname.startsWith('/api/webhooks/')) {
     return 'webhook';
   }
-  if (pathname === '/api/registration' || pathname === '/api/invites/claim' || pathname === '/api/session/token' || pathname.startsWith('/api/oauth/')) {
+  if (
+    pathname === '/api/registration'
+    || pathname === '/api/invites/claim'
+    || pathname === '/api/session/token'
+    || pathname.startsWith('/api/oauth/')
+    || pathname.startsWith('/api/email/unsubscribe/')
+  ) {
     return 'unauthenticated';
   }
   return 'authenticated';
@@ -398,7 +404,7 @@ async function route(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/ready') {
     const components = [];
     try {
-      const { state, summary } = await ensureState({ statePath });
+      await ensureState({ statePath });
       components.push({ component: 'state', ok: true });
       if (/^https?:\/\//i.test(statePath)) {
         const healthUrl = new URL(statePath);
@@ -417,11 +423,7 @@ async function route(req, res) {
       sendJson(res, 200, {
         ok: true,
         service: 'signal-local-api',
-        statePath,
         components,
-        summary,
-        backend: backendReadiness({ statePath }),
-        doctor: doctor(state),
       });
     } catch (error) {
       sendJson(res, 503, {
@@ -436,12 +438,13 @@ async function route(req, res) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/status') {
-    const { state, summary } = await ensureState({ statePath });
+    const { auth, state } = await authenticatedState(req);
+    requireAdminRequestAuth(state, auth, 'status.read');
     sendJson(res, 200, {
       ok: true,
       service: 'signal-local-api',
       statePath,
-      summary,
+      summary: summarizeState(state, statePath),
       backend: backendReadiness({ statePath }),
       doctor: doctor(state),
     });
@@ -1287,14 +1290,16 @@ async function route(req, res) {
   if ((req.method === 'GET' || req.method === 'POST') && unsubscribeMatch) {
     const result = await unsubscribeEmailDigest(decodeURIComponent(unsubscribeMatch[1]), {
       actorUserId: process.env.SIGNAL_UNSUBSCRIBE_ACTOR ?? process.env.SIGNAL_WEBHOOK_ACTOR,
+      publicUnsubscribe: true,
       statePath,
     });
     sendJson(res, 200, {
       ok: true,
       action: result.action,
-      details: result.details,
-      summary: result.summary,
-      doctor: doctor(result.state),
+      details: {
+        emailDeliveryStatus: result.details?.emailDeliveryStatus ?? 'unsubscribed',
+        userId: result.details?.userId ?? null,
+      },
     });
     return;
   }
@@ -1516,6 +1521,14 @@ async function route(req, res) {
   notFound(res);
 }
 
+function serverTimeoutMs(env = process.env) {
+  return positiveInteger(env.SIGNAL_API_REQUEST_TIMEOUT_MS, 60_000);
+}
+
+function serverHeadersTimeoutMs(env = process.env) {
+  return positiveInteger(env.SIGNAL_API_HEADERS_TIMEOUT_MS, 10_000);
+}
+
 const server = http.createServer((req, res) => {
   const requestId = req.headers['x-request-id']?.toString() || crypto.randomUUID();
   const startedAt = process.hrtime.bigint();
@@ -1553,6 +1566,8 @@ const server = http.createServer((req, res) => {
     sendJson(res, status, payload, headers);
   });
 });
+server.requestTimeout = serverTimeoutMs();
+server.headersTimeout = serverHeadersTimeoutMs();
 
 function closeServer(instance) {
   return new Promise((resolve, reject) => {
