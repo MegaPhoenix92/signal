@@ -255,6 +255,37 @@ test('Signal API accepts JWKS-backed production bearer auth', async () => {
     assert.equal(missingRole.status, 403);
     assert.equal(missingRole.payload.code, 'AUTH_ROLE_CLAIM_MISSING');
 
+    const expired = await requestApi('/api/session', {
+      token: tokenFor({
+        email: 'avery@acme.example',
+        exp: nowSeconds - 3600,
+        role: 'admin',
+        sub: 'usr_admin',
+      }),
+    });
+    assert.equal(expired.status, 401);
+    assert.equal(expired.payload.code, 'AUTH_TOKEN_EXPIRED');
+
+    const { privateKey: wrongSigningKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const wrongKeySignature = await requestApi('/api/session', {
+      token: signJwt({
+        kid,
+        privateKey: wrongSigningKey,
+        payload: {
+          aud: audience,
+          email: 'avery@acme.example',
+          exp: nowSeconds + 3600,
+          iat: nowSeconds,
+          iss: issuer,
+          role: 'admin',
+          sub: 'usr_admin',
+          tenantId: 'tenant_demo',
+        },
+      }),
+    });
+    assert.equal(wrongKeySignature.status, 401);
+    assert.equal(wrongKeySignature.payload.code, 'AUTH_TOKEN_SIGNATURE_INVALID');
+
     const stateFile = await fs.readFile(statePath, 'utf8');
     assert(!stateFile.includes(adminToken), 'JWKS bearer token should not be persisted in local state');
   } finally {
