@@ -156,7 +156,7 @@ const productionBackendReadiness = backendReadiness({
     SIGNAL_JOB_SCHEDULER: 'worker',
     SIGNAL_PROVIDER_VALIDATION_SCHEDULER: 'worker',
     SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
-    SIGNAL_SESSION_SECRET: 'super_secret_session_value',
+    SIGNAL_SESSION_SECRET: 'super_secret_session_value_32chars!',
     SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
     SIGNAL_STATE_SERVICE_DATABASE_URL: 'postgres://signal:db_password@db.example/signal',
     SIGNAL_STATE_SERVICE_RLS: 'true',
@@ -446,7 +446,7 @@ assert.equal(memberSession.actor.id, 'usr_product');
 assert.equal(memberSession.summary.activeUserId, 'usr_product');
 assert.equal(memberSession.summary.activeUserRole, 'member');
 
-const sessionEnv = { SIGNAL_SESSION_SECRET: 'session_secret_for_verifier', SIGNAL_SESSION_TTL_SECONDS: '900' };
+const sessionEnv = { SIGNAL_SESSION_SECRET: 'session_secret_for_verifier_32ch!', SIGNAL_SESSION_TTL_SECONDS: '900' };
 await expectStateError('missing session secret is rejected', 'SESSION_SECRET_MISSING', () =>
   issueSessionToken('usr_admin', { actorUserId: 'usr_admin', env: {}, statePath }),
 );
