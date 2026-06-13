@@ -452,6 +452,57 @@ test('Signal state service postgres RLS mode fails startup when policies are abs
   );
 });
 
+test('Backend readiness blocks production boot when API system-actor and cookie-secure env are missing', () => {
+  const incompleteBoot = backendReadiness({
+    env: {
+      DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+      SIGNAL_API_CORS_ORIGINS: 'https://signal.example',
+      SIGNAL_AUTH_JWKS_URL: 'https://idp.example/.well-known/jwks.json',
+      SIGNAL_AUTH_PROVIDER: 'jwks',
+      SIGNAL_BACKEND_MODE: 'external-service',
+      SIGNAL_JOB_SCHEDULER: 'signal-scheduler',
+      SIGNAL_PROVIDER_VALIDATION_SCHEDULER: 'signal-scheduler',
+      SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
+      SIGNAL_SESSION_SECRET: 'super_secret_session_value_32chars!',
+      SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+      SIGNAL_STATE_SERVICE_RLS: 'true',
+      SIGNAL_STATE_SERVICE_URL: 'https://state.signal.example/state',
+      SIGNAL_TENANT_ISOLATION_MODE: 'rls',
+    },
+  });
+  assert.equal(incompleteBoot.productionReady, false);
+  assert.equal(incompleteBoot.checks.find((item) => item.id === 'session_cookie_secure')?.ok, false);
+  assert.equal(incompleteBoot.checks.find((item) => item.id === 'system_webhook_actor')?.ok, false);
+  assert.equal(incompleteBoot.checks.find((item) => item.id === 'system_oauth_actor')?.ok, false);
+  assert(incompleteBoot.summary.missingRequiredEnv.includes('SIGNAL_COOKIE_SECURE'));
+  assert(incompleteBoot.summary.missingRequiredEnv.includes('SIGNAL_WEBHOOK_ACTOR'));
+  assert(incompleteBoot.summary.missingRequiredEnv.includes('SIGNAL_OAUTH_ACTOR'));
+
+  const completeBoot = backendReadiness({
+    env: {
+      DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+      SIGNAL_API_CORS_ORIGINS: 'https://signal.example',
+      SIGNAL_AUTH_JWKS_URL: 'https://idp.example/.well-known/jwks.json',
+      SIGNAL_AUTH_PROVIDER: 'jwks',
+      SIGNAL_BACKEND_MODE: 'external-service',
+      SIGNAL_COOKIE_SECURE: 'true',
+      SIGNAL_JOB_SCHEDULER: 'signal-scheduler',
+      SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
+      SIGNAL_PROVIDER_VALIDATION_SCHEDULER: 'signal-scheduler',
+      SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
+      SIGNAL_SESSION_SECRET: 'super_secret_session_value_32chars!',
+      SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+      SIGNAL_STATE_SERVICE_RLS: 'true',
+      SIGNAL_STATE_SERVICE_URL: 'https://state.signal.example/state',
+      SIGNAL_TENANT_ISOLATION_MODE: 'rls',
+      SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
+    },
+  });
+  assert.equal(completeBoot.checks.find((item) => item.id === 'session_cookie_secure')?.ok, true);
+  assert.equal(completeBoot.checks.find((item) => item.id === 'system_webhook_actor')?.ok, true);
+  assert.equal(completeBoot.checks.find((item) => item.id === 'system_oauth_actor')?.ok, true);
+});
+
 test('Backend readiness requires real state-service RLS verification when RLS mode is claimed', () => {
   const missingRls = backendReadiness({
     env: {
