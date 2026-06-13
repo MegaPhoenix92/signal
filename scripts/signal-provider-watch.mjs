@@ -305,11 +305,20 @@ export function parseGmailPubSubNotification(body = {}) {
   }
 }
 
+const OUTLOOK_NOTIFICATION_BATCH_LIMIT = 50;
+
 export function parseOutlookChangeNotification(body = {}) {
   const notifications = Array.isArray(body.value) ? body.value : [];
   if (notifications.length === 0) {
     throw new ProviderWatchError('Outlook notification payload is missing value entries.', {
       code: 'OUTLOOK_NOTIFICATION_EMPTY',
+    });
+  }
+  if (notifications.length > OUTLOOK_NOTIFICATION_BATCH_LIMIT) {
+    throw new ProviderWatchError(`Outlook notification batch exceeds ${OUTLOOK_NOTIFICATION_BATCH_LIMIT} entries.`, {
+      code: 'OUTLOOK_NOTIFICATION_BATCH_TOO_LARGE',
+      status: 400,
+      details: { count: notifications.length, limit: OUTLOOK_NOTIFICATION_BATCH_LIMIT },
     });
   }
   return notifications;

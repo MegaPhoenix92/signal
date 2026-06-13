@@ -2016,8 +2016,23 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     const returnedSession = returnedState.payload.state.billingSessions.find((item) => item.id === returnCheckout.payload.details.sessionId);
     assert.equal(returnedSession.status, 'returned');
     assert.equal(returnedSession.returnResult, 'success');
-    assert(returnedState.payload.state.paymentEvents.some((event) => event.type === 'billing.return.success' && event.sessionId === returnedSession.id));
-    assert(returnedState.payload.state.jobs.some((job) => job.type === 'payment.return.success' && job.targetId === returnedSession.id && job.status === 'succeeded'));
+    const firstReturnEvent = returnedState.payload.state.paymentEvents.find((event) => event.type === 'billing.return.success' && event.sessionId === returnedSession.id);
+    const firstReturnJob = returnedState.payload.state.jobs.find((job) => job.type === 'payment.return.success' && job.targetId === returnedSession.id && job.status === 'succeeded');
+    assert(firstReturnEvent, 'billing return should record a payment event');
+    assert(firstReturnJob, 'billing return should record a billing job');
+    assert.equal(firstReturnEvent.providerEventId, `billing.return.${returnedSession.id}.success`);
+    assert.equal(firstReturnJob.providerIdempotencyKey, `billing.return.${returnedSession.id}.success`);
+
+    const billingReturnReplay = await fetch(`${apiBaseUrl}/api/billing/return?session_id=${encodeURIComponent(returnCheckout.payload.details.sessionId)}&result=success`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+      redirect: 'manual',
+    });
+    assert.equal(billingReturnReplay.status, 303);
+    const replayedState = await requestApi('/api/state', { token: adminToken });
+    const replayedReturnEvents = replayedState.payload.state.paymentEvents.filter((event) => event.type === 'billing.return.success' && event.sessionId === returnedSession.id);
+    const replayedReturnJobs = replayedState.payload.state.jobs.filter((job) => job.type === 'payment.return.success' && job.targetId === returnedSession.id && job.status === 'succeeded');
+    assert.equal(replayedReturnEvents.length, 1, 'billing return replay should not append duplicate payment events');
+    assert.equal(replayedReturnJobs.length, 1, 'billing return replay should not append duplicate billing jobs');
 
     const cliSync = await runCli(['payments', 'sync', 'tenant_demo', '--json'], { SIGNAL_ADMIN_ACTOR: 'usr_admin' });
     assert.equal(cliSync.action, 'payments.sync');

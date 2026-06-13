@@ -88,7 +88,7 @@ function assertReportParity(name, engineReport, fallbackReport) {
 }
 
 function buildEngineReports(state, backend, provider, env) {
-  const readiness = signalState.productReadinessReport(state, { backend, provider, statePath: parityStatePath });
+  const readiness = signalState.productReadinessReport(state, { backend, provider });
   const dashboardAudit = signalState.dashboardAuditReport(state, { backend, statePath: parityStatePath });
   const digestionPipeline = signalState.signalDigestionPipelineReport(state, { backend, statePath: parityStatePath });
   const onboarding = signalState.onboardingReadinessReport(state, { backend, statePath: parityStatePath });
@@ -211,6 +211,12 @@ function buildEngineReports(state, backend, provider, env) {
     statePath: parityStatePath,
     tenantIsolation,
   });
+  const productionEnvAudit = signalState.productionEnvAuditReport({
+    backend,
+    env,
+    productionPlan,
+    provider,
+  });
 
   return {
     agentHandoff,
@@ -225,7 +231,9 @@ function buildEngineReports(state, backend, provider, env) {
     operations,
     paymentHandoff,
     paymentLifecycle,
+    productReadiness: readiness,
     productionDrill,
+    productionEnvAudit,
     productionPlan,
     providerHandoff: signalState.providerHandoffReport(state, {
       backend,
@@ -255,6 +263,8 @@ function buildFallbackReports(signalData, data, backend, provider, env) {
   const paymentHandoff = signalData.fallbackPaymentHandoff(data, backend, provider, providerLaunch, paymentLifecycle, env);
   const productionPlan = signalData.fallbackProductionPlan(data, backend, provider);
   const agentHandoff = signalData.fallbackLocalAgentHandoff(data, backend, provider);
+  const productReadiness = signalData.fallbackProductReadiness(data, backend, provider);
+  const productionEnvAudit = signalData.fallbackProductionEnvAudit(data, backend, provider, env);
 
   return {
     agentHandoff,
@@ -269,7 +279,9 @@ function buildFallbackReports(signalData, data, backend, provider, env) {
     operations,
     paymentHandoff,
     paymentLifecycle,
+    productReadiness,
     productionDrill,
+    productionEnvAudit,
     productionPlan,
     providerHandoff: signalData.fallbackProviderHandoff(data, backend, provider, providerLaunch),
     providerLaunch,
@@ -298,9 +310,37 @@ async function buildReportPairs(t) {
 
 test('signalData seed fallback audit reports match state-engine audit logic', async (t) => {
   const pairs = await buildReportPairs(t);
+  assert.equal(pairs.length, 21, 'audit parity guard should cover 21 engine/fallback report pairs');
   for (const { engineReport, fallbackReport, name } of pairs) {
     assertReportParity(name, engineReport, fallbackReport);
   }
+});
+
+test('fallbackProductionEnvAudit template path matches offline state response options', async (t) => {
+  const signalData = await loadSignalDataModule(t);
+  const state = await normalizedSeedState();
+  const backend = signalData.fallbackBackendReadiness();
+  const provider = signalData.fallbackProviderReadiness();
+  const templateKeys = [...new Set([
+    'DATABASE_URL',
+    'SIGNAL_API_BASE_URL',
+    'SIGNAL_APP_BASE_URL',
+    'SIGNAL_BACKEND_MODE',
+    'SIGNAL_STATE_SERVICE_URL',
+    'STRIPE_SECRET_KEY',
+  ])].sort();
+  const engineReport = signalState.productionEnvAuditReport({
+    backend,
+    env: {},
+    provider,
+    template: { invalid: [], keys: templateKeys, path: '.env.production.example' },
+    envSource: { configuredKeys: 0, keys: [], path: null, type: 'seed' },
+  });
+  const fallbackReport = signalData.fallbackProductionEnvAudit(state, backend, provider, {}, {
+    envSource: { configuredKeys: 0, keys: [], path: null, type: 'seed' },
+    template: { invalid: [], keys: templateKeys, path: '.env.production.example' },
+  });
+  assertReportParity('productionEnvAudit.template-path', engineReport, fallbackReport);
 });
 
 test('audit parity guard fails on injected fallback formula drift', async (t) => {

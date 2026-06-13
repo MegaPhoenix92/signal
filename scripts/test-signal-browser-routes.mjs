@@ -75,17 +75,19 @@ async function stopProcess(child) {
   closeStreams();
 }
 
-async function waitForHttp(url, output, label, { attempts = 80 } = {}) {
+async function waitForHttp(url, output, label, { attempts = 80, initialDelayMs = 100, maxDelayMs = 500 } = {}) {
+  let delayMs = initialDelayMs;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(500) });
+      const response = await fetch(url, { signal: AbortSignal.timeout(1000) });
       if (response.ok) {
         return;
       }
     } catch {
       // Keep polling until the local service binds.
     }
-    await sleep(100);
+    await sleep(delayMs);
+    delayMs = Math.min(maxDelayMs, Math.round(delayMs * 1.25));
   }
   throw new Error(`${label} did not become ready at ${url}.\n${output()}`);
 }
@@ -222,14 +224,18 @@ async function resolveChromeExecutable() {
   return null;
 }
 
-async function startChrome({ cdpPort, executable, profileDir }) {
+function buildChromeArgs({ cdpPort, profileDir }) {
   const args = [
     '--headless=new',
     '--disable-background-networking',
+    '--disable-background-timer-throttling',
     '--disable-crash-reporter',
-    '--disable-extensions',
-    '--disable-gpu',
     '--disable-dev-shm-usage',
+    '--disable-extensions',
+    '--disable-features=DBus',
+    '--disable-gpu',
+    '--disable-renderer-backgrounding',
+    '--disable-software-rasterizer',
     '--no-default-browser-check',
     '--no-first-run',
     '--remote-allow-origins=*',
@@ -241,13 +247,34 @@ async function startChrome({ cdpPort, executable, profileDir }) {
   if (process.env.SIGNAL_CHROME_NO_SANDBOX === 'true') {
     args.splice(1, 0, '--no-sandbox');
   }
-  const child = spawn(executable, args, {
-    detached: process.platform !== 'win32',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const output = processOutputCollector(child);
-  await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, output, 'Headless Chrome CDP', { attempts: 250 });
-  return { child, output };
+  return args;
+}
+
+async function startChrome({ cdpPort, executable, profileDir }) {
+  let lastError = null;
+  let lastOutput = '';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const attemptProfileDir = attempt === 0 ? profileDir : path.join(profileDir, `retry-${attempt}`);
+    await fs.mkdir(attemptProfileDir, { recursive: true });
+    const child = spawn(executable, buildChromeArgs({ cdpPort, profileDir: attemptProfileDir }), {
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const output = processOutputCollector(child);
+    try {
+      await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, output, 'Headless Chrome CDP', { attempts: 250 });
+      return { child, output };
+    } catch (error) {
+      lastError = error;
+      lastOutput = output();
+      await stopProcess(child);
+      if (attempt < 2) {
+        await sleep(250 * (attempt + 1));
+      }
+    }
+  }
+  const detail = lastOutput ? `\n${lastOutput}` : '';
+  throw new Error(`${lastError?.message ?? 'Headless Chrome CDP did not become ready.'}${detail}`);
 }
 
 class CdpClient {
@@ -487,6 +514,9 @@ async function assertMobileNav(client, { activationHash, activationLabel, expect
 test('Signal browser routes render public, registration, workspace, and admin app areas', async (t) => {
   const chromeExecutable = await resolveChromeExecutable();
   if (!chromeExecutable) {
+    if (process.env.CI || process.env.SIGNAL_CHROME_BIN) {
+      assert.fail('Chrome-compatible browser is required when CI or SIGNAL_CHROME_BIN is set.');
+    }
     t.skip('No Chrome-compatible browser found. Set SIGNAL_CHROME_BIN to run browser route tests.');
     return;
   }

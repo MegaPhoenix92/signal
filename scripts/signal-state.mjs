@@ -5879,7 +5879,7 @@ function productionEnvSourceKeys(envSource) {
 
 function productionEnvRow({ env, envSource, owner, label, id, requiredEnv = [], optionalEnv = [], templateKeys, commands = [] }) {
   const required = uniqueValues(requiredEnv);
-  const optional = uniqueValues(optionalEnv);
+  const optional = uniqueValues(optionalEnv).filter((key) => !required.includes(key));
   const sourceKeys = productionEnvSourceKeys(envSource);
   const templateKeySet = new Set(templateKeys);
   const missingRequired = required.filter((key) => !env[key]);
@@ -6000,7 +6000,8 @@ export function productionEnvAuditReport({
     },
   };
   report.summary.secretSafe = unsafePaths.length === 0;
-  report.ok = report.summary.secretSafe && report.template.invalid.length === 0 && rows.length === 9;
+  const expectedRowCount = sections.length + 1;
+  report.ok = report.summary.secretSafe && report.template.invalid.length === 0 && rows.length === expectedRowCount;
   return report;
 }
 
@@ -12539,6 +12540,19 @@ function outlookLifecycleJobType(lifecycleEvent) {
   return lifecycleEvent === 'missed' ? 'outlook.watch.notification' : 'mailbox.watch.renew';
 }
 
+function outlookLifecycleDedupKey(notification, lifecycleEvent, watch) {
+  const subscriptionId = String(notification.subscriptionId ?? '').trim();
+  const scope = subscriptionId || watch?.id || watch?.mailboxId || 'unknown';
+  return `outlook.lifecycle.${scope}.${lifecycleEvent}`;
+}
+
+function findJobByIdempotencyKey(state, providerIdempotencyKey) {
+  if (typeof providerIdempotencyKey !== 'string' || !providerIdempotencyKey.trim()) {
+    return null;
+  }
+  return (state.jobs ?? []).find((job) => job.providerIdempotencyKey === providerIdempotencyKey) ?? null;
+}
+
 function applyOutlookLifecycleToWatch(state, notification) {
   if (!notification.clientState) {
     throw new ProviderWatchError('Outlook notification clientState is required.', {
@@ -12557,6 +12571,18 @@ function applyOutlookLifecycleToWatch(state, notification) {
     });
   }
   const mailbox = findById(state.mailboxes ?? [], watch.mailboxId, 'Mailbox');
+  const lifecycleDedupKey = outlookLifecycleDedupKey(notification, lifecycleEvent, watch);
+  const existingLifecycleJob = findJobByIdempotencyKey(state, lifecycleDedupKey);
+  if (existingLifecycleJob) {
+    return {
+      duplicate: true,
+      jobId: existingLifecycleJob.id,
+      lifecycleEvent,
+      mailboxId: mailbox.id,
+      tenantId: mailbox.tenantId,
+      watchId: watch.id,
+    };
+  }
   const observedAt = nowIso();
   const reason = outlookLifecycleReason(lifecycleEvent);
   const providerErrorCode = `OUTLOOK_LIFECYCLE_${lifecycleEvent.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase()}`;
@@ -12586,8 +12612,10 @@ function applyOutlookLifecycleToWatch(state, notification) {
     maxAttempts: 5,
     message: `${reason} Queued ${lifecycleEvent === 'missed' ? 'mailbox sync' : 'watch renewal'} for ${mailbox.id}.`,
     providerErrorCode,
+    providerIdempotencyKey: lifecycleDedupKey,
   });
   return {
+    duplicate: false,
     jobId: job.id,
     lifecycleEvent,
     mailboxId: mailbox.id,
@@ -12605,12 +12633,26 @@ export async function handleOutlookLifecycleNotification(payload = {}, options =
         notifications = parseOutlookChangeNotification(payload);
         const results = notifications.map((notification) => applyOutlookLifecycleToWatch(state, notification));
         const events = [...new Set(results.map((item) => item.lifecycleEvent))];
+        const duplicateCount = results.filter((item) => item.duplicate).length;
+        const recordedCount = results.length - duplicateCount;
+        const message = duplicateCount === results.length
+          ? `Ignored ${duplicateCount} duplicate Outlook lifecycle notification${duplicateCount === 1 ? '' : 's'}.`
+          : duplicateCount > 0
+            ? `Recorded ${recordedCount} Outlook lifecycle notification${recordedCount === 1 ? '' : 's'}; ignored ${duplicateCount} duplicate${duplicateCount === 1 ? '' : 's'}.`
+            : `Recorded ${results.length} Outlook lifecycle notification${results.length === 1 ? '' : 's'}.`;
         return {
           count: results.length,
+          duplicateCount,
+          duplicates: results.filter((item) => item.duplicate).map((item) => ({
+            jobId: item.jobId,
+            lifecycleEvent: item.lifecycleEvent,
+            mailboxId: item.mailboxId,
+            watchId: item.watchId,
+          })),
           jobIds: results.map((item) => item.jobId),
           lifecycleEvents: events,
           mailboxIds: [...new Set(results.map((item) => item.mailboxId))],
-          message: `Recorded ${results.length} Outlook lifecycle notification${results.length === 1 ? '' : 's'}.`,
+          message,
           provider: 'outlook',
           targetId: results[0]?.watchId ?? 'outlook.lifecycle',
           tenantIds: [...new Set(results.map((item) => item.tenantId))],
@@ -14259,6 +14301,45 @@ function billingSessionMatchesReturn(session, identifiers) {
     session.providerReturnSessionId === identifier);
 }
 
+function billingReturnDedupKey({
+  providerSessionId,
+  redirectStatus,
+  sessionId,
+} = {}) {
+  const target = sessionId ?? providerSessionId;
+  if (!target) {
+    return null;
+  }
+  return `billing.return.${target}.${redirectStatus}`;
+}
+
+function findBillingReturnSideEffects(state, {
+  providerSessionId,
+  redirectStatus,
+  session,
+} = {}) {
+  const dedupKey = billingReturnDedupKey({
+    providerSessionId: session?.providerSessionId ?? providerSessionId,
+    redirectStatus,
+    sessionId: session?.id,
+  });
+  if (!dedupKey) {
+    return { dedupKey: null, existingEvent: null, existingJob: null };
+  }
+  const eventType = `billing.return.${redirectStatus}`;
+  const jobType = `payment.return.${redirectStatus}`;
+  const existingEvent = (state.paymentEvents ?? []).find((event) =>
+    event.providerEventId === dedupKey ||
+    (session?.id && event.type === eventType && event.sessionId === session.id)) ?? null;
+  const existingJob = findJobByIdempotencyKey(state, dedupKey) ??
+    (session?.id
+      ? (state.jobs ?? []).find((job) =>
+          job.type === jobType && job.targetId === session.id && job.status === 'succeeded')
+      : null) ??
+    null;
+  return { dedupKey, existingEvent, existingJob };
+}
+
 function resolveBillingReturnSession(state, {
   billingSessionId,
   providerSessionId,
@@ -14305,6 +14386,32 @@ export async function reconcileBillingReturn({
       const tenant = findById(state.tenants ?? [], targetTenantId, 'Tenant');
       requireBillingOwner(state, actor, tenant, 'payments.return');
       const redirectStatus = normalizeBillingReturnResult(result, session?.type ?? null);
+      const { dedupKey, existingEvent, existingJob } = findBillingReturnSideEffects(state, {
+        providerSessionId,
+        redirectStatus,
+        session,
+      });
+      const isReplay = Boolean(existingEvent || existingJob);
+      if (isReplay) {
+        return {
+          canceledSubscriptionIds: [],
+          duplicate: true,
+          entitlementId: null,
+          entitlementStatus: 'unchanged',
+          eventId: existingEvent?.id ?? null,
+          expiredOverrideIds: [],
+          jobId: existingJob?.id ?? null,
+          message: `Ignored duplicate billing return for ${tenant.name}`,
+          redirectStatus,
+          sessionId: session?.id ?? null,
+          sessionType: session?.type ?? null,
+          status: 'duplicate',
+          targetId: dedupKey ?? session?.id ?? tenant.id,
+          tenantId: tenant.id,
+          tenantStatusChange: null,
+        };
+      }
+
       const returnedAt = nowIso();
       if (session) {
         session.status = redirectStatus === 'cancel' ? 'canceled' : 'returned';
@@ -14325,6 +14432,7 @@ export async function reconcileBillingReturn({
         status: 'recorded',
         sessionId: session?.id,
         subscriptionId: entitlement?.subscriptionId,
+        providerEventId: dedupKey,
       });
       const job = appendJob(state, {
         tenantId: tenant.id,
@@ -14335,9 +14443,11 @@ export async function reconcileBillingReturn({
         attempts: 1,
         maxAttempts: 5,
         message: `Reconciled billing return for ${tenant.name}.`,
+        providerIdempotencyKey: dedupKey,
       });
       return {
         canceledSubscriptionIds: reconciliation.canceledSubscriptionIds,
+        duplicate: false,
         entitlementId: entitlement?.id ?? null,
         entitlementStatus: entitlement?.status ?? 'missing',
         eventId: event.id,

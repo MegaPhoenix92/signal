@@ -19,12 +19,18 @@ jobs:
         run: npm ci
       - name: Lint backend scripts
         run: npm run lint
-      - name: Install Chromium
-        run: sudo apt-get update && sudo apt-get install -y chromium
+      # Pinned to browser-actions/setup-chrome v1.7.0 (c1191dc4e79dcd91be7b16302e04460c20a2a784)
+      - name: Install Chrome system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2t64 libgbm1 libnss3 libxss1 libatk-bridge2.0-0t64 libgtk-3-0 fonts-liberation xvfb
+      - id: setup-chrome
+        uses: browser-actions/setup-chrome@c1191dc4e79dcd91be7b16302e04460c20a2a784
+        with:
+          chrome-version: stable
+          install-dependencies: false
       - name: Build
         run: npm run build
       - name: Test
         env:
-          SIGNAL_CHROME_BIN: /usr/bin/chromium
+          SIGNAL_CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
           SIGNAL_CHROME_NO_SANDBOX: "true"
         run: npm run test:local
