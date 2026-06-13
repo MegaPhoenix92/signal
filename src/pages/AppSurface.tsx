@@ -874,6 +874,7 @@ function MarketingPage() {
               </p>
 
               <div className="mini-table" aria-label="Example signal queue">
+                <span className="demo-data-badge mini-table-badge">Example data</span>
                 {dashboardRows.map(([account, type, detail, owner]) => (
                   <div className="mini-row" key={account}>
                     <span>{account}</span>

@@ -213,11 +213,11 @@ export function useMutationFeedback(mutate: MutationHandler): MutationFeedback {
 
   async function run(key: string, action: SignalMutationAction, args: Record<string, unknown>) {
     setPendingKey(key);
-    setErrors((current) => {
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
+    // Clear prior errors on each new mutation. Actions are globally serialized
+    // (isMutating disables all controls during a mutation), so only the most
+    // recent failure should surface — this avoids a stale sibling error lingering
+    // in a shared InlineError region after a later action succeeds.
+    setErrors({});
 
     try {
       const outcome = await mutate(action, args);
