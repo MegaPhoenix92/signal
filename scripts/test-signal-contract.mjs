@@ -74,7 +74,7 @@ test('frontend source guards empty live state and non-JSON POST failures', async
 test('Signal local API, CLI, auth, flow, and subscription contract', async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-contract-'));
   const statePath = path.join(tempDir, 'signal-state.json');
-  const sessionSecret = 'signal_contract_test_secret';
+  const sessionSecret = 'signal_contract_test_secret_32chars!';
   const emailWebhookSecret = 'signal_contract_email_webhook_secret';
   const sendGridKeyPair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const sendGridPrivateKey = sendGridKeyPair.privateKey.export({ format: 'pem', type: 'pkcs8' });
@@ -928,7 +928,7 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
       'SIGNAL_STATE_SERVICE_TOKEN=state_service_secret_value',
       'DATABASE_URL=postgres://signal:db_password@db.example/signal',
       'SIGNAL_REQUIRE_SIGNED_SESSION=true',
-      'SIGNAL_SESSION_SECRET=super_secret_session_value',
+      'SIGNAL_SESSION_SECRET=super_secret_session_value_32chars!',
       'SIGNAL_AUTH_PROVIDER=jwks',
       'SIGNAL_AUTH_JWKS_URL=https://idp.example/.well-known/jwks.json',
       'SIGNAL_API_CORS_ORIGINS=https://signal.example',

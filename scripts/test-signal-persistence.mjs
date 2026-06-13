@@ -117,7 +117,7 @@ async function requestApi(apiBaseUrl, pathname, { body, method = 'GET', token } 
 test('Signal local API persists mutations across process restart', async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-persistence-'));
   const statePath = path.join(tempDir, 'signal-state.json');
-  const sessionSecret = 'signal_persistence_test_secret';
+  const sessionSecret = 'signal_persistence_test_secret_32!';
   const port = await freePort();
   let api = null;
 

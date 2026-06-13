@@ -37,6 +37,14 @@ import {
   loadState,
   saveState,
 } from './signal-state.mjs';
+import {
+  SessionTokenError,
+  createSessionToken,
+} from './signal-session-token.mjs';
+import {
+  createRateLimiter,
+  requestClientIp,
+} from './signal-api-rate-limit.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -125,7 +133,7 @@ test('assertApiSecurityConfig blocks non-loopback hosts without verified auth', 
     SIGNAL_BACKEND_MODE: 'external-service',
     SIGNAL_STATE_SERVICE_URL: 'http://state-service.example/state',
     SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
-    SIGNAL_SESSION_SECRET: 'test-secret',
+    SIGNAL_SESSION_SECRET: 'signal_test_session_secret_32chars!',
     SIGNAL_COOKIE_SECURE: 'true',
     SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
     SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
@@ -138,7 +146,7 @@ test('assertApiSecurityConfig blocks local actor mode on non-loopback hosts', ()
       SIGNAL_API_HOST: '0.0.0.0',
       SIGNAL_ALLOW_LOCAL_ACTOR: 'true',
       SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
-      SIGNAL_SESSION_SECRET: 'test-secret',
+      SIGNAL_SESSION_SECRET: 'signal_test_session_secret_32chars!',
       SIGNAL_COOKIE_SECURE: 'true',
       SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
       SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
@@ -153,7 +161,7 @@ test('assertApiSecurityConfig rejects file-backed state on non-loopback hosts', 
       SIGNAL_API_HOST: '0.0.0.0',
       SIGNAL_ADMIN_STATE: '/tmp/signal-state.json',
       SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
-      SIGNAL_SESSION_SECRET: 'test-secret',
+      SIGNAL_SESSION_SECRET: 'signal_test_session_secret_32chars!',
       SIGNAL_COOKIE_SECURE: 'true',
       SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
       SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
@@ -166,7 +174,7 @@ test('assertApiSecurityConfig rejects file-backed state on non-loopback hosts', 
     SIGNAL_BACKEND_MODE: 'external-service',
     SIGNAL_STATE_SERVICE_URL: 'http://state-service.example/state',
     SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
-    SIGNAL_SESSION_SECRET: 'test-secret',
+    SIGNAL_SESSION_SECRET: 'signal_test_session_secret_32chars!',
     SIGNAL_COOKIE_SECURE: 'true',
     SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
     SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
@@ -178,7 +186,7 @@ test('assertApiSecurityConfig requires system actors and secure cookies on non-l
     () => assertApiSecurityConfig({
       SIGNAL_API_HOST: '0.0.0.0',
       SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
-      SIGNAL_SESSION_SECRET: 'test-secret',
+      SIGNAL_SESSION_SECRET: 'signal_test_session_secret_32chars!',
     }),
     /SIGNAL_WEBHOOK_ACTOR/i,
   );
@@ -186,7 +194,7 @@ test('assertApiSecurityConfig requires system actors and secure cookies on non-l
     () => assertApiSecurityConfig({
       SIGNAL_API_HOST: '0.0.0.0',
       SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
-      SIGNAL_SESSION_SECRET: 'test-secret',
+      SIGNAL_SESSION_SECRET: 'signal_test_session_secret_32chars!',
       SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
       SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
     }),
@@ -200,7 +208,7 @@ test('assertApiSecurityConfig rejects wildcard CORS origins on non-loopback host
       SIGNAL_API_HOST: '0.0.0.0',
       SIGNAL_API_CORS_ORIGINS: '*',
       SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
-      SIGNAL_SESSION_SECRET: 'test-secret',
+      SIGNAL_SESSION_SECRET: 'signal_test_session_secret_32chars!',
       SIGNAL_COOKIE_SECURE: 'true',
       SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
       SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
@@ -216,7 +224,7 @@ test('assertApiSecurityConfig requires explicit CORS origins on non-loopback hos
     () => assertApiSecurityConfig({
       SIGNAL_API_HOST: '0.0.0.0',
       SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
-      SIGNAL_SESSION_SECRET: 'test-secret',
+      SIGNAL_SESSION_SECRET: 'signal_test_session_secret_32chars!',
       SIGNAL_COOKIE_SECURE: 'true',
       SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
       SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
@@ -233,7 +241,7 @@ test('assertApiSecurityConfig requires Gmail webhook audience when Gmail intake 
       SIGNAL_API_HOST: '0.0.0.0',
       SIGNAL_GMAIL_NOTIFICATION_URL: 'https://signal.example/api/webhooks/gmail',
       SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
-      SIGNAL_SESSION_SECRET: 'test-secret',
+      SIGNAL_SESSION_SECRET: 'signal_test_session_secret_32chars!',
       SIGNAL_COOKIE_SECURE: 'true',
       SIGNAL_WEBHOOK_ACTOR: 'usr_system_webhook',
       SIGNAL_OAUTH_ACTOR: 'usr_system_oauth',
@@ -243,6 +251,42 @@ test('assertApiSecurityConfig requires Gmail webhook audience when Gmail intake 
     }),
     /SIGNAL_GMAIL_WEBHOOK_AUDIENCE/i,
   );
+});
+
+test('assertApiSecurityConfig rejects short SIGNAL_SESSION_SECRET values', () => {
+  assert.throws(
+    () => assertApiSecurityConfig({ SIGNAL_SESSION_SECRET: 'too-short' }),
+    /at least 32 characters/i,
+  );
+});
+
+test('session token signing rejects short SIGNAL_SESSION_SECRET values', () => {
+  assert.throws(
+    () => createSessionToken({
+      user: { email: 'admin@acme.example', id: 'usr_admin', role: 'admin', tenantId: 'tenant_demo' },
+      env: { SIGNAL_SESSION_SECRET: 'short-secret' },
+    }),
+    (error) => error instanceof SessionTokenError && error.code === 'SESSION_SECRET_TOO_SHORT',
+  );
+});
+
+test('invite claim rate limiter blocks repeated attempts per client IP', () => {
+  const limiter = createRateLimiter({ maxAttempts: 2, windowMs: 60_000 });
+  const first = limiter.consume('invite-claim:127.0.0.1');
+  const second = limiter.consume('invite-claim:127.0.0.1');
+  const third = limiter.consume('invite-claim:127.0.0.1');
+  assert.equal(first.allowed, true);
+  assert.equal(second.allowed, true);
+  assert.equal(third.allowed, false);
+  assert(third.retryAfterMs > 0);
+});
+
+test('requestClientIp prefers the first X-Forwarded-For address', () => {
+  const ip = requestClientIp({
+    headers: { 'x-forwarded-for': '203.0.113.10, 198.51.100.20' },
+    socket: { remoteAddress: '127.0.0.1' },
+  });
+  assert.equal(ip, '203.0.113.10');
 });
 
 test('assertApiSecurityConfig requires OAuth state key when provider clients are configured', () => {
@@ -910,6 +954,47 @@ test('Outlook webhook accepts notifications with matching clientState', async (t
   const payload = await parseJsonResponse(response);
   assert.equal(response.status, 200, JSON.stringify(payload));
   assert.equal(payload.action, 'mailboxes.watch-notification');
+});
+
+test('POST /api/invites/claim returns 429 after repeated attempts from the same IP', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-invite-claim-rate-limit-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: {
+      SIGNAL_INVITE_CLAIM_RATE_LIMIT: '2',
+      SIGNAL_INVITE_CLAIM_RATE_WINDOW_MS: '60000',
+    },
+  });
+
+  const requestClaim = (email) => fetch(`${api.apiBaseUrl}/api/invites/claim`, {
+    body: JSON.stringify({
+      claimCode: 'invalid-claim-code',
+      email,
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+
+  const first = await requestClaim('rate-limit-1@acme.example');
+  const second = await requestClaim('rate-limit-2@acme.example');
+  const third = await requestClaim('rate-limit-3@acme.example');
+  const thirdPayload = await parseJsonResponse(third);
+
+  assert.equal(first.status, 404);
+  assert.equal(second.status, 404);
+  assert.equal(third.status, 429);
+  assert.equal(thirdPayload.code, 'INVITE_CLAIM_RATE_LIMITED');
 });
 
 test('signal-api refuses to boot on non-loopback host without verified auth', async () => {
