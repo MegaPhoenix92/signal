@@ -439,6 +439,8 @@ export function normalizeState(state) {
   ensureDefaultMemberships(state);
   state.invoices = state.invoices ?? [];
   state.jobs = state.jobs ?? [];
+  state.schedulerAlerts = state.schedulerAlerts ?? [];
+  state.schedulerHeartbeat = state.schedulerHeartbeat ?? null;
   ensureProviderValidationSchedulerJob(state);
   state.mailboxConnectionSessions = state.mailboxConnectionSessions ?? [];
   state.paymentEvents = state.paymentEvents ?? [];
@@ -570,6 +572,8 @@ export function summarizeState(state, statePath = resolveStatePath()) {
     jobs: state.jobs?.length ?? 0,
     failedJobs: state.jobs?.filter((job) => job.status === 'failed').length ?? 0,
     deadLetterJobs: state.deadLetter?.length ?? 0,
+    schedulerLastHeartbeatAt: state.schedulerHeartbeat?.recordedAt ?? null,
+    schedulerLastTickOk: state.schedulerHeartbeat?.ok ?? null,
     apiSessions: state.apiSessions?.length ?? 0,
     activeApiSessions: activeApiSessions(state).length,
     revokedApiSessions: state.apiSessions?.filter((session) => session.status === 'revoked').length ?? 0,
@@ -2402,6 +2406,223 @@ function latestProviderValidationRun(state) {
   return [...(state.providerValidationRuns ?? [])].sort((left, right) => Date.parse(right.recordedAt ?? '') - Date.parse(left.recordedAt ?? ''))[0] ?? null;
 }
 
+const launchFreshnessHourMs = 60 * 60 * 1000;
+const launchFreshnessDayMs = 24 * launchFreshnessHourMs;
+
+export const defaultLaunchFreshnessPolicy = Object.freeze({
+  backupRehearsalMaxAgeMs: 30 * launchFreshnessDayMs,
+  sandboxEvidenceMaxAgeMs: 7 * launchFreshnessDayMs,
+  scheduleOverdueGraceMs: 24 * launchFreshnessHourMs,
+  schedulerHeartbeatMaxAgeMs: 10 * 60 * 1000,
+});
+
+function positiveDurationEnv(env, { days, hours, milliseconds }, fallback) {
+  const candidates = [
+    [milliseconds, 1],
+    [hours, launchFreshnessHourMs],
+    [days, launchFreshnessDayMs],
+  ].filter(([key]) => key);
+  for (const [key, multiplier] of candidates) {
+    const value = env[key];
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return Math.round(numeric * multiplier);
+    }
+  }
+  return fallback;
+}
+
+export function launchFreshnessPolicy(env = process.env) {
+  return {
+    backupRehearsalMaxAgeMs: positiveDurationEnv(env, {
+      days: 'SIGNAL_LAUNCH_BACKUP_REHEARSAL_MAX_AGE_DAYS',
+      hours: 'SIGNAL_LAUNCH_BACKUP_REHEARSAL_MAX_AGE_HOURS',
+      milliseconds: 'SIGNAL_LAUNCH_BACKUP_REHEARSAL_MAX_AGE_MS',
+    }, defaultLaunchFreshnessPolicy.backupRehearsalMaxAgeMs),
+    sandboxEvidenceMaxAgeMs: positiveDurationEnv(env, {
+      days: 'SIGNAL_LAUNCH_SANDBOX_EVIDENCE_MAX_AGE_DAYS',
+      hours: 'SIGNAL_LAUNCH_SANDBOX_EVIDENCE_MAX_AGE_HOURS',
+      milliseconds: 'SIGNAL_LAUNCH_SANDBOX_EVIDENCE_MAX_AGE_MS',
+    }, defaultLaunchFreshnessPolicy.sandboxEvidenceMaxAgeMs),
+    scheduleOverdueGraceMs: positiveDurationEnv(env, {
+      days: 'SIGNAL_LAUNCH_SCHEDULE_OVERDUE_GRACE_DAYS',
+      hours: 'SIGNAL_LAUNCH_SCHEDULE_OVERDUE_GRACE_HOURS',
+      milliseconds: 'SIGNAL_LAUNCH_SCHEDULE_OVERDUE_GRACE_MS',
+    }, defaultLaunchFreshnessPolicy.scheduleOverdueGraceMs),
+    schedulerHeartbeatMaxAgeMs: positiveDurationEnv(env, {
+      days: 'SIGNAL_LAUNCH_SCHEDULER_HEARTBEAT_MAX_AGE_DAYS',
+      hours: 'SIGNAL_LAUNCH_SCHEDULER_HEARTBEAT_MAX_AGE_HOURS',
+      milliseconds: 'SIGNAL_LAUNCH_SCHEDULER_HEARTBEAT_MAX_AGE_MS',
+    }, defaultLaunchFreshnessPolicy.schedulerHeartbeatMaxAgeMs),
+  };
+}
+
+function loopbackHost(value) {
+  return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(String(value ?? '').trim().toLowerCase());
+}
+
+function loopbackUrl(value) {
+  try {
+    return loopbackHost(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function launchFreshnessApplies({ backend = null, env = process.env, statePath = resolveStatePath() } = {}) {
+  if (env.SIGNAL_LAUNCH_FRESHNESS_GATES === 'false') {
+    return false;
+  }
+  if (env.SIGNAL_LAUNCH_FRESHNESS_GATES === 'true') {
+    return true;
+  }
+  const mode = backend?.mode ?? (env.SIGNAL_BACKEND_MODE ?? (isHttpResource(statePath) ? 'external-service' : 'local-json'));
+  return Boolean(env.NODE_ENV === 'production'
+    || env.SIGNAL_RUNTIME_ENV === 'production'
+    || mode === 'external-service'
+    || mode === 'production-node'
+    || (env.SIGNAL_API_HOST && !loopbackHost(env.SIGNAL_API_HOST))
+    || (env.SIGNAL_API_BASE_URL && !loopbackUrl(env.SIGNAL_API_BASE_URL))
+    || (env.SIGNAL_APP_BASE_URL && !loopbackUrl(env.SIGNAL_APP_BASE_URL)));
+}
+
+function ageMsAt(timestamp, now) {
+  const parsed = Date.parse(timestamp ?? '');
+  return Number.isFinite(parsed) ? Math.max(0, now - parsed) : null;
+}
+
+function freshnessBlocker(id, message, details = {}) {
+  return {
+    id,
+    category: 'freshness',
+    message,
+    ...details,
+  };
+}
+
+function latestProviderValidationTimestamp(run) {
+  return run?.recordedAt ?? run?.generatedAt ?? null;
+}
+
+function providerValidationScheduleFreshness(state, policy, now) {
+  return (state.providerValidationSchedules ?? [])
+    .filter((schedule) => schedule.status === 'active' && schedule.cadence !== 'manual' && schedule.nextRunAt)
+    .map((schedule) => {
+      const nextRunMs = Date.parse(schedule.nextRunAt);
+      const overdueMs = Number.isFinite(nextRunMs) ? Math.max(0, now - nextRunMs) : null;
+      return {
+        providerId: schedule.providerId,
+        nextRunAt: schedule.nextRunAt,
+        overdueMs,
+        stale: overdueMs !== null && overdueMs > policy.scheduleOverdueGraceMs,
+      };
+    })
+    .filter((schedule) => schedule.stale);
+}
+
+export function launchFreshnessReport(state, {
+  backend = null,
+  env = process.env,
+  now = Date.now(),
+  statePath = resolveStatePath(),
+} = {}) {
+  const policy = launchFreshnessPolicy(env);
+  const applies = launchFreshnessApplies({ backend, env, statePath });
+  const latestProviderRun = latestProviderValidationRun(state);
+  const latestProviderRunAt = latestProviderValidationTimestamp(latestProviderRun);
+  const sandboxEvidenceAgeMs = ageMsAt(latestProviderRunAt, now);
+  const overdueSchedules = providerValidationScheduleFreshness(state, policy, now);
+  const scheduler = backendCheckById(backend, 'job_scheduler');
+  const schedulerConfigured = Boolean(scheduler?.ok || env.SIGNAL_JOB_SCHEDULER || env.SIGNAL_PROVIDER_VALIDATION_SCHEDULER);
+  const heartbeat = state.schedulerHeartbeat ?? null;
+  const heartbeatAt = heartbeat?.recordedAt ?? heartbeat?.finishedAt ?? heartbeat?.startedAt ?? null;
+  const heartbeatAgeMs = ageMsAt(heartbeatAt, now);
+  const backupRehearsalAt = env.SIGNAL_STATE_RESTORE_REHEARSAL_AT ?? null;
+  const backupRehearsalAgeMs = ageMsAt(backupRehearsalAt, now);
+  const blockers = [];
+
+  if (applies && latestProviderRun && sandboxEvidenceAgeMs !== null && sandboxEvidenceAgeMs > policy.sandboxEvidenceMaxAgeMs) {
+    blockers.push(freshnessBlocker(
+      'sandbox_evidence_stale',
+      `Latest provider sandbox evidence is older than the ${Math.round(policy.sandboxEvidenceMaxAgeMs / launchFreshnessDayMs)} day freshness window.`,
+      { recordedAt: latestProviderRunAt, runId: latestProviderRun.id ?? null, ageMs: sandboxEvidenceAgeMs, maxAgeMs: policy.sandboxEvidenceMaxAgeMs },
+    ));
+  }
+
+  if (applies) {
+    overdueSchedules.forEach((schedule) => blockers.push(freshnessBlocker(
+      'provider_validation_schedule_overdue',
+      `${schedule.providerId} provider validation schedule is overdue beyond the configured grace window.`,
+      { providerId: schedule.providerId, nextRunAt: schedule.nextRunAt, overdueMs: schedule.overdueMs, graceMs: policy.scheduleOverdueGraceMs },
+    )));
+  }
+
+  if (applies && schedulerConfigured) {
+    if (!heartbeatAt) {
+      blockers.push(freshnessBlocker(
+        'scheduler_heartbeat_missing',
+        'Scheduler env is configured but no scheduler heartbeat or successful tick is recorded in state.',
+        { maxAgeMs: policy.schedulerHeartbeatMaxAgeMs },
+      ));
+    } else if (heartbeatAgeMs !== null && heartbeatAgeMs > policy.schedulerHeartbeatMaxAgeMs) {
+      blockers.push(freshnessBlocker(
+        'scheduler_heartbeat_stale',
+        'Scheduler heartbeat is older than the configured staleness window.',
+        { ageMs: heartbeatAgeMs, maxAgeMs: policy.schedulerHeartbeatMaxAgeMs, recordedAt: heartbeatAt },
+      ));
+    } else if (heartbeat?.ok === false) {
+      blockers.push(freshnessBlocker(
+        'scheduler_last_tick_failed',
+        'Latest scheduler tick did not complete successfully.',
+        { recordedAt: heartbeatAt },
+      ));
+    }
+  }
+
+  if (applies && backupRehearsalAt && backupRehearsalAgeMs !== null && backupRehearsalAgeMs > policy.backupRehearsalMaxAgeMs) {
+    blockers.push(freshnessBlocker(
+      'backup_rehearsal_stale',
+      'Backup/restore rehearsal timestamp is older than the configured freshness window.',
+      { ageMs: backupRehearsalAgeMs, maxAgeMs: policy.backupRehearsalMaxAgeMs, recordedAt: backupRehearsalAt },
+    ));
+  }
+
+  return {
+    generatedAt: new Date(now).toISOString(),
+    applies,
+    blockers,
+    policy,
+    sandboxEvidence: {
+      ageMs: sandboxEvidenceAgeMs,
+      maxAgeMs: policy.sandboxEvidenceMaxAgeMs,
+      recordedAt: latestProviderRunAt,
+      runId: latestProviderRun?.id ?? null,
+      stale: applies && sandboxEvidenceAgeMs !== null && sandboxEvidenceAgeMs > policy.sandboxEvidenceMaxAgeMs,
+      status: latestProviderRun?.status ?? null,
+    },
+    providerValidationSchedules: {
+      graceMs: policy.scheduleOverdueGraceMs,
+      overdue: overdueSchedules,
+    },
+    schedulerHeartbeat: {
+      ageMs: heartbeatAgeMs,
+      maxAgeMs: policy.schedulerHeartbeatMaxAgeMs,
+      ok: heartbeat?.ok ?? null,
+      recordedAt: heartbeatAt,
+      schedulerConfigured,
+    },
+    backupRehearsal: {
+      ageMs: backupRehearsalAgeMs,
+      maxAgeMs: policy.backupRehearsalMaxAgeMs,
+      recordedAt: backupRehearsalAt,
+      stale: applies && backupRehearsalAgeMs !== null && backupRehearsalAgeMs > policy.backupRehearsalMaxAgeMs,
+    },
+  };
+}
+
 export function productReadinessReport(state, {
   backend = null,
   provider = providerReadiness(),
@@ -2584,32 +2805,38 @@ function launchGateItem({
   blockers = [],
   commands = [],
   evidence = [],
+  freshnessBlockers = [],
   id,
   label,
   owner,
   requiredEnv = [],
   status,
 }) {
+  const normalizedFreshnessBlockers = uniqueValues(freshnessBlockers);
   return {
     blockers,
     commands,
     evidence,
+    freshnessBlockers: normalizedFreshnessBlockers,
     id,
     label,
     owner,
     requiredEnv: uniqueValues(requiredEnv),
-    status: status ?? (blockers.length ? 'blocked' : 'pass'),
+    status: status ?? (blockers.length || normalizedFreshnessBlockers.length ? 'blocked' : 'pass'),
   };
 }
 
 export function launchGateReport(state, {
   backend = null,
+  env = process.env,
   provider = providerReadiness(),
   readiness = null,
+  statePath = resolveStatePath(),
 } = {}) {
   const summary = summarizeState(state);
   const product = readiness ?? productReadinessReport(state, { backend, provider });
   const latestProviderRun = latestProviderValidationRun(state);
+  const freshness = launchFreshnessReport(state, { backend, env, statePath });
   const backendFailedChecks = backend?.checks?.filter?.((check) => !check.ok) ?? [];
   const tenantIsolation = backendCheckById(backend, 'tenant_isolation');
   const scheduler = backendCheckById(backend, 'job_scheduler');
@@ -2621,6 +2848,22 @@ export function launchGateReport(state, {
   const emailProviderMissingEnv = [gmail, outlook, outboundEmail].flatMap((item) => item?.missingRequired ?? []);
   const activeProviderSchedules = state.providerValidationSchedules?.filter((schedule) => schedule.status === 'active').length ?? 0;
   const providerSandboxPassed = latestProviderRun?.status === 'passed';
+  const freshnessBlockersById = (id) => freshness.blockers.filter((blocker) => blocker.id === id).map((blocker) => blocker.message);
+  const backupFreshnessBlockers = freshnessBlockersById('backup_rehearsal_stale');
+  const sandboxFreshnessBlockers = freshnessBlockersById('sandbox_evidence_stale');
+  const scheduleFreshnessBlockers = freshness.blockers
+    .filter((blocker) => blocker.id === 'provider_validation_schedule_overdue')
+    .map((blocker) => blocker.message);
+  const schedulerFreshnessBlockers = freshness.blockers
+    .filter((blocker) => blocker.id.startsWith('scheduler_'))
+    .map((blocker) => blocker.message);
+  const schedulerOperationallyReady = Boolean(
+    scheduler?.ok &&
+    summary.failedJobs === 0 &&
+    activeProviderSchedules >= 4 &&
+    scheduleFreshnessBlockers.length === 0 &&
+    schedulerFreshnessBlockers.length === 0
+  );
   const productBlockers = product.requirements
     .filter((requirement) => !requirement.localOk)
     .map((requirement) => `${requirement.label}: ${requirement.gaps.join('; ') || 'local evidence missing'}`);
@@ -2645,11 +2888,12 @@ export function launchGateReport(state, {
       id: 'production_backend',
       label: 'Production backend, durable state, auth, CORS, and storage',
       owner: 'platform',
-      status: backend?.productionReady ? 'pass' : 'blocked',
+      status: backend?.productionReady && backupFreshnessBlockers.length === 0 ? 'pass' : 'blocked',
       evidence: [
         `Backend mode: ${backend?.mode ?? 'unknown'}`,
         `${backend?.summary?.readyChecks ?? 0}/${backend?.summary?.totalChecks ?? 0} backend checks production-ready`,
       ],
+      freshnessBlockers: backupFreshnessBlockers,
       blockers: backendFailedChecks.map((check) => check.message),
       requiredEnv: backend?.summary?.missingRequiredEnv ?? [],
       commands: [
@@ -2693,11 +2937,12 @@ export function launchGateReport(state, {
       id: 'provider_sandbox_evidence',
       label: 'Live-provider sandbox evidence artifact',
       owner: 'integrations',
-      status: providerSandboxPassed ? 'pass' : 'blocked',
+      status: providerSandboxPassed && sandboxFreshnessBlockers.length === 0 ? 'pass' : 'blocked',
       evidence: [
         latestProviderRun ? `Latest sandbox evidence: ${latestProviderRun.status} at ${latestProviderRun.recordedAt}` : 'No sandbox evidence recorded',
         `${state.providerValidationRuns?.length ?? 0} recorded sandbox run(s)`,
       ],
+      freshnessBlockers: sandboxFreshnessBlockers,
       blockers: providerSandboxPassed ? [] : ['Run sandbox validation with real provider sandbox credentials and save sanitized evidence.'],
       requiredEnv: ['SIGNAL_GMAIL_ACCESS_TOKEN', 'SIGNAL_OUTLOOK_ACCESS_TOKEN', 'SIGNAL_SENDGRID_API_KEY', 'STRIPE_SECRET_KEY', 'SIGNAL_STRIPE_PRICE_TEAM'],
       commands: [
@@ -2750,12 +2995,13 @@ export function launchGateReport(state, {
       id: 'scheduler_operations',
       label: 'Production scheduler, retries, and monitoring',
       owner: 'operations',
-      status: scheduler?.ok && summary.failedJobs === 0 && activeProviderSchedules >= 4 ? 'pass' : 'blocked',
+      status: schedulerOperationallyReady ? 'pass' : 'blocked',
       evidence: [
         scheduler?.message ?? 'Scheduler readiness has not been evaluated.',
         `${summary.failedJobs}/${summary.jobs} failed job(s)`,
         `${activeProviderSchedules}/${state.providerValidationSchedules?.length ?? 0} active provider validation schedule(s)`,
       ],
+      freshnessBlockers: [...scheduleFreshnessBlockers, ...schedulerFreshnessBlockers],
       blockers: scheduler?.ok && summary.failedJobs === 0 && activeProviderSchedules >= 4
         ? []
         : ['Configure production scheduler env, keep validation schedules active, and clear failed jobs.'],
@@ -2771,10 +3017,13 @@ export function launchGateReport(state, {
   return {
     generatedAt: new Date().toISOString(),
     goLiveReady: gates.every((gate) => gate.status === 'pass'),
+    freshness,
+    freshnessBlockers: freshness.blockers,
     gates,
     summary: {
       attention: gates.filter((gate) => gate.status === 'attention').length,
       blocked: gates.filter((gate) => gate.status === 'blocked').length,
+      freshnessBlocked: freshness.blockers.length,
       passed: gates.filter((gate) => gate.status === 'pass').length,
       total: gates.length,
     },
@@ -2824,7 +3073,7 @@ export function productionOperationsDrillReport(state, {
 } = {}) {
   const summary = summarizeState(state);
   const product = readiness ?? productReadinessReport(state, { backend, provider });
-  const gate = launchGate ?? launchGateReport(state, { backend, provider, readiness: product });
+  const gate = launchGate ?? launchGateReport(state, { backend, env, provider, readiness: product, statePath: resolveStatePath() });
   const health = operations ?? operationsHealthReport(state, { backend });
   const latestProviderRun = latestProviderValidationRun(state);
   const durableState = backendCheckById(backend, 'durable_state');
@@ -3154,7 +3403,7 @@ function providerLaunchOwner(providerId) {
   return 'integrations';
 }
 
-function providerLaunchStatus({ configured, launchReady, sandboxRequired, sandboxStatus, scheduleReady }) {
+function providerLaunchStatus({ configured, freshnessReady = true, launchReady, sandboxRequired, sandboxStatus, scheduleReady }) {
   if (launchReady) {
     return 'production_ready';
   }
@@ -3166,6 +3415,9 @@ function providerLaunchStatus({ configured, launchReady, sandboxRequired, sandbo
   }
   if (sandboxRequired && !scheduleReady) {
     return 'needs_schedule';
+  }
+  if (!freshnessReady) {
+    return 'needs_freshness';
   }
   return 'needs_proof';
 }
@@ -3201,8 +3453,15 @@ export function providerLaunchMatrixReport(state, {
   backend = null,
   env = process.env,
   provider = providerReadiness(env),
+  statePath = resolveStatePath(),
 } = {}) {
   const signedSession = backendCheckById(backend, 'signed_session_enforced');
+  const freshness = launchFreshnessReport(state, { backend, env, statePath });
+  const sandboxFreshnessBlockers = freshness.blockers
+    .filter((blocker) => blocker.id === 'sandbox_evidence_stale')
+    .map((blocker) => blocker.message);
+  const schedulerFreshnessBlockers = freshness.blockers
+    .filter((blocker) => blocker.id.startsWith('scheduler_') || blocker.id === 'backup_rehearsal_stale');
   const reportRows = provider.providers.map((item) => {
     const sandboxRequired = item.id !== 'session';
     const schedule = (state.providerValidationSchedules ?? []).find((candidate) => candidate.providerId === item.id) ?? null;
@@ -3211,7 +3470,11 @@ export function providerLaunchMatrixReport(state, {
     const scheduleReady = !sandboxRequired || schedule?.status === 'active';
     const configurationReady = item.ready && (item.id !== 'session' || Boolean(signedSession?.ok || env.SIGNAL_SESSION_SECRET));
     const sandboxReady = !sandboxRequired || sandboxStatus === 'passed';
-    const launchReady = Boolean(configurationReady && sandboxReady && scheduleReady);
+    const scheduleFreshnessBlockers = freshness.providerValidationSchedules.overdue
+      .filter((overdue) => overdue.providerId === item.id)
+      .map((overdue) => `${overdue.providerId} provider validation schedule is overdue beyond the configured grace window.`);
+    const freshnessBlockers = sandboxRequired ? [...sandboxFreshnessBlockers, ...scheduleFreshnessBlockers] : [];
+    const launchReady = Boolean(configurationReady && sandboxReady && scheduleReady && freshnessBlockers.length === 0);
     const commands = providerLaunchCommands(item.id);
     const missingEnv = item.missingRequired ?? [];
     return {
@@ -3234,6 +3497,7 @@ export function providerLaunchMatrixReport(state, {
       latestEvidenceRunId: sandboxProvider?.runId ?? null,
       latestEvidenceDigest: sandboxProvider?.reportDigest ?? null,
       latestProviderRequestIds: sandboxProvider?.checks?.map((check) => check.providerRequestId).filter(Boolean) ?? [],
+      freshnessBlockers,
       schedule: schedule
         ? {
             cadence: schedule.cadence,
@@ -3254,6 +3518,7 @@ export function providerLaunchMatrixReport(state, {
       launchReady,
       status: providerLaunchStatus({
         configured: configurationReady,
+        freshnessReady: freshnessBlockers.length === 0,
         launchReady,
         sandboxRequired,
         sandboxStatus,
@@ -3264,7 +3529,9 @@ export function providerLaunchMatrixReport(state, {
   const launchMatrix = {
     generatedAt: new Date().toISOString(),
     ok: true,
-    productionReady: reportRows.every((row) => row.launchReady),
+    productionReady: reportRows.every((row) => row.launchReady) && schedulerFreshnessBlockers.length === 0,
+    freshness,
+    freshnessBlockers: freshness.blockers,
     rows: reportRows,
     recommendation: {
       summary: 'Use provider-launch as the provider-by-provider handoff between configuration, saved sandbox evidence, live watch/send/payment commands, and signed webhook replay proof.',
@@ -3275,6 +3542,7 @@ export function providerLaunchMatrixReport(state, {
       blocked: reportRows.filter((row) => !row.launchReady).length,
       configured: reportRows.filter((row) => row.configurationReady).length,
       launchReady: reportRows.filter((row) => row.launchReady).length,
+      freshnessBlocked: freshness.blockers.length,
       missingRequiredEnv: reportRows.reduce((count, row) => count + row.missingEnv.length, 0),
       sandboxPassed: reportRows.filter((row) => row.sandboxRequired && row.sandboxStatus === 'passed').length,
       sandboxRequired: reportRows.filter((row) => row.sandboxRequired).length,
@@ -3381,6 +3649,24 @@ function providerHandoffActionFromRow(row) {
       requiredEnv: [],
       command: scheduleCommand,
       followUpCommands: ['npm run admin -- integrations run-scheduled --force --json'],
+    };
+  }
+  if (row.freshnessBlockers?.length) {
+    return {
+      id: `${row.id}_freshness`,
+      providerId: row.id,
+      label: `${row.label} freshness`,
+      owner: 'operations',
+      status: 'needs_freshness',
+      priority: providerHandoffPriority(row),
+      blocker: row.freshnessBlockers[0],
+      evidence: [
+        ...evidence,
+        row.latestEvidenceAt ? `Latest evidence ${row.sandboxStatus} at ${row.latestEvidenceAt}` : 'No current saved provider evidence',
+      ],
+      requiredEnv: [],
+      command: 'npm run admin -- integrations run-scheduled --force --json',
+      followUpCommands: ['npm run admin -- provider-launch --env-file ./.env.production --json'],
     };
   }
   return {
@@ -4083,7 +4369,7 @@ export function paymentHandoffReport(state, {
   const currentBackend = backend ?? backendReadiness({ env, statePath });
   const product = readiness ?? productReadinessReport(state, { backend: currentBackend, provider });
   const launch = providerLaunch ?? providerLaunchMatrixReport(state, { backend: currentBackend, env, provider });
-  const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, provider, readiness: product });
+  const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, env, provider, readiness: product, statePath });
   const payment = paymentLifecycle ?? paymentLifecycleAuditReport(state, {
     backend: currentBackend,
     provider,
@@ -4352,7 +4638,7 @@ export function emailHandoffReport(state, {
   const currentBackend = backend ?? backendReadiness({ env, statePath });
   const product = readiness ?? productReadinessReport(state, { backend: currentBackend, provider });
   const launch = providerLaunch ?? providerLaunchMatrixReport(state, { backend: currentBackend, env, provider });
-  const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, provider, readiness: product });
+  const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, env, provider, readiness: product, statePath });
   const health = operations ?? operationsHealthReport(state, { backend: currentBackend, statePath });
   const lifecycle = lifecyclePlaybook ?? lifecyclePlaybookReport(state, { backend: currentBackend, statePath });
   const summary = summarizeState(state, statePath);
@@ -5004,7 +5290,7 @@ export function productionSetupPlanReport(state, {
   statePath = resolveStatePath(),
 } = {}) {
   const product = readiness ?? productReadinessReport(state, { backend, provider });
-  const gate = launchGate ?? launchGateReport(state, { backend, provider, readiness: product });
+  const gate = launchGate ?? launchGateReport(state, { backend, env, provider, readiness: product, statePath });
   const operations = operationsHealthReport(state, { backend, statePath });
   const drill = productionDrill ?? productionOperationsDrillReport(state, { backend, env, launchGate: gate, operations, provider, readiness: product });
   const launch = providerLaunch ?? providerLaunchMatrixReport(state, { backend, env, provider });
@@ -5578,7 +5864,7 @@ function localAgentNextActionFromGate(gate) {
     owner: gate.owner,
     status: gate.status,
     priority: localAgentHandoffPriority(gate),
-    blocker: gate.blockers?.[0] ?? (gate.status === 'pass' ? 'No blocker.' : 'Proof is missing.'),
+    blocker: gate.blockers?.[0] ?? gate.freshnessBlockers?.[0] ?? (gate.status === 'pass' ? 'No blocker.' : 'Proof is missing.'),
     evidence: gate.evidence ?? [],
     requiredEnv: gate.requiredEnv ?? [],
     command: gate.commands?.[0] ?? 'npm run admin -- launch-gate --json',
@@ -5598,7 +5884,7 @@ export function localAgentHandoffReport(state, {
   statePath = resolveStatePath(),
 } = {}) {
   const product = readiness ?? productReadinessReport(state, { backend, provider });
-  const gate = launchGate ?? launchGateReport(state, { backend, provider, readiness: product });
+  const gate = launchGate ?? launchGateReport(state, { backend, env, provider, readiness: product, statePath });
   const operationHealth = operations ?? operationsHealthReport(state, { backend, statePath });
   const providerMatrix = providerLaunch ?? providerLaunchMatrixReport(state, { backend, env, provider });
   const plan = productionPlan ?? productionSetupPlanReport(state, {
@@ -6136,7 +6422,7 @@ export function schedulerHandoffReport(state, {
 } = {}) {
   const currentBackend = backend ?? backendReadiness({ env, statePath });
   const product = readiness ?? productReadinessReport(state, { backend: currentBackend, provider });
-  const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, provider, readiness: product });
+  const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, env, provider, readiness: product, statePath });
   const health = operations ?? operationsHealthReport(state, { backend: currentBackend, statePath });
   const drill = productionDrill ?? productionOperationsDrillReport(state, {
     backend: currentBackend,
@@ -6430,7 +6716,7 @@ export function completionAuditReport(state, {
   const health = operations ?? operationsHealthReport(state, { backend: currentBackend, statePath });
   const lifecycle = lifecyclePlaybook ?? lifecyclePlaybookReport(state, { backend: currentBackend, statePath });
   const launch = providerLaunch ?? providerLaunchMatrixReport(state, { backend: currentBackend, env, provider: currentProvider });
-  const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, provider: currentProvider, readiness: product });
+  const gate = launchGate ?? launchGateReport(state, { backend: currentBackend, env, provider: currentProvider, readiness: product, statePath });
   const payment = paymentLifecycle ?? paymentLifecycleAuditReport(state, { backend: currentBackend, provider: currentProvider, providerLaunch: launch, statePath });
   const email = emailHandoff ?? emailHandoffReport(state, {
     backend: currentBackend,
@@ -9196,6 +9482,9 @@ function refreshNotificationMuteRules(state, userId) {
   (state.notificationEvents ?? [])
     .filter((event) => event.userId === userId && event.status !== 'sent')
     .forEach((event) => {
+      if (String(event.type ?? '').startsWith('operations.')) {
+        return;
+      }
       const shouldMute = shouldMuteNotification(preference, event);
       if (shouldMute && event.status !== 'muted') {
         event.status = 'muted';
@@ -10164,6 +10453,93 @@ async function mutateState(action, mutator, {
       summary: saved.summary,
     };
   }, { retryOnConflict });
+}
+
+function safeSchedulerAlertDetails(details = {}) {
+  return JSON.parse(JSON.stringify(details, (key, value) => (
+    /(secret|token|password|authorization|cookie|credential)/i.test(key) ? '[redacted]' : value
+  )));
+}
+
+export async function recordSchedulerHeartbeat(heartbeat = {}, options = {}) {
+  return mutateState(
+    'scheduler.heartbeat',
+    (state, actor) => {
+      requirePlatformOperator(actor, 'scheduler.heartbeat');
+      const recordedAt = heartbeat.recordedAt ?? nowIso();
+      state.schedulerHeartbeat = {
+        failed: Number(heartbeat.failed ?? 0),
+        finishedAt: heartbeat.finishedAt ?? recordedAt,
+        ok: Boolean(heartbeat.ok),
+        queues: Array.isArray(heartbeat.queues) ? heartbeat.queues.map((queue) => String(queue)) : [],
+        ran: Number(heartbeat.ran ?? 0),
+        recordedAt,
+        statePath: heartbeat.statePath ?? null,
+        workerId: heartbeat.workerId ?? null,
+      };
+      return {
+        message: `Scheduler heartbeat recorded (${state.schedulerHeartbeat.ok ? 'ok' : 'failed'}, ${state.schedulerHeartbeat.ran} ran).`,
+        targetId: 'scheduler',
+      };
+    },
+    options,
+  );
+}
+
+export async function recordSchedulerAlert({
+  channel = null,
+  details = {},
+  message,
+  severity = 'critical',
+  title = 'Scheduler operations alert',
+  type = 'scheduler.failure',
+} = {}, options = {}) {
+  return mutateState(
+    'scheduler.alert',
+    (state, actor) => {
+      requirePlatformOperator(actor, 'scheduler.alert');
+      const createdAt = nowIso();
+      const tenantId = defaultTenantId(state);
+      const alert = {
+        id: makeId('sched_alert'),
+        channel: channel ?? 'operations',
+        createdAt,
+        details: safeSchedulerAlertDetails(details),
+        message: message ?? title,
+        severity,
+        status: 'open',
+        title,
+        type,
+      };
+      state.schedulerAlerts = [...(state.schedulerAlerts ?? []), alert].slice(-100);
+      upsertNotificationEvent(state, {
+        id: `ntf_${alert.id}`,
+        tenantId,
+        userId: actor.id,
+        account: null,
+        type: `operations.${type}`,
+        title,
+        body: alert.message,
+        status: 'unread',
+        channel: alert.channel,
+        mutedBy: null,
+        signalId: null,
+        sourceMessageId: null,
+        accountActionId: null,
+        createdAt,
+        readAt: null,
+        digestRunId: null,
+      });
+      return {
+        alertId: alert.id,
+        channel: alert.channel,
+        message: alert.message,
+        targetId: alert.id,
+        type: alert.type,
+      };
+    },
+    options,
+  );
 }
 
 function createTenantWorkspaceInState(state, {

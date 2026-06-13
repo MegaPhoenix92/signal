@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 import {
   jobClaimable,
   loadState,
+  recordSchedulerAlert,
+  recordSchedulerHeartbeat,
+  renewMailboxWatch,
   resolveStatePath,
   runJobs,
   summarizeState,
@@ -75,6 +78,8 @@ export function createSchedulerConfig({ argv = process.argv.slice(2), env = proc
 
   return {
     actorUserId: flagValue(argv, '--actor') ?? env.SIGNAL_SCHEDULER_ACTOR ?? env.SIGNAL_ADMIN_ACTOR ?? 'usr_admin',
+    drain: argv.includes('--drain') || argv.includes('--once') || env.SIGNAL_SCHEDULER_DRAIN === 'true',
+    drainMaxIterations: positiveInteger(env.SIGNAL_SCHEDULER_DRAIN_MAX_ITERATIONS, 100, 'Scheduler drain max iterations'),
     dryRun: argv.includes('--dry-run') || env.SIGNAL_SCHEDULER_DRY_RUN === 'true',
     env,
     intervalMs,
@@ -84,6 +89,7 @@ export function createSchedulerConfig({ argv = process.argv.slice(2), env = proc
     lockBackend,
     lockStaleMs: positiveInteger(env.SIGNAL_SCHEDULER_LOCK_STALE_MS, Math.max(intervalMs * 3, 300_000), 'Scheduler lock stale window'),
     lock: !argv.includes('--no-lock') && env.SIGNAL_SCHEDULER_LOCK !== 'false',
+    liveProviderWatch: argv.includes('--live-provider') || env.SIGNAL_PROVIDER_WATCH_MODE === 'live',
     once: argv.includes('--once') || env.SIGNAL_SCHEDULER_ONCE === 'true',
     pgPool: overrides.pgPool,
     heartbeatFile: path.resolve(env.SIGNAL_SCHEDULER_HEARTBEAT_FILE ?? path.join(rootDir, 'data', 'signal-scheduler-heartbeat.json')),
@@ -91,6 +97,7 @@ export function createSchedulerConfig({ argv = process.argv.slice(2), env = proc
     jobLeaseMs: positiveInteger(env.SIGNAL_JOB_LEASE_MS, Math.max(intervalMs * 3, 300_000), 'Job lease window'),
     queues,
     statePath: flagValue(argv, '--state') ?? env.SIGNAL_ADMIN_STATE,
+    watchRenewalWindowMs: positiveInteger(env.SIGNAL_PROVIDER_WATCH_RENEWAL_WINDOW_MS, 24 * 60 * 60 * 1000, 'Provider watch renewal window'),
     workerId: env.SIGNAL_SCHEDULER_WORKER_ID ?? `scheduler_${process.pid}`,
   };
 }
@@ -155,6 +162,17 @@ function runnableJobsForQueue(state, queue, limit, { leaseMs, now = Date.now() }
   return (state.jobs ?? [])
     .filter((job) => job.queue === queue && jobClaimable(job, now, leaseMs))
     .slice(0, limit);
+}
+
+export function providerWatchesExpiringWithin(state, { now = Date.now(), windowMs = 24 * 60 * 60 * 1000 } = {}) {
+  return (state.emailWatchSubscriptions ?? [])
+    .filter((watch) => {
+      if (watch.status !== 'active') {
+        return false;
+      }
+      const expirationMs = Date.parse(watch.expirationAt ?? '');
+      return Number.isFinite(expirationMs) && expirationMs <= now + windowMs;
+    });
 }
 
 export function schedulerDueSummary(state, { leaseMs, queues = defaultSchedulerQueues, limit = 5, now = Date.now() } = {}) {
@@ -269,7 +287,216 @@ export async function acquireSchedulerLock(config) {
   };
 }
 
-export async function runSchedulerTick(config, { loadStateImpl = loadState, runJobsImpl = runJobs } = {}) {
+async function emitSchedulerOperationsAlert(config, {
+  details = {},
+  logger = createLogger({ env: config.env, service: 'signal-scheduler', sink: console.error }),
+  message,
+  recordSchedulerAlertImpl = recordSchedulerAlert,
+  severity = 'critical',
+  title = 'Signal scheduler failure',
+  type = 'scheduler.failure',
+} = {}) {
+  const channel = config.env.SIGNAL_OPERATIONS_ALERT_CHANNEL;
+  if (!channel) {
+    return null;
+  }
+  logger.error('operations_alert', {
+    channel,
+    details,
+    message,
+    severity,
+    title,
+    type,
+  });
+  try {
+    return await recordSchedulerAlertImpl({
+      channel,
+      details,
+      message,
+      severity,
+      title,
+      type,
+    }, {
+      actorUserId: config.actorUserId,
+      statePath: config.statePath,
+    });
+  } catch (error) {
+    logger.error('operations_alert_record_failed', {
+      channel,
+      error: error instanceof Error ? error.message : String(error),
+      type,
+    });
+    return null;
+  }
+}
+
+async function renewExpiringProviderWatches(config, {
+  fetchImpl,
+  loadStateImpl = loadState,
+  logger,
+  recordSchedulerAlertImpl = recordSchedulerAlert,
+  renewMailboxWatchImpl = renewMailboxWatch,
+} = {}) {
+  const statePath = resolveStatePath(config.statePath);
+  const state = await loadStateImpl({ statePath });
+  const watches = providerWatchesExpiringWithin(state, { windowMs: config.watchRenewalWindowMs });
+  const outcomes = [];
+  for (const watch of watches) {
+    try {
+      const result = await renewMailboxWatchImpl(watch.id, {
+        actorUserId: config.actorUserId,
+        env: config.env,
+        fetchImpl,
+        liveProviderWatch: config.liveProviderWatch,
+        statePath,
+      });
+      const status = result.details?.status ?? 'unknown';
+      const ok = status === 'active';
+      outcomes.push({
+        mailboxId: result.details?.mailboxId ?? watch.mailboxId,
+        ok,
+        provider: watch.provider,
+        status,
+        watchId: watch.id,
+      });
+      if (!ok) {
+        await emitSchedulerOperationsAlert(config, {
+          details: {
+            mailboxId: result.details?.mailboxId ?? watch.mailboxId,
+            provider: watch.provider,
+            providerResponseStatus: result.details?.providerResponseStatus ?? null,
+            status,
+            watchId: watch.id,
+          },
+          logger,
+          message: `Provider watch renewal failed for ${watch.provider} watch ${watch.id}.`,
+          recordSchedulerAlertImpl,
+          title: 'Provider watch renewal failed',
+          type: 'scheduler.watch_renew_failed',
+        });
+      }
+    } catch (error) {
+      outcomes.push({
+        error: error instanceof Error ? error.message : String(error),
+        mailboxId: watch.mailboxId,
+        ok: false,
+        provider: watch.provider,
+        status: 'failed',
+        watchId: watch.id,
+      });
+      await emitSchedulerOperationsAlert(config, {
+        details: {
+          error: error instanceof Error ? error.message : String(error),
+          mailboxId: watch.mailboxId,
+          provider: watch.provider,
+          watchId: watch.id,
+        },
+        logger,
+        message: `Provider watch renewal failed for ${watch.provider} watch ${watch.id}.`,
+        recordSchedulerAlertImpl,
+        title: 'Provider watch renewal failed',
+        type: 'scheduler.watch_renew_failed',
+      });
+    }
+  }
+  return {
+    count: outcomes.length,
+    failed: outcomes.filter((outcome) => !outcome.ok).length,
+    outcomes,
+    succeeded: outcomes.filter((outcome) => outcome.ok).length,
+  };
+}
+
+async function runSchedulerQueue(config, queue, {
+  loadStateImpl = loadState,
+  logger,
+  recordSchedulerAlertImpl = recordSchedulerAlert,
+  runJobsImpl = runJobs,
+  statePath,
+} = {}) {
+  let action = 'jobs.run';
+  let count = 0;
+  let failed = 0;
+  let succeeded = 0;
+  let summary = null;
+  const batches = [];
+  for (let iteration = 0; iteration < config.drainMaxIterations; iteration += 1) {
+    if (config.drain) {
+      const state = await loadStateImpl({ statePath });
+      const due = schedulerDueSummary(state, {
+        leaseMs: config.jobLeaseMs,
+        limit: config.limit,
+        queues: [queue],
+      })[0];
+      if (due.due === 0) {
+        return {
+          action,
+          batches,
+          count,
+          failed,
+          iterations: batches.length,
+          queue,
+          skipped: count === 0,
+          succeeded,
+          summary,
+        };
+      }
+    }
+
+    const result = await runJobsImpl({ queue, limit: config.limit }, {
+      actorUserId: config.actorUserId,
+      env: config.env,
+      jobLeaseMs: config.jobLeaseMs,
+      providerSandboxTimeoutMs: config.providerSandboxTimeoutMs,
+      statePath,
+      workerId: config.workerId,
+    });
+    action = result.action;
+    count += result.details.count;
+    failed += result.details.failed;
+    succeeded += result.details.succeeded;
+    summary = result.summary;
+    batches.push(result.details);
+    if (result.details.failed > 0) {
+      await emitSchedulerOperationsAlert(config, {
+        details: {
+          failed: result.details.failed,
+          queue,
+          succeeded: result.details.succeeded,
+        },
+        logger,
+        message: `Scheduler queue ${queue} recorded ${result.details.failed} failed job(s).`,
+        recordSchedulerAlertImpl,
+        title: 'Scheduler job failure',
+        type: 'scheduler.job_failed',
+      });
+    }
+    if (!config.drain || result.details.count === 0) {
+      return {
+        action,
+        batches,
+        count,
+        failed,
+        iterations: batches.length,
+        queue,
+        skipped: count === 0,
+        succeeded,
+        summary,
+      };
+    }
+  }
+  throw new Error(`Scheduler drain exceeded ${config.drainMaxIterations} iteration(s) for ${queue}.`);
+}
+
+export async function runSchedulerTick(config, {
+  fetchImpl,
+  loadStateImpl = loadState,
+  logger = createLogger({ env: config.env, service: 'signal-scheduler', sink: console.error }),
+  recordSchedulerAlertImpl = recordSchedulerAlert,
+  recordSchedulerHeartbeatImpl = recordSchedulerHeartbeat,
+  renewMailboxWatchImpl = renewMailboxWatch,
+  runJobsImpl = runJobs,
+} = {}) {
   const statePath = resolveStatePath(config.statePath);
   const startedAt = new Date().toISOString();
   const state = await loadStateImpl({ statePath });
@@ -286,41 +513,67 @@ export async function runSchedulerTick(config, { loadStateImpl = loadState, runJ
     };
   }
 
-  const outcomes = [];
-  for (const queue of config.queues) {
-    const result = await runJobsImpl({ queue, limit: config.limit }, {
-      actorUserId: config.actorUserId,
-      env: config.env,
-      jobLeaseMs: config.jobLeaseMs,
-      providerSandboxTimeoutMs: config.providerSandboxTimeoutMs,
+  try {
+    const watchRenewals = await renewExpiringProviderWatches(config, {
+      fetchImpl,
+      loadStateImpl,
+      logger,
+      recordSchedulerAlertImpl,
+      renewMailboxWatchImpl,
+    });
+    const outcomes = [];
+    for (const queue of config.queues) {
+      const result = await runSchedulerQueue(config, queue, {
+        loadStateImpl,
+        logger,
+        recordSchedulerAlertImpl,
+        runJobsImpl,
+        statePath,
+      });
+      outcomes.push(result);
+    }
+
+    const failed = outcomes.reduce((sum, outcome) => sum + outcome.failed, 0) + watchRenewals.failed;
+    const ran = outcomes.reduce((sum, outcome) => sum + outcome.count, 0);
+    const finishedAt = new Date().toISOString();
+    const ok = failed === 0;
+    await recordSchedulerHeartbeatImpl({
+      failed,
+      finishedAt,
+      ok,
+      queues: config.queues,
+      ran,
+      recordedAt: finishedAt,
       statePath,
       workerId: config.workerId,
+    }, {
+      actorUserId: config.actorUserId,
+      statePath,
     });
-    outcomes.push({
-      action: result.action,
-      count: result.details.count,
-      failed: result.details.failed,
-      queue,
-      skipped: result.details.count === 0,
-      succeeded: result.details.succeeded,
-      summary: result.summary,
+    const refreshedState = await loadStateImpl({ statePath });
+    return {
+      ok,
+      actorUserId: config.actorUserId,
+      dryRun: false,
+      finishedAt,
+      outcomes,
+      ran,
+      startedAt,
+      statePath,
+      summary: summarizeState(refreshedState, statePath),
+      watchRenewals,
+    };
+  } catch (error) {
+    await emitSchedulerOperationsAlert(config, {
+      details: { error: error instanceof Error ? error.message : String(error) },
+      logger,
+      message: error instanceof Error ? error.message : String(error),
+      recordSchedulerAlertImpl,
+      title: 'Scheduler tick failed',
+      type: 'scheduler.tick_failed',
     });
+    throw error;
   }
-
-  const refreshedState = await loadStateImpl({ statePath });
-  const failed = outcomes.reduce((sum, outcome) => sum + outcome.failed, 0);
-  const ran = outcomes.reduce((sum, outcome) => sum + outcome.count, 0);
-  return {
-    ok: failed === 0,
-    actorUserId: config.actorUserId,
-    dryRun: false,
-    finishedAt: new Date().toISOString(),
-    outcomes,
-    ran,
-    startedAt,
-    statePath,
-    summary: summarizeState(refreshedState, statePath),
-  };
 }
 
 export async function runSchedulerOnce(config, options = {}) {
@@ -368,7 +621,7 @@ export async function startSchedulerDaemon(config, { log } = {}) {
   async function runLoop() {
     while (!stopped) {
       await refreshSchedulerLock(lock, config);
-      const result = await runSchedulerTick({ ...config, lock: false });
+      const result = await runSchedulerTick({ ...config, lock: false }, { logger });
       await fs.mkdir(path.dirname(config.heartbeatFile), { recursive: true });
       await fs.writeFile(config.heartbeatFile, `${JSON.stringify({
         ok: result.ok,
@@ -408,8 +661,9 @@ function formatSchedulerResult(result) {
   }
   return [
     `Signal scheduler ran ${result.ran} due job${result.ran === 1 ? '' : 's'} for ${result.statePath}`,
+    result.watchRenewals?.count ? `Provider watches: ${result.watchRenewals.succeeded} renewed, ${result.watchRenewals.failed} failed` : null,
     ...result.outcomes.map((outcome) => `${outcome.queue}: ${outcome.count} ran, ${outcome.succeeded} succeeded, ${outcome.failed} failed`),
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 async function main() {

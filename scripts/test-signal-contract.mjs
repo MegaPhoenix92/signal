@@ -10,7 +10,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { bootstrapState } from './signal-state.mjs';
+import { bootstrapState, recordSchedulerHeartbeat } from './signal-state.mjs';
 import { signEmailWebhookPayload, signSendGridWebhookPayload } from './signal-email-provider.mjs';
 import { signStripeWebhookPayload } from './signal-payment-provider.mjs';
 
@@ -1286,6 +1286,17 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert(!emailHandoffPreflightJson.includes('outlook_access_token_value'), 'email handoff preflight must not serialize Outlook access tokens');
     assert(!emailHandoffPreflightJson.includes('sendgrid_api_key_value'), 'email handoff preflight must not serialize SendGrid API keys');
     assert(!emailHandoffPreflightJson.includes('sendgrid_public_key_value'), 'email handoff preflight must not serialize SendGrid webhook public-key values');
+
+    await recordSchedulerHeartbeat({
+      failed: 0,
+      finishedAt: new Date().toISOString(),
+      ok: true,
+      queues: ['provider_validation', 'governance', 'email_sync'],
+      ran: 0,
+      recordedAt: new Date().toISOString(),
+      statePath,
+      workerId: 'contract-preflight-scheduler',
+    }, { actorUserId: 'usr_admin', statePath });
 
     const launchPackagePath = path.join(tempDir, 'signal-launch-evidence.json');
     const launchPackageResult = await runCli(['launch-gate', 'package', launchPackagePath, '--env-file', envFilePath, '--json'], blankSandboxProviderEnv);
