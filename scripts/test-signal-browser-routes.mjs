@@ -599,6 +599,11 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   }
   await client.send('Emulation.clearDeviceMetricsOverride');
 
+  const legacyOnboardingRoute = await navigate(client, `${baseUrl}#onboarding`, 'Create the workspace before the dashboard.');
+  assert.equal(legacyOnboardingRoute.snapshot.hash, '#onboarding');
+  assert.equal(legacyOnboardingRoute.snapshot.errorOverlay, false);
+  assertTextIncludes(legacyOnboardingRoute.text, 'Workspace registration', 'legacy onboarding hash should render registration route');
+
   const registerRoute = await navigate(client, `${baseUrl}#register`, 'Create the workspace before the dashboard.');
   assert.equal(registerRoute.snapshot.hash, '#register');
   assert.equal(registerRoute.snapshot.errorOverlay, false);

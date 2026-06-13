@@ -289,11 +289,22 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
   await t.test('app route source exposes public, workspace, and admin modes', async () => {
     const appEntrySource = await fs.readFile(path.join(rootDir, 'src', 'App.tsx'), 'utf8');
     const appSource = await fs.readFile(path.join(rootDir, 'src', 'pages', 'AppSurface.tsx'), 'utf8');
+    const appRoutingSource = await fs.readFile(path.join(rootDir, 'src', 'pages', 'appRouting.ts'), 'utf8');
+    const appStateSource = await fs.readFile(path.join(rootDir, 'src', 'pages', 'appState.ts'), 'utf8');
     const adminSource = await fs.readFile(path.join(rootDir, 'src', 'pages', 'AdminConsole.tsx'), 'utf8');
     const routeSource = `${appSource}\n${adminSource}`;
     const dataSource = await fs.readFile(path.join(rootDir, 'src', 'signalData.ts'), 'utf8');
     assert.match(appEntrySource, /Suspense/);
     assert.match(appSource, /window\.addEventListener\('hashchange'/);
+    assert.match(appSource, /resolveAppRoute/);
+    assert.match(appRoutingSource, /appRoutes/);
+    assert.match(appRoutingSource, /#onboarding/);
+    assert.match(appStateSource, /export function useSignalAppState/);
+    assert.match(appStateSource, /optimisticMutationResponse/);
+    assert.match(appStateSource, /Rolled back optimistic/);
+    assert.match(appStateSource, /signals\.feedback/);
+    assert.match(appStateSource, /accounts\.action-status/);
+    assert.match(appStateSource, /payments\.recover/);
     assert.match(appSource, /mode === 'register'/);
     assert.match(appSource, /mode === 'workspace'/);
     assert.match(appSource, /mode === 'admin'/);
