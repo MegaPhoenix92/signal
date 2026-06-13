@@ -1363,6 +1363,12 @@ export type DashboardAuditReport = {
   };
 };
 
+export type LaunchFreshnessBlocker = {
+  id: string;
+  message: string;
+  severity: string;
+};
+
 export type DashboardAuditResponse = {
   ok: boolean;
   audit: DashboardAuditReport;
@@ -1565,6 +1571,7 @@ export type OperationsHealthReport = {
     schedulerReady: boolean;
     statePath?: string;
   };
+  freshness?: unknown;
   issues: string[];
   lifecycle: {
     categories: Array<{
@@ -1601,6 +1608,7 @@ export type OperationsHealthReport = {
     failedDeliveries: number;
     failedJobs: number;
     failedQueues: number;
+    freshnessBlocked?: number;
     monitoredQueues: number;
     openLifecycle: number;
     productionReady: boolean;
@@ -1706,7 +1714,7 @@ export type ProviderLaunchMatrixReport = {
   ok: boolean;
   productionReady: boolean;
   freshness: unknown;
-  freshnessBlockers: string[];
+  freshnessBlockers: LaunchFreshnessBlocker[];
   rows: ProviderLaunchRow[];
   recommendation: {
     summary: string;
@@ -4004,6 +4012,7 @@ export function fallbackOperationsHealth(data: SignalAppData, backend = fallback
   const queues = fallbackQueueHealthRows(data);
   const rateLimits = fallbackRateLimitRows(data);
   const lifecycle = fallbackLifecycleHealth(data);
+  const freshness = fallbackLaunchFreshnessReport();
   const blockingQueues = new Set(['billing_webhook', 'outbound_email']);
   const failedQueues = queues.filter((queue) => queue.failed > 0 && blockingQueues.has(queue.queue));
   const failedDeliveries = (data.emailDeliveryMessages ?? []).filter((message) => ['failed', 'bounced'].includes(message.status));
@@ -4016,14 +4025,17 @@ export function fallbackOperationsHealth(data: SignalAppData, backend = fallback
     ...failedDeliveries.map((message) => `outbound_email: ${message.id} is ${message.status}`),
     ...activeBackoffs.map((row) => `${row.kind}:${row.targetId} backoff until ${row.retryAfterAt}`),
     ...criticalLifecycle.map((row) => `${row.category}: ${row.critical} critical open lifecycle notice(s)`),
+    ...freshness.blockers.map((blocker) => `freshness: ${blocker.message}`),
   ];
+  const productionReady = Boolean(backendBoundary.productionReady && backendBoundary.schedulerReady && freshness.blockers.length === 0);
   return {
     backend: backendBoundary,
+    freshness,
     generatedAt: new Date().toISOString(),
     issues,
     lifecycle,
     ok: issues.length === 0,
-    productionReady: backendBoundary.productionReady && backendBoundary.schedulerReady,
+    productionReady,
     queues,
     rateLimits,
     recommendation: {
@@ -4038,9 +4050,10 @@ export function fallbackOperationsHealth(data: SignalAppData, backend = fallback
       failedDeliveries: failedDeliveries.length,
       failedJobs: summary.failedJobs ?? 0,
       failedQueues: failedQueues.length,
+      freshnessBlocked: freshness.blockers.length,
       monitoredQueues: queues.length,
       openLifecycle: summary.openLifecycleNotices ?? 0,
-      productionReady: backendBoundary.productionReady && backendBoundary.schedulerReady,
+      productionReady,
       totalWebhooks: webhooks.length,
       unhealthyWebhooks: webhooks.filter((row) => !row.localOk).length,
     },
@@ -4118,6 +4131,12 @@ export function fallbackProductionDrill(
   );
   const schedulerReady = Boolean(scheduler?.ok && schedulerLockReady && summary.failedJobs === 0 && activeProviderSchedules >= 4);
   const liveProviderSchedulerReady = Boolean(provider.ok && providerSandboxPassed && activeProviderSchedules >= 4);
+  const nonFreshnessOperationIssues = (operations.issues ?? []).filter((issue) => !issue.startsWith('freshness:'));
+  const operationsMonitoringReady = Boolean(
+    operations.backend?.productionReady &&
+    operations.backend?.schedulerReady &&
+    nonFreshnessOperationIssues.length === 0,
+  );
   const providerById = (id: string) => provider.providers.find((item) => item.id === id);
   const gmail = providerById('gmail');
   const outlook = providerById('outlook');
@@ -4258,7 +4277,12 @@ export function fallbackProductionDrill(
       area: 'alerting_runbook',
       check: 'Operations alert destination and launch runbook are configured for failed jobs, webhooks, provider backoff, billing, and lifecycle notices.',
       commands: ['npm run admin -- operations-health --env-file ./.env.production --json'],
-      evidence: [`Operations health production-ready: ${operations.productionReady ? 'yes' : 'no'}`, 'Alert channel configured: no', 'Runbook URL configured: no'],
+      evidence: [
+        `Operations monitoring baseline ready: ${operationsMonitoringReady ? 'yes' : 'no'}`,
+        `Provider evidence freshness blockers: ${operations.summary.freshnessBlocked ?? 0}`,
+        'Alert channel configured: no',
+        'Runbook URL configured: no',
+      ],
       owner: 'operations',
       productionOk: false,
       recommendation: 'Wire operations-health output into the alert channel before accepting production traffic.',
@@ -4364,7 +4388,7 @@ function fallbackLaunchFreshnessReport() {
       recordedAt: null,
       stale: false,
     },
-    blockers: [],
+    blockers: [] as LaunchFreshnessBlocker[],
     policy: {
       backupRehearsalMaxAgeMs: 30 * 24 * 60 * 60 * 1000,
       sandboxEvidenceMaxAgeMs: 7 * 24 * 60 * 60 * 1000,
@@ -6944,6 +6968,18 @@ function fallbackDoctorCheckMap(data: SignalAppData) {
         !record.plaintext;
     }),
     message: 'Provider sandbox validation evidence is recorded without raw secrets or raw reports.',
+  });
+  const latestProviderRun = [...(data.providerValidationRuns ?? [])].sort((left, right) => Date.parse(right.recordedAt ?? '') - Date.parse(left.recordedAt ?? ''))[0] ?? null;
+  const latestProviderEvidenceOk = !latestProviderRun || latestProviderRun.status === 'passed';
+  checks.set('provider_validation_latest_evidence', {
+    id: 'provider_validation_latest_evidence',
+    ok: latestProviderEvidenceOk,
+    message: latestProviderRun
+      ? `Latest provider sandbox validation evidence is ${latestProviderRun.status}.`
+      : 'No provider sandbox validation evidence is recorded locally; production freshness gates enforce this before launch.',
+    details: latestProviderRun && !latestProviderEvidenceOk
+      ? { recordedAt: latestProviderRun.recordedAt ?? null, runId: latestProviderRun.id ?? null, status: latestProviderRun.status }
+      : undefined,
   });
   checks.set('provider_validation_schedules_audited', {
     id: 'provider_validation_schedules_audited',

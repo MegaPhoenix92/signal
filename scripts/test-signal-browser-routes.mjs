@@ -852,6 +852,7 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assertTextIncludes(adminIntegrationsText, 'Run due', 'admin integrations should expose due provider validation execution');
   assertTextIncludes(adminIntegrationsText, 'Run all now', 'admin integrations should expose forced provider validation execution');
   assertTextIncludes(adminIntegrationsText, 'integrations run-scheduled', 'admin integrations should expose scheduled validation CLI commands');
+  assertTextIncludes(adminIntegrationsText, 'integrations refresh-evidence', 'admin integrations should expose explicit evidence refresh CLI commands');
   assertTextIncludes(adminIntegrationsText, 'integrations schedule', 'admin integrations should expose provider validation schedule CLI commands');
   assertTextIncludes(adminIntegrationsText, 'integrations evidence-export', 'admin integrations should expose provider evidence export CLI commands');
   assertTextIncludes(adminIntegrationsText, 'integrations evidence-import', 'admin integrations should expose provider evidence import CLI commands');

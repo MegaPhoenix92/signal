@@ -10,12 +10,14 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   bootstrapState,
+  doctor,
   drainJobs,
   enforceStateRetention,
   handlePaymentWebhook,
   jobClaimable,
   launchGateReport,
   loadState,
+  operationsHealthReport,
   providerLaunchMatrixReport,
   providerReadiness,
   providerValidationSchedulesDue,
@@ -815,6 +817,55 @@ test('Launch freshness blocks stale sandbox evidence only in production context'
   const sandboxGate = productionGate.gates.find((gate) => gate.id === 'provider_sandbox_evidence');
   assert.equal(sandboxGate.status, 'blocked');
   assert(sandboxGate.freshnessBlockers.some((blocker) => blocker.includes('sandbox evidence')));
+});
+
+test('Launch freshness surfaces missing and blocked provider evidence across launch, operations, and doctor reports', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-evidence-blockers-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const env = productionEnv();
+  const provider = providerReadiness(env);
+  const backend = backendReadiness({ env, statePath });
+  let state = await loadState({ statePath });
+
+  const missingGate = launchGateReport(state, { backend, env, provider, statePath });
+  assert(missingGate.freshnessBlockers.some((blocker) => blocker.id === 'sandbox_evidence_missing'));
+  const missingSandboxGate = missingGate.gates.find((gate) => gate.id === 'provider_sandbox_evidence');
+  assert.equal(missingSandboxGate.status, 'blocked');
+  assert(missingSandboxGate.freshnessBlockers.some((blocker) => blocker.includes('No provider sandbox validation evidence')));
+
+  const missingProviderLaunch = providerLaunchMatrixReport(state, { backend, env, provider, statePath });
+  assert(missingProviderLaunch.freshnessBlockers.some((blocker) => blocker.id === 'sandbox_evidence_missing'));
+  assert(missingProviderLaunch.rows.find((row) => row.id === 'stripe')?.freshnessBlockers.some((blocker) => blocker.includes('No provider sandbox validation evidence')));
+
+  const missingOperations = operationsHealthReport(state, { backend, env, statePath });
+  assert(missingOperations.issues.some((issue) => issue.includes('No provider sandbox validation evidence')));
+  assert(missingOperations.summary.freshnessBlocked > 0);
+  assert.equal(doctor(state).checks.find((check) => check.id === 'provider_validation_latest_evidence')?.ok, true);
+
+  const blockedRun = passedProviderValidationRun({ id: 'pvr_blocked', recordedAt: new Date().toISOString() });
+  blockedRun.ok = false;
+  blockedRun.status = 'blocked';
+  blockedRun.summary = { blocked: blockedRun.providers.length, failed: 0, passed: 0, total: blockedRun.providers.length };
+  blockedRun.providers = blockedRun.providers.map((providerRow) => ({
+    ...providerRow,
+    checks: [],
+    missingRequired: [`${providerRow.id.toUpperCase()}_SANDBOX_TOKEN`],
+    status: 'blocked',
+  }));
+  state.providerValidationRuns = [blockedRun];
+  await saveState(state, { statePath });
+  state = await loadState({ statePath });
+
+  const blockedGate = launchGateReport(state, { backend, env, provider, statePath });
+  assert(blockedGate.freshnessBlockers.some((blocker) => blocker.id === 'sandbox_evidence_not_passed'));
+  const blockedDoctorCheck = doctor(state).checks.find((check) => check.id === 'provider_validation_latest_evidence');
+  assert.equal(blockedDoctorCheck?.ok, false);
+  assert.equal(blockedDoctorCheck?.details?.status, 'blocked');
 });
 
 test('Provider launch rejects overdue provider validation schedules beyond grace', async (t) => {

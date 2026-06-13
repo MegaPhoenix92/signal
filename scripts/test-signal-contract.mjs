@@ -464,6 +464,13 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
   assert.equal(cliScheduledSkip.ok, true);
   assert.equal(cliScheduledSkip.skipped, true);
   assert.equal(cliScheduledSkip.recorded, null);
+  const cliRefreshDryRun = await runCli(['integrations', 'refresh-evidence', '--dry-run', '--json'], blankSandboxProviderEnv);
+  assert.equal(cliRefreshDryRun.forced, true);
+  assert.equal(cliRefreshDryRun.skipped, false);
+  assert.equal(cliRefreshDryRun.recorded, null);
+  assert.equal(cliRefreshDryRun.evidence, null);
+  assert(Array.isArray(cliRefreshDryRun.dueSchedules));
+  assert.equal(cliRefreshDryRun.sandbox.summary.total, 4);
   const cliJobsList = await runCli(['jobs', '--json']);
   assert(cliJobsList.jobs.some((job) => job.queue === 'provider_validation' && job.type === 'provider.sandbox.scheduled'));
   const cliProviderValidationNoop = await runCli(['jobs', 'run', 'provider_validation', '--limit', '1', '--json']);
@@ -1361,9 +1368,10 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert(!launchPackageJson.includes('super_secret_session_value'), 'launch package must not serialize session secrets');
     assert(!launchPackageJson.includes('sk_test_preflight_secret'), 'launch package must not serialize Stripe secret keys');
     assert(!launchPackageJson.includes('sendgrid_preflight_key'), 'launch package must not serialize email provider tokens');
-    const launchPackageVerification = await runCli(['launch-gate', 'verify-package', launchPackagePath, '--json'], blankSandboxProviderEnv);
-    assert.equal(launchPackageVerification.ok, true);
-    assert.equal(launchPackageVerification.verification.summary.artifactDigest, launchPackage.artifactDigest);
+    await assert.rejects(
+      runCli(['launch-gate', 'verify-package', launchPackagePath, '--json'], blankSandboxProviderEnv),
+      /LAUNCH_PACKAGE_INVALID|freshness blockers present: sandbox_evidence_not_passed/,
+    );
 
     const tamperedLaunchPackagePath = path.join(tempDir, 'signal-launch-evidence-tampered.json');
     await fs.writeFile(tamperedLaunchPackagePath, JSON.stringify({ ...launchPackage, generatedAt: '2026-01-01T00:00:00.000Z' }, null, 2), 'utf8');

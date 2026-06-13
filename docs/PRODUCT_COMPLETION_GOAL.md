@@ -31,6 +31,7 @@ Signal's local SaaS completion goal is audited through the admin CLI and the adm
 - `models`
 - `governance`
 - `integrations`
+  - `integrations refresh-evidence --save-evidence ./signal-provider-evidence.json --json`
 - `token-vault verify`
 - `token-vault rotate`
 - `accounts`
