@@ -1,4 +1,4 @@
-import { useEffect, type CSSProperties, type DependencyList, type ReactNode } from 'react';
+import { useEffect, useState, type CSSProperties, type DependencyList, type ReactNode } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -38,6 +38,7 @@ import {
   type RedactionRule,
   type Signal,
   type SignalAppData,
+  type SignalMutationAction,
   type SignalHandoff,
   type SourceMessage,
   type SuppressionRule,
@@ -46,7 +47,7 @@ import {
   type StateSummary,
   type UserInvite,
 } from '../signalData';
-import type { Accent, AppMode, DataSource } from './appTypes';
+import type { Accent, AppMode, DataSource, MutationOutcome } from './appTypes';
 
 export type { Accent } from './appTypes';
 
@@ -173,6 +174,95 @@ export function ProductHeader({ active }: { active: AppMode }) {
         <a href="#top">Public</a>
       </nav>
     </header>
+  );
+}
+
+export function BusyLabel({ busy, busyText, children }: { busy: boolean; busyText: string; children: ReactNode }) {
+  return (
+    <>
+      {busy && <RefreshCw className="busy-spinner" size={15} aria-hidden="true" />}
+      <span className="button-label">{busy ? busyText : children}</span>
+    </>
+  );
+}
+
+export function InlineError({ message }: { message?: string | null }) {
+  if (!message) {
+    return null;
+  }
+
+  return (
+    <p className="form-message is-error inline-mutation-error" role="alert">
+      {message}
+    </p>
+  );
+}
+
+type MutationHandler = (action: SignalMutationAction, args: Record<string, unknown>) => Promise<MutationOutcome>;
+
+export type MutationFeedback = {
+  errorFor: (...keys: string[]) => string | null;
+  isPending: (key: string) => boolean;
+  pendingKey: string | null;
+  run: (key: string, action: SignalMutationAction, args: Record<string, unknown>) => Promise<MutationOutcome>;
+};
+
+export function useMutationFeedback(mutate: MutationHandler): MutationFeedback {
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  async function run(key: string, action: SignalMutationAction, args: Record<string, unknown>) {
+    setPendingKey(key);
+    // Clear prior errors on each new mutation. Actions are globally serialized
+    // (isMutating disables all controls during a mutation), so only the most
+    // recent failure should surface — this avoids a stale sibling error lingering
+    // in a shared InlineError region after a later action succeeds.
+    setErrors({});
+
+    try {
+      const outcome = await mutate(action, args);
+      if (!outcome.ok) {
+        setErrors((current) => ({ ...current, [key]: outcome.error }));
+      }
+      return outcome;
+    } finally {
+      setPendingKey((current) => current === key ? null : current);
+    }
+  }
+
+  return {
+    errorFor: (...keys: string[]) => keys.map((key) => errors[key]).find(Boolean) ?? null,
+    isPending: (key: string) => pendingKey === key,
+    pendingKey,
+    run,
+  };
+}
+
+export function MutationButton({
+  action,
+  actionKey,
+  args,
+  busyText,
+  children,
+  className = 'inline-action',
+  disabled = false,
+  feedback,
+}: {
+  action: SignalMutationAction;
+  actionKey: string;
+  args: Record<string, unknown>;
+  busyText: string;
+  children: ReactNode;
+  className?: string;
+  disabled?: boolean;
+  feedback: MutationFeedback;
+}) {
+  const busy = feedback.isPending(actionKey);
+
+  return (
+    <button className={className} disabled={disabled || busy} type="button" onClick={() => void feedback.run(actionKey, action, args)}>
+      <BusyLabel busy={busy} busyText={busyText}>{children}</BusyLabel>
+    </button>
   );
 }
 
