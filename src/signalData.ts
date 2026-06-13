@@ -82,7 +82,7 @@ export type UserInvite = {
   role: UserRole;
   team?: string | null;
   status: InviteStatus;
-  claimCode: string;
+  claimCode?: string | null;
   claimCodeDigest?: string | null;
   invitedByUserId: string;
   createdAt: string;
@@ -2627,7 +2627,37 @@ export type SignalStateResponse = {
   doctor: DoctorReport;
 };
 
-export const signalData = seedData as SignalAppData;
+function inviteClaimCodeIsClientSafe(claimCode?: string | null) {
+  return !claimCode || /^claimed-[a-f0-9]{24}$/i.test(claimCode);
+}
+
+function redactBundledClientSecrets(data: SignalAppData): SignalAppData {
+  return {
+    ...data,
+    invites: (data.invites ?? []).map((invite) => {
+      if (inviteClaimCodeIsClientSafe(invite.claimCode)) {
+        return invite;
+      }
+      const { claimCode: _removed, ...rest } = invite;
+      return rest;
+    }),
+  };
+}
+
+function collectClientExposureSecretPaths(data: SignalAppData): string[] {
+  const paths: string[] = [];
+  (data.invites ?? []).forEach((invite, index) => {
+    if (!inviteClaimCodeIsClientSafe(invite.claimCode)) {
+      paths.push(`invites[${index}].claimCode`);
+    }
+  });
+  if (localAgentHandoffStringLooksUnsafe(JSON.stringify(data))) {
+    paths.push('serialized_state');
+  }
+  return paths;
+}
+
+export const signalData = redactBundledClientSecrets(seedData as SignalAppData);
 
 function withFallbackModelGovernancePolicies(data: SignalAppData): SignalAppData {
   if (data.modelGovernancePolicies?.length) {
@@ -6064,8 +6094,19 @@ export function fallbackProductionEnvAudit(
   };
 }
 
+function localAgentHandoffStringLooksUnsafe(text: string) {
+  return (
+    /sk_(?:live|test)_[A-Za-z0-9_]{8,}/.test(text) ||
+    /SG\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/.test(text) ||
+    /ya29\.[A-Za-z0-9_-]{20,}/.test(text) ||
+    /\b[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PRIVATE_KEY|API_KEY|ACCESS_KEY)[A-Z0-9_]*=(?!<)[^\s]{8,}/i.test(text) ||
+    /(?:access_token|refresh_token|client_secret|api_key)=((?!<)[^&\s]{8,})/i.test(text)
+  );
+}
+
 export function doctorLocalState(data: SignalAppData): DoctorReport {
   const summary = summarizeLocalState(data);
+  const clientExposurePaths = collectClientExposureSecretPaths(data);
   const checks: DoctorCheck[] = [
     {
       id: 'active_admin',
@@ -6279,9 +6320,9 @@ export function doctorLocalState(data: SignalAppData): DoctorReport {
     },
     {
       id: 'no_local_secrets',
-      ok: true,
+      ok: clientExposurePaths.length === 0,
       message: 'Local fallback state does not contain secret-like fields.',
-      details: [],
+      details: clientExposurePaths,
     },
     {
       id: 'active_session_user',
@@ -6313,16 +6354,6 @@ function localAgentHandoffPriority(id: string, status: string) {
     return order[id] ?? 90;
   }
   return 100;
-}
-
-function localAgentHandoffStringLooksUnsafe(text: string) {
-  return (
-    /sk_(?:live|test)_[A-Za-z0-9_]{8,}/.test(text) ||
-    /SG\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/.test(text) ||
-    /ya29\.[A-Za-z0-9_-]{20,}/.test(text) ||
-    /\b[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PRIVATE_KEY|API_KEY|ACCESS_KEY)[A-Z0-9_]*=(?!<)[^\s]{8,}/i.test(text) ||
-    /(?:access_token|refresh_token|client_secret|api_key)=((?!<)[^&\s]{8,})/i.test(text)
-  );
 }
 
 function localAgentActionFromGate(gate: {

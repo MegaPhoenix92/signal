@@ -42,6 +42,7 @@ import {
   recordWebhookIngestOutcome,
   recordProviderSandboxValidation,
   registerTenantWorkspace,
+  redactClientStateSecrets,
   resolveStatePath,
   schedulerHandoffReport,
   scopeStateForActor,
@@ -315,10 +316,11 @@ async function authenticatedState(req, body = {}) {
 
 function statePayloadForActor(state, actorOrUserId) {
   const scopedState = scopeStateForActor(state, actorOrUserId);
+  const clientState = redactClientStateSecrets(scopedState);
   return {
-    state: scopedState,
-    summary: summarizeState(scopedState, statePath),
-    doctor: doctor(scopedState),
+    state: clientState,
+    summary: summarizeState(clientState, statePath),
+    doctor: doctor(clientState),
   };
 }
 
@@ -1129,6 +1131,7 @@ async function route(req, res) {
     const body = await readBody(req);
     const auth = await requestStateAuth(req, body);
     const result = await switchSession(body.userId, { actorUserId: auth.actorUserId, statePath });
+    const payload = statePayloadForActor(result.state, result.actor.id);
     sendJson(res, 200, {
       ok: true,
       action: result.action,
@@ -1141,10 +1144,10 @@ async function route(req, res) {
         team: result.actor.team ?? null,
       },
       details: result.details,
-      state: result.state,
-      summary: result.summary,
+      state: payload.state,
+      summary: payload.summary,
       auth: auth.auth,
-      doctor: doctor(result.state),
+      doctor: payload.doctor,
     });
     return;
   }
@@ -1330,10 +1333,11 @@ async function route(req, res) {
     const { auth, state } = await authenticatedState(req, body);
     requireAdminRequestAuth(state, auth, 'bootstrap');
     const result = await bootstrapState({ force: Boolean(body.force), statePath });
+    const payload = statePayloadForActor(result.state, auth.actorUserId);
     sendJson(res, 200, {
       ok: true,
-      state: result.state,
-      summary: result.summary,
+      state: payload.state,
+      summary: payload.summary,
     });
     return;
   }
@@ -1351,6 +1355,7 @@ async function route(req, res) {
     }
     const body = await readBody(req);
     const result = await claimUserInvite(body, { statePath });
+    const payload = statePayloadForActor(result.state, result.actor.id);
     sendJson(res, 200, {
       ok: true,
       action: result.action,
@@ -1361,9 +1366,9 @@ async function route(req, res) {
         role: result.actor.role,
       },
       details: result.details,
-      state: result.state,
-      summary: result.summary,
-      doctor: doctor(result.state),
+      state: payload.state,
+      summary: payload.summary,
+      doctor: payload.doctor,
     });
     return;
   }
@@ -1371,6 +1376,7 @@ async function route(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/registration') {
     const body = await readBody(req);
     const result = await registerTenantWorkspace(body, { statePath });
+    const payload = statePayloadForActor(result.state, result.actor.id);
     sendJson(res, 200, {
       ok: true,
       action: result.action,
@@ -1381,9 +1387,9 @@ async function route(req, res) {
         role: result.actor.role,
       },
       details: result.details,
-      state: result.state,
-      summary: result.summary,
-      doctor: doctor(result.state),
+      state: payload.state,
+      summary: payload.summary,
+      doctor: payload.doctor,
     });
     return;
   }

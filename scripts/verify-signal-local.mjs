@@ -12,6 +12,7 @@ import {
   bootstrapState,
   cancelSubscription,
   claimUserInvite,
+  clientExposureSecretPaths,
   completeMailboxConnection,
   completeMailboxConnectionFromOAuthCallback,
   compTenant,
@@ -42,6 +43,7 @@ import {
   providerReadiness,
   providerValidationSchedulesDue,
   recordProviderSandboxValidation,
+  redactClientStateSecrets,
   recordSignalFeedback,
   resolveIncidentNote,
   replayMailbox,
@@ -1960,6 +1962,15 @@ assert(state.jobs.some((job) => job.queue === 'governance'), 'governance jobs sh
 assert(state.jobs.some((job) => job.type === 'mailbox.watch.setup'), 'provider watch setup jobs should be recorded');
 assert(state.jobs.some((job) => job.type === 'gmail.watch.notification'), 'Gmail watch notification jobs should be queued');
 assert(state.jobs.some((job) => job.type === 'outlook.watch.notification'), 'Outlook watch notification jobs should be queued');
+
+const exposedInvitePaths = clientExposureSecretPaths(state);
+const redactedState = redactClientStateSecrets(state);
+assert.equal(clientExposureSecretPaths(redactedState).length, 0, 'client state redaction should remove pending invite claim codes');
+if (exposedInvitePaths.length > 0) {
+  const exposedInvite = (state.invites ?? []).find((invite) => invite.claimCode && !/^claimed-[a-f0-9]{24}$/i.test(invite.claimCode));
+  assert(exposedInvite?.claimCode, 'local CLI state should retain pending invite claim codes for operator workflows');
+  assert(!JSON.stringify(redactedState).includes(exposedInvite.claimCode), 'redacted client state should not serialize pending claim codes');
+}
 
 await fs.rm(statePath, { force: true });
 await fs.rm(vaultPath, { force: true });

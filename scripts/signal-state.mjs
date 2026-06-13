@@ -2052,6 +2052,38 @@ export function sensitiveKeyPaths(value, prefix = '') {
   });
 }
 
+export function inviteClaimCodeIsClientSafe(claimCode) {
+  return !claimCode || /^claimed-[a-f0-9]{24}$/i.test(String(claimCode));
+}
+
+export function clientExposureSecretPaths(state) {
+  const paths = [];
+  (state.invites ?? []).forEach((invite, index) => {
+    if (!inviteClaimCodeIsClientSafe(invite?.claimCode)) {
+      paths.push(`invites[${index}].claimCode`);
+    }
+  });
+  return paths;
+}
+
+export function redactClientStateSecrets(state) {
+  if (!state || typeof state !== 'object') {
+    return state;
+  }
+  const redacted = structuredClone(state);
+  if (Array.isArray(redacted.invites)) {
+    redacted.invites = redacted.invites.map((invite) => {
+      if (!invite || typeof invite !== 'object' || inviteClaimCodeIsClientSafe(invite.claimCode)) {
+        return invite;
+      }
+      const nextInvite = { ...invite };
+      delete nextInvite.claimCode;
+      return nextInvite;
+    });
+  }
+  return redacted;
+}
+
 export function doctor(state) {
   const sensitivePaths = sensitiveKeyPaths(state);
   const checks = [
