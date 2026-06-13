@@ -75,8 +75,8 @@ async function stopProcess(child) {
   closeStreams();
 }
 
-async function waitForHttp(url, output, label) {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+async function waitForHttp(url, output, label, { attempts = 80 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(500) });
       if (response.ok) {
@@ -161,11 +161,14 @@ async function startChrome({ cdpPort, profileDir }) {
   const args = [
     '--headless=new',
     '--disable-background-networking',
+    '--disable-crash-reporter',
     '--disable-extensions',
     '--disable-gpu',
+    '--disable-dev-shm-usage',
     '--no-default-browser-check',
     '--no-first-run',
     '--remote-allow-origins=*',
+    '--remote-debugging-address=127.0.0.1',
     `--remote-debugging-port=${cdpPort}`,
     `--user-data-dir=${profileDir}`,
     'about:blank',
@@ -178,7 +181,7 @@ async function startChrome({ cdpPort, profileDir }) {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const output = processOutputCollector(child);
-  await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, output, 'Headless Chrome CDP');
+  await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, output, 'Headless Chrome CDP', { attempts: 250 });
   return { child, output };
 }
 
