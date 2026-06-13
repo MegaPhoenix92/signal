@@ -370,9 +370,9 @@ export function verifyStripeWebhookSignature(rawBody, signatureHeader, endpointS
   const body = requireString(rawBody, 'raw webhook body');
   const secret = requireString(endpointSecret, 'Stripe webhook endpoint secret');
   const parsed = parseStripeSignatureHeader(signatureHeader);
-  const ageSeconds = Math.abs(Math.floor(nowMs / 1000) - parsed.timestamp);
+  const ageSeconds = Math.floor(nowMs / 1000) - parsed.timestamp;
 
-  if (ageSeconds > toleranceSeconds) {
+  if (ageSeconds > toleranceSeconds || ageSeconds < 0) {
     throw new PaymentProviderError('Stripe webhook signature timestamp is outside the allowed tolerance.', {
       code: 'PAYMENT_WEBHOOK_TIMESTAMP_STALE',
       details: { ageSeconds, toleranceSeconds, timestamp: parsed.timestamp },

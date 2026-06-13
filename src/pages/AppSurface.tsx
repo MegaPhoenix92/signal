@@ -305,6 +305,14 @@ function adminTabHash(tab: AdminTab) {
   return `#admin/${tab}`;
 }
 
+function tenantTeamUser(users: User[], tenantId: string, team: string) {
+  return users.find((user) => user.tenantId === tenantId && user.team === team);
+}
+
+function resolveTeamCheckoutPlanId(data: SignalAppData, tenantPlanId?: string) {
+  return data.plans.find((plan) => plan.id === 'plan_team')?.id ?? tenantPlanId ?? data.plans[0]?.id ?? 'plan_team';
+}
+
 function validEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
@@ -2010,6 +2018,9 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
     );
   }
   const tenantUsers = users.filter((user) => user.tenantId === tenant.id);
+  const salesDemoUser = tenantTeamUser(users, tenant.id, 'sales');
+  const productDemoUser = tenantTeamUser(users, tenant.id, 'product');
+  const checkoutTeamPlanId = resolveTeamCheckoutPlanId(data, tenant.planId);
   const tenantMemberships = membershipsForTenant(data, tenant.id);
   const activeTenantMemberships = activeMembershipsForTenant(data, tenant.id);
   const currentMembership = membershipForUser(data, currentUser?.id, tenant.id);
@@ -2403,7 +2414,7 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
               <button className="inline-action" disabled={!canMutateBilling || !subscription} type="button" onClick={() => mutate('payments.portal', { tenantId: tenant.id })}>
                 Open billing portal
               </button>
-              <button className="inline-action" disabled={!canMutateBilling} type="button" onClick={() => mutate('payments.checkout', { planId: 'plan_team', tenantId: tenant.id })}>
+              <button className="inline-action" disabled={!canMutateBilling} type="button" onClick={() => mutate('payments.checkout', { planId: checkoutTeamPlanId, tenantId: tenant.id })}>
                 Start team checkout
               </button>
             </div>
@@ -2685,6 +2696,9 @@ function AdminConsole({ liveState }: { liveState: LiveState }) {
     );
   }
   const plan = data.plans.find((item) => item.id === tenant.planId);
+  const salesDemoUser = tenantTeamUser(data.users, tenant.id, 'sales');
+  const productDemoUser = tenantTeamUser(data.users, tenant.id, 'product');
+  const checkoutTeamPlanId = resolveTeamCheckoutPlanId(data, tenant.planId);
   const subscription = data.subscriptions.find((item) => item.tenantId === tenant.id);
   const reauthCount = data.mailboxes.filter((mailbox) => mailbox.status === 'needs_reauth').length;
   const enabledFlows = data.emailFlows.filter((flow) => flow.status === 'enabled').length;
@@ -3327,14 +3341,14 @@ function AdminConsole({ liveState }: { liveState: LiveState }) {
                 })}
               />
               <div className="button-row">
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('users.role', { role: 'admin', userId: 'usr_sales' })}>
-                  Promote Mia
+                <button className="inline-action" disabled={isMutating || source !== 'api' || !salesDemoUser} type="button" onClick={() => salesDemoUser && mutate('users.role', { role: 'admin', userId: salesDemoUser.id })}>
+                  Promote {salesDemoUser?.name ?? 'sales member'}
                 </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('users.disable', { userId: 'usr_product' })}>
-                  Disable Priya
+                <button className="inline-action" disabled={isMutating || source !== 'api' || !productDemoUser} type="button" onClick={() => productDemoUser && mutate('users.disable', { userId: productDemoUser.id })}>
+                  Disable {productDemoUser?.name ?? 'product member'}
                 </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('users.activate', { userId: 'usr_product' })}>
-                  Reactivate Priya
+                <button className="inline-action" disabled={isMutating || source !== 'api' || !productDemoUser} type="button" onClick={() => productDemoUser && mutate('users.activate', { userId: productDemoUser.id })}>
+                  Reactivate {productDemoUser?.name ?? 'product member'}
                 </button>
               </div>
               <CommandStrip commands={['npm run admin -- users --json', 'npm run admin -- users role usr_sales admin']} />
@@ -3425,7 +3439,7 @@ function AdminConsole({ liveState }: { liveState: LiveState }) {
             <article className="ops-panel">
               <PanelHead icon={Inbox} title="Source governance" action="Provider source health" />
               <div className="button-row">
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.connect-url', { ownerUserId: 'usr_sales', provider: 'gmail', tenantId: tenant.id })}>
+                <button className="inline-action" disabled={isMutating || source !== 'api' || !salesDemoUser} type="button" onClick={() => salesDemoUser && mutate('mailboxes.connect-url', { ownerUserId: salesDemoUser.id, provider: 'gmail', tenantId: tenant.id })}>
                   Connect Gmail
                 </button>
                 <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.connect-url', { ownerUserId: 'usr_admin', provider: 'outlook', tenantId: tenant.id })}>
@@ -3559,7 +3573,7 @@ function AdminConsole({ liveState }: { liveState: LiveState }) {
                       <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('email-flows.route', { flowId: flow.id, routeTo: 'founder', ownerUserId: 'usr_admin', note: 'Founder review route' })}>
                         Founder
                       </button>
-                      <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('email-flows.route', { flowId: flow.id, routeTo: 'crm', ownerUserId: 'usr_sales', note: 'CRM follow-up route' })}>
+                      <button className="inline-action" disabled={isMutating || source !== 'api' || !salesDemoUser} type="button" onClick={() => salesDemoUser && mutate('email-flows.route', { flowId: flow.id, routeTo: 'crm', ownerUserId: salesDemoUser.id, note: 'CRM follow-up route' })}>
                         CRM
                       </button>
                     </>
@@ -4040,7 +4054,7 @@ function AdminConsole({ liveState }: { liveState: LiveState }) {
                 <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.override', { tenantId: tenant.id, type: 'support_credit', reason: 'Onboarding credit', amountCents: 2500 })}>
                   Support credit
                 </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.override', { tenantId: tenant.id, type: 'manual_entitlement', reason: 'Support access', planId: 'plan_team' })}>
+                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.override', { tenantId: tenant.id, type: 'manual_entitlement', reason: 'Support access', planId: checkoutTeamPlanId })}>
                   Manual access
                 </button>
                 <button className="inline-action" disabled={isMutating || source !== 'api' || !activeBillingOverrides[0]} type="button" onClick={() => activeBillingOverrides[0] && mutate('payments.override-revoke', { overrideId: activeBillingOverrides[0].id, reason: 'Resolved locally' })}>
@@ -4093,7 +4107,7 @@ function AdminConsole({ liveState }: { liveState: LiveState }) {
                 rows={lifecycleNoticeRows(paymentLifecycleNotices, 8)}
               />
               <div className="button-row">
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.checkout', { planId: 'plan_team', tenantId: tenant.id })}>
+                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.checkout', { planId: checkoutTeamPlanId, tenantId: tenant.id })}>
                   Create team checkout
                 </button>
                 <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.portal', { tenantId: tenant.id })}>
@@ -4648,17 +4662,17 @@ function AdminConsole({ liveState }: { liveState: LiveState }) {
                 <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('notifications.digest-run', { tenantId: tenant.id })}>
                   Run tenant digest
                 </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('notifications.digest-run', { tenantId: tenant.id, userId: 'usr_sales' })}>
-                  Run Mia digest
+                <button className="inline-action" disabled={isMutating || source !== 'api' || !salesDemoUser} type="button" onClick={() => salesDemoUser && mutate('notifications.digest-run', { tenantId: tenant.id, userId: salesDemoUser.id })}>
+                  Run {salesDemoUser?.name ?? 'sales'} digest
                 </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('notifications.preference', { patch: { digestCadence: 'off' }, userId: 'usr_product' })}>
-                  Pause Priya digest
+                <button className="inline-action" disabled={isMutating || source !== 'api' || !productDemoUser} type="button" onClick={() => productDemoUser && mutate('notifications.preference', { patch: { digestCadence: 'off' }, userId: productDemoUser.id })}>
+                  Pause {productDemoUser?.name ?? 'product'} digest
                 </button>
                 <button className="inline-action" disabled={isMutating || source !== 'api' || !queuedEmailDeliveries[0]} type="button" onClick={() => mutate('notifications.delivery-status', { messageId: queuedEmailDeliveries[0]?.id, status: 'sent', reason: 'Accepted by local outbound email adapter' })}>
                   Send first queued
                 </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('notifications.unsubscribe', { userId: 'usr_product' })}>
-                  Unsubscribe Priya email
+                <button className="inline-action" disabled={isMutating || source !== 'api' || !productDemoUser} type="button" onClick={() => productDemoUser && mutate('notifications.unsubscribe', { userId: productDemoUser.id })}>
+                  Unsubscribe {productDemoUser?.name ?? 'product'} email
                 </button>
               </div>
               <div className="digest-run-stack">
@@ -4705,7 +4719,7 @@ function AdminConsole({ liveState }: { liveState: LiveState }) {
             </p>
             <div className="cli-grid">
               {[
-                'npm run admin:bootstrap -- --force',
+                'npm run admin:bootstrap -- --force --yes',
                 'npm run admin -- status --json',
                 'SIGNAL_SESSION_SECRET=<local-session-secret> npm run admin -- session token usr_admin --json',
                 'npm run admin -- session revoke <sessionId|digest|token> --actor usr_admin',

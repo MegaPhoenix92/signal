@@ -14,7 +14,7 @@ import {
   issueSessionToken,
   registerTenantWorkspace,
 } from './signal-state.mjs';
-import { signEmailWebhookPayload, signSendGridWebhookPayload } from './signal-email-provider.mjs';
+import { parseSignedEmailWebhook, signEmailWebhookPayload, signSendGridWebhookPayload, verifySendGridWebhookSignature } from './signal-email-provider.mjs';
 import { signStripeWebhookPayload } from './signal-payment-provider.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -368,4 +368,28 @@ test('signed webhook verifiers reject tampered Stripe, email, and SendGrid signa
   });
   assert.equal(tamperedSendGrid.status, 401);
   assert.equal((await parseJsonResponse(tamperedSendGrid)).code, 'EMAIL_WEBHOOK_SIGNATURE_INVALID');
+});
+
+test('email webhook verification rejects future-dated signatures', () => {
+  const body = JSON.stringify({ id: 'evt_future_email', messageId: 'msg_future', status: 'sent' });
+  const secret = 'email_future_timestamp_secret';
+  const futureTimestamp = Math.floor(Date.now() / 1000) + 120;
+  const signature = signEmailWebhookPayload(body, secret, { timestamp: futureTimestamp });
+
+  assert.throws(
+    () => parseSignedEmailWebhook(body, signature, secret),
+    (error) => error.code === 'EMAIL_WEBHOOK_SIGNATURE_EXPIRED',
+  );
+});
+
+test('SendGrid webhook verification rejects future-dated signatures', () => {
+  const body = JSON.stringify([{ event: 'delivered', sg_event_id: 'sg_future' }]);
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const futureTimestamp = Math.floor(Date.now() / 1000) + 120;
+  const signed = signSendGridWebhookPayload(body, privateKey.export({ format: 'pem', type: 'pkcs8' }), { timestamp: futureTimestamp });
+
+  assert.throws(
+    () => verifySendGridWebhookSignature(body, signed.signatureHeader, signed.timestampHeader, publicKey.export({ format: 'pem', type: 'spki' })),
+    (error) => error.code === 'EMAIL_WEBHOOK_SIGNATURE_EXPIRED',
+  );
 });

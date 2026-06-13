@@ -1989,6 +1989,16 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(paidPayment.payload.details.status, 'active');
   });
 
+  await t.test('payment webhooks reject negative amountDueCents', async () => {
+    const negative = await mutate(adminToken, 'payments.webhook', {
+      amountDueCents: -100,
+      subscriptionId: 'sub_demo',
+      type: 'invoice.paid',
+    });
+    assert.equal(negative.status, 400);
+    assert.equal(negative.payload.code, 'ARG_INVALID');
+  });
+
   await t.test('local worker mutation is available without consuming demo queues', async () => {
     const run = await mutate(adminToken, 'jobs.run', {
       limit: 1,
@@ -2292,4 +2302,39 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(unsubscribe.status, 200);
     assert.equal(unsubscribe.payload.action, 'notifications.unsubscribe');
   });
+});
+
+test('bootstrap --force requires --yes and backs up existing state', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-bootstrap-force-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const cliEnv = {
+    ...process.env,
+    SIGNAL_ADMIN_STATE: statePath,
+  };
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  await fs.writeFile(statePath, '{"marker":"existing"}', 'utf8');
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [path.join(rootDir, 'scripts', 'signal-admin.mjs'), 'bootstrap', '--force', '--json'], {
+      cwd: rootDir,
+      env: cliEnv,
+      maxBuffer: 10 * 1024 * 1024,
+    }),
+    /BOOTSTRAP_CONFIRMATION_REQUIRED/,
+  );
+
+  const { stdout } = await execFileAsync(process.execPath, [path.join(rootDir, 'scripts', 'signal-admin.mjs'), 'bootstrap', '--force', '--yes', '--json'], {
+    cwd: rootDir,
+    env: cliEnv,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  const result = JSON.parse(stdout);
+  assert.equal(result.ok, true);
+  assert.ok(result.backupPath);
+  assert.match(result.backupPath, /\.backup-/);
 });

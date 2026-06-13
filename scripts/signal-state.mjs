@@ -253,6 +253,15 @@ export async function exists(filePath) {
   }
 }
 
+async function backupStateFileIfPresent(statePath) {
+  if (isHttpResource(statePath) || !(await exists(statePath))) {
+    return null;
+  }
+  const backupPath = `${statePath}.backup-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}`;
+  await fs.copyFile(statePath, backupPath);
+  return backupPath;
+}
+
 export async function bootstrapState({ force = false, statePath } = {}) {
   const resolvedStatePath = resolveStatePath(statePath);
   return withStateMutationLock(resolvedStatePath, async () => {
@@ -264,6 +273,7 @@ export async function bootstrapState({ force = false, statePath } = {}) {
       });
     }
 
+    const backupPath = force ? await backupStateFileIfPresent(resolvedStatePath) : null;
     const seed = await readJson(seedPath);
     const stamped = normalizeState({
       ...seed,
@@ -280,6 +290,7 @@ export async function bootstrapState({ force = false, statePath } = {}) {
     }
     await writeJson(resolvedStatePath, stamped, { ifMatch });
     return {
+      backupPath,
       state: stamped,
       statePath: resolvedStatePath,
       summary: summarizeState(stamped, resolvedStatePath),
@@ -6842,6 +6853,20 @@ function requirePositiveInteger(value, label, usage) {
   return numberValue;
 }
 
+function requireNonNegativeInteger(value, label, usage) {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue) || numberValue < 0) {
+    throw new SignalStateError(`Invalid ${label}: ${value}`, {
+      code: 'ARG_INVALID',
+      details: { label, usage, value },
+    });
+  }
+  return numberValue;
+}
+
 function findById(collection, id, label) {
   const item = collection.find((candidate) => candidate.id === id);
   if (!item) {
@@ -10934,6 +10959,7 @@ export async function createMailboxConnectionSession({ tenantId, provider, owner
         callbackPath: `/api/oauth/${sourceProvider}/callback`,
         localCallbackUrl: localOAuthCallbackUrl({ provider: sourceProvider, oauthState, code: `local_${sessionId}` }),
         oauthStateDigest: oauthStateDigest(oauthState),
+        oauthStateNonce: oauthPayload.nonce,
         oauthStateStatus: 'issued',
         redirectUri,
         url: providerAuthorizationUrl({ provider: sourceProvider, oauthState, selectedScopes }),
@@ -11064,6 +11090,13 @@ export async function completeMailboxConnectionFromOAuthCallback(provider, { cod
       if (!expectedDigest || expectedDigest !== receivedDigest) {
         throw new SignalStateError('OAuth callback state does not match the connection session.', {
           code: 'OAUTH_STATE_SESSION_MISMATCH',
+          status: 401,
+          details: { sessionId: session.id },
+        });
+      }
+      if (!session.oauthStateNonce || payload.nonce !== session.oauthStateNonce) {
+        throw new SignalStateError('OAuth callback nonce does not match the connection session.', {
+          code: 'OAUTH_STATE_NONCE_MISMATCH',
           status: 401,
           details: { sessionId: session.id },
         });
@@ -14072,6 +14105,11 @@ export async function handlePaymentWebhook(eventType, {
     'payments.webhook',
     (state, actor) => {
       requirePlatformOperator(actor, 'payments.webhook');
+      const normalizedAmountDueCents = requireNonNegativeInteger(
+        amountDueCents,
+        'invoice amount due in cents',
+        'payments webhook <type> <subscriptionId|tenantId> [status|planId]',
+      );
       const type = requireOneOf(
         eventType,
         ['checkout.completed', 'invoice.paid', 'invoice.payment_failed', 'subscription.updated', 'subscription.canceled'],
@@ -14179,9 +14217,9 @@ export async function handlePaymentWebhook(eventType, {
       }
 
       if (type === 'invoice.payment_failed') {
-        invoice = upsertInvoiceForSubscription(state, subscription, 'past_due', { amountDueCents });
+        invoice = upsertInvoiceForSubscription(state, subscription, 'past_due', { amountDueCents: normalizedAmountDueCents });
       } else if (type === 'invoice.paid') {
-        invoice = upsertInvoiceForSubscription(state, subscription, 'paid', { amountDueCents });
+        invoice = upsertInvoiceForSubscription(state, subscription, 'paid', { amountDueCents: normalizedAmountDueCents });
       } else if (type === 'subscription.canceled') {
         invoice = latestInvoiceForSubscription(state, subscription.id);
         if (invoice && ['open', 'past_due'].includes(invoice.status)) {
