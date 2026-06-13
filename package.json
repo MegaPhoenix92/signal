@@ -15,7 +15,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test:api-security": "node --test scripts/test-signal-api-security.mjs",
-    "test:browser-routes": "node --test scripts/test-signal-browser-routes.mjs",
+    "test:browser-routes": "node --test --test-force-exit scripts/test-signal-browser-routes.mjs",
     "test:contract": "node --test scripts/test-signal-contract.mjs",
     "test:jwks-auth": "node --test scripts/test-signal-jwks-auth.mjs",
     "test:persistence": "node --test scripts/test-signal-persistence.mjs",

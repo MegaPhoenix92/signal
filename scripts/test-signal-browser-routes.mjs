@@ -37,7 +37,16 @@ function sleep(ms) {
 }
 
 async function stopProcess(child) {
-  if (!child || child.exitCode !== null) {
+  if (!child) {
+    return;
+  }
+  const closeStreams = () => {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.stdin?.destroy();
+  };
+  if (child.exitCode !== null) {
+    closeStreams();
     return;
   }
   const kill = (signal) => {
@@ -63,6 +72,7 @@ async function stopProcess(child) {
       sleep(2000),
     ]);
   }
+  closeStreams();
 }
 
 async function waitForHttp(url, output, label) {
@@ -233,8 +243,21 @@ class CdpClient {
     });
   }
 
-  close() {
-    this.ws.close();
+  async close() {
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+      return;
+    }
+    for (const waiter of this.waiters) {
+      clearTimeout(waiter.timer);
+    }
+    this.waiters = [];
+    if (this.ws.readyState !== WebSocket.CLOSED && this.ws.readyState !== WebSocket.CLOSING) {
+      this.ws.close();
+    }
+    await Promise.race([
+      new Promise((resolve) => this.ws.addEventListener('close', resolve, { once: true })),
+      sleep(1000),
+    ]);
   }
 
   clearEvents() {
@@ -323,7 +346,7 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   let client = null;
 
   t.after(async () => {
-    client?.close();
+    await client?.close();
     await stopProcess(chrome?.child);
     await stopProcess(web?.child);
     await stopProcess(api?.child);
