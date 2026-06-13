@@ -59,9 +59,11 @@ import {
   lifecycleNoticeRows,
   MailboxCard,
   membershipsForTenant,
+  MutationButton,
   activeMembershipsForTenant,
   membershipForUser,
   MetricCard,
+  InlineError,
   PanelHead,
   ProductHeader,
   ProviderReadinessCard,
@@ -73,6 +75,7 @@ import {
   SuppressionRuleCard,
   tenantTeamUser,
   useRevealObserver,
+  useMutationFeedback,
 } from './appShared';
 
 const adminTabs: Array<{ id: AdminTab; label: string; icon: LucideIcon }> = [
@@ -342,6 +345,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
   const [auditActionFilter, setAuditActionFilter] = useState('all');
   const [auditTextFilter, setAuditTextFilter] = useState('');
   const [selectedDeadLetterIds, setSelectedDeadLetterIds] = useState<string[]>([]);
+  const mutationFeedback = useMutationFeedback(mutate);
   useRevealObserver([activeTab]);
 
   useEffect(() => {
@@ -1126,17 +1130,42 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
             <article className="ops-panel">
               <PanelHead icon={Inbox} title="Source governance" action="Provider source health" />
               <div className="button-row">
-                <button className="inline-action" disabled={isMutating || source !== 'api' || !salesDemoUser} type="button" onClick={() => salesDemoUser && mutate('mailboxes.connect-url', { ownerUserId: salesDemoUser.id, provider: 'gmail', tenantId: tenant.id })}>
+                <MutationButton
+                  action="mailboxes.connect-url"
+                  actionKey="admin-mailbox-connect-gmail"
+                  args={{ ownerUserId: salesDemoUser?.id, provider: 'gmail', tenantId: tenant.id }}
+                  busyText="Creating..."
+                  disabled={isMutating || source !== 'api' || !salesDemoUser}
+                  feedback={mutationFeedback}
+                >
                   Connect Gmail
-                </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.connect-url', { ownerUserId: 'usr_admin', provider: 'outlook', tenantId: tenant.id })}>
+                </MutationButton>
+                <MutationButton
+                  action="mailboxes.connect-url"
+                  actionKey="admin-mailbox-connect-outlook"
+                  args={{ ownerUserId: 'usr_admin', provider: 'outlook', tenantId: tenant.id }}
+                  busyText="Creating..."
+                  disabled={isMutating || source !== 'api'}
+                  feedback={mutationFeedback}
+                >
                   Connect Outlook
-                </button>
+                </MutationButton>
               </div>
+              <InlineError message={mutationFeedback.errorFor('admin-mailbox-connect-gmail', 'admin-mailbox-connect-outlook')} />
               {data.mailboxes.map((mailbox) => {
                 const latestSession = latestSessionForMailbox(mailbox.id);
                 const readySession = latestSession?.status === 'ready' ? latestSession : undefined;
                 const latestWatch = latestWatchForMailbox(mailbox.id);
+                const mailboxSyncKey = `admin-mailbox-sync-${mailbox.id}`;
+                const mailboxReplayKey = `admin-mailbox-replay-${mailbox.id}`;
+                const mailboxWatchKey = `admin-mailbox-watch-${mailbox.id}`;
+                const mailboxRenewKey = `admin-mailbox-renew-${latestWatch?.id ?? mailbox.id}`;
+                const mailboxPauseKey = `admin-mailbox-pause-${mailbox.id}`;
+                const mailboxDisconnectKey = `admin-mailbox-disconnect-${mailbox.id}`;
+                const mailboxResumeKey = `admin-mailbox-resume-${mailbox.id}`;
+                const mailboxConnectKey = `admin-mailbox-connect-${mailbox.id}`;
+                const mailboxCompleteKey = `admin-mailbox-complete-${readySession?.id ?? mailbox.id}`;
+                const canMutateMailbox = source === 'api' && !isMutating;
 
                 return (
                   <MailboxCard
@@ -1150,43 +1179,51 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                       <>
                         {mailbox.status === 'connected' && (
                           <>
-                            <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.sync', { mailboxId: mailbox.id })}>
+                            <MutationButton action="mailboxes.sync" actionKey={mailboxSyncKey} args={{ mailboxId: mailbox.id }} busyText="Syncing..." disabled={!canMutateMailbox} feedback={mutationFeedback}>
                               Sync
-                            </button>
-                            <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.replay', { mailboxId: mailbox.id })}>
+                            </MutationButton>
+                            <MutationButton action="mailboxes.replay" actionKey={mailboxReplayKey} args={{ mailboxId: mailbox.id }} busyText="Replaying..." disabled={!canMutateMailbox} feedback={mutationFeedback}>
                               Replay
-                            </button>
-                            <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.watch', { mailboxId: mailbox.id })}>
+                            </MutationButton>
+                            <MutationButton action="mailboxes.watch" actionKey={mailboxWatchKey} args={{ mailboxId: mailbox.id }} busyText="Watching..." disabled={!canMutateMailbox} feedback={mutationFeedback}>
                               Watch
-                            </button>
+                            </MutationButton>
                             {latestWatch && (
-                              <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.watch-renew', { watchId: latestWatch.id })}>
+                              <MutationButton action="mailboxes.watch-renew" actionKey={mailboxRenewKey} args={{ watchId: latestWatch.id }} busyText="Renewing..." disabled={!canMutateMailbox} feedback={mutationFeedback}>
                                 Renew
-                              </button>
+                              </MutationButton>
                             )}
-                            <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.pause', { mailboxId: mailbox.id })}>
+                            <MutationButton action="mailboxes.pause" actionKey={mailboxPauseKey} args={{ mailboxId: mailbox.id }} busyText="Pausing..." disabled={!canMutateMailbox} feedback={mutationFeedback}>
                               Pause
-                            </button>
-                            <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.disconnect', { mailboxId: mailbox.id })}>
+                            </MutationButton>
+                            <MutationButton action="mailboxes.disconnect" actionKey={mailboxDisconnectKey} args={{ mailboxId: mailbox.id }} busyText="Disconnecting..." disabled={!canMutateMailbox} feedback={mutationFeedback}>
                               Disconnect
-                            </button>
+                            </MutationButton>
                           </>
                         )}
                         {mailbox.status === 'paused' && (
-                          <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.resume', { mailboxId: mailbox.id })}>
+                          <MutationButton action="mailboxes.resume" actionKey={mailboxResumeKey} args={{ mailboxId: mailbox.id }} busyText="Resuming..." disabled={!canMutateMailbox} feedback={mutationFeedback}>
                             Resume
-                          </button>
+                          </MutationButton>
                         )}
                         {mailbox.status !== 'connected' && mailbox.status !== 'paused' && (
-                          <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.connect-url', { mailboxId: mailbox.id, ownerUserId: mailbox.ownerUserId, provider: mailbox.provider, tenantId: mailbox.tenantId })}>
+                          <MutationButton
+                            action="mailboxes.connect-url"
+                            actionKey={mailboxConnectKey}
+                            args={{ mailboxId: mailbox.id, ownerUserId: mailbox.ownerUserId, provider: mailbox.provider, tenantId: mailbox.tenantId }}
+                            busyText="Creating..."
+                            disabled={!canMutateMailbox}
+                            feedback={mutationFeedback}
+                          >
                             Create auth link
-                          </button>
+                          </MutationButton>
                         )}
                         {readySession && (
-                          <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('mailboxes.complete', { sessionId: readySession.id })}>
+                          <MutationButton action="mailboxes.complete" actionKey={mailboxCompleteKey} args={{ sessionId: readySession.id }} busyText="Completing..." disabled={!canMutateMailbox} feedback={mutationFeedback}>
                             Complete auth
-                          </button>
+                          </MutationButton>
                         )}
+                        <InlineError message={mutationFeedback.errorFor(mailboxSyncKey, mailboxReplayKey, mailboxWatchKey, mailboxRenewKey, mailboxPauseKey, mailboxDisconnectKey, mailboxResumeKey, mailboxConnectKey, mailboxCompleteKey)} />
                       </>
                     }
                   />
@@ -1735,19 +1772,48 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   : [['No overrides', '-', '-', '-', 'Record beta access, support credits, or manual entitlement changes']]}
               />
               <div className="button-row">
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.override', { tenantId: tenant.id, type: 'beta_access', reason: 'Beta extension', planId: 'plan_beta' })}>
+                <MutationButton
+                  action="payments.override"
+                  actionKey="admin-payment-override-beta"
+                  args={{ tenantId: tenant.id, type: 'beta_access', reason: 'Beta extension', planId: 'plan_beta' }}
+                  busyText="Applying..."
+                  disabled={isMutating || source !== 'api'}
+                  feedback={mutationFeedback}
+                >
                   Beta access
-                </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.override', { tenantId: tenant.id, type: 'support_credit', reason: 'Onboarding credit', amountCents: 2500 })}>
+                </MutationButton>
+                <MutationButton
+                  action="payments.override"
+                  actionKey="admin-payment-override-credit"
+                  args={{ tenantId: tenant.id, type: 'support_credit', reason: 'Onboarding credit', amountCents: 2500 }}
+                  busyText="Applying..."
+                  disabled={isMutating || source !== 'api'}
+                  feedback={mutationFeedback}
+                >
                   Support credit
-                </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.override', { tenantId: tenant.id, type: 'manual_entitlement', reason: 'Support access', planId: checkoutTeamPlanId })}>
+                </MutationButton>
+                <MutationButton
+                  action="payments.override"
+                  actionKey="admin-payment-override-manual"
+                  args={{ tenantId: tenant.id, type: 'manual_entitlement', reason: 'Support access', planId: checkoutTeamPlanId }}
+                  busyText="Applying..."
+                  disabled={isMutating || source !== 'api'}
+                  feedback={mutationFeedback}
+                >
                   Manual access
-                </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api' || !activeBillingOverrides[0]} type="button" onClick={() => activeBillingOverrides[0] && mutate('payments.override-revoke', { overrideId: activeBillingOverrides[0].id, reason: 'Resolved locally' })}>
+                </MutationButton>
+                <MutationButton
+                  action="payments.override-revoke"
+                  actionKey="admin-payment-override-revoke"
+                  args={{ overrideId: activeBillingOverrides[0]?.id, reason: 'Resolved locally' }}
+                  busyText="Revoking..."
+                  disabled={isMutating || source !== 'api' || !activeBillingOverrides[0]}
+                  feedback={mutationFeedback}
+                >
                   Revoke latest
-                </button>
+                </MutationButton>
               </div>
+              <InlineError message={mutationFeedback.errorFor('admin-payment-override-beta', 'admin-payment-override-credit', 'admin-payment-override-manual', 'admin-payment-override-revoke')} />
               <CommandStrip commands={['npm run admin -- payments override tenant_demo beta_access Beta_extension plan_beta', 'npm run admin -- payments override tenant_demo support_credit Onboarding_credit 2500', 'npm run admin -- payments override tenant_demo manual_entitlement Support_access plan_team', 'npm run admin -- payments override-revoke <overrideId> Resolved']} />
             </article>
             <article className="ops-panel">
@@ -1772,9 +1838,19 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                     key={invoice.id}
                     action={
                       ['open', 'past_due'].includes(invoice.status) ? (
-                        <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.recover', { invoiceId: invoice.id })}>
-                          Recovery link
-                        </button>
+                        <>
+                          <MutationButton
+                            action="payments.recover"
+                            actionKey={`admin-payment-recover-${invoice.id}`}
+                            args={{ invoiceId: invoice.id }}
+                            busyText="Creating..."
+                            disabled={isMutating || source !== 'api'}
+                            feedback={mutationFeedback}
+                          >
+                            Recovery link
+                          </MutationButton>
+                          <InlineError message={mutationFeedback.errorFor(`admin-payment-recover-${invoice.id}`)} />
+                        </>
                       ) : null
                     }
                   />
@@ -1794,32 +1870,82 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                 rows={lifecycleNoticeRows(paymentLifecycleNotices, 8)}
               />
               <div className="button-row">
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.checkout', { planId: checkoutTeamPlanId, tenantId: tenant.id })}>
+                <MutationButton
+                  action="payments.checkout"
+                  actionKey="admin-payment-checkout"
+                  args={{ planId: checkoutTeamPlanId, tenantId: tenant.id }}
+                  busyText="Creating..."
+                  disabled={isMutating || source !== 'api'}
+                  feedback={mutationFeedback}
+                >
                   Create team checkout
-                </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.portal', { tenantId: tenant.id })}>
+                </MutationButton>
+                <MutationButton
+                  action="payments.portal"
+                  actionKey="admin-payment-portal"
+                  args={{ tenantId: tenant.id }}
+                  busyText="Creating..."
+                  disabled={isMutating || source !== 'api'}
+                  feedback={mutationFeedback}
+                >
                   Create portal session
-                </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.sync', { tenantId: tenant.id })}>
+                </MutationButton>
+                <MutationButton
+                  action="payments.sync"
+                  actionKey="admin-payment-sync"
+                  args={{ tenantId: tenant.id }}
+                  busyText="Syncing..."
+                  disabled={isMutating || source !== 'api'}
+                  feedback={mutationFeedback}
+                >
                   Sync billing state
-                </button>
-                <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.override', { planId: 'plan_beta', reason: 'Beta comp', tenantId: tenant.id, type: 'beta_access' })}>
+                </MutationButton>
+                <MutationButton
+                  action="payments.override"
+                  actionKey="admin-payment-beta-comp"
+                  args={{ planId: 'plan_beta', reason: 'Beta comp', tenantId: tenant.id, type: 'beta_access' }}
+                  busyText="Applying..."
+                  disabled={isMutating || source !== 'api'}
+                  feedback={mutationFeedback}
+                >
                   Apply beta comp
-                </button>
+                </MutationButton>
                 {subscription && (
                   <>
-                    <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.webhook', { subscriptionId: subscription.id, type: 'invoice.payment_failed' })}>
+                    <MutationButton
+                      action="payments.webhook"
+                      actionKey="admin-payment-webhook-failed"
+                      args={{ subscriptionId: subscription.id, type: 'invoice.payment_failed' }}
+                      busyText="Simulating..."
+                      disabled={isMutating || source !== 'api'}
+                      feedback={mutationFeedback}
+                    >
                       Simulate failed payment
-                    </button>
-                    <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.webhook', { subscriptionId: subscription.id, type: 'invoice.paid' })}>
+                    </MutationButton>
+                    <MutationButton
+                      action="payments.webhook"
+                      actionKey="admin-payment-webhook-paid"
+                      args={{ subscriptionId: subscription.id, type: 'invoice.paid' }}
+                      busyText="Simulating..."
+                      disabled={isMutating || source !== 'api'}
+                      feedback={mutationFeedback}
+                    >
                       Simulate invoice paid
-                    </button>
-                    <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('payments.cancel', { subscriptionId: subscription.id })}>
+                    </MutationButton>
+                    <MutationButton
+                      action="payments.cancel"
+                      actionKey="admin-payment-cancel"
+                      args={{ subscriptionId: subscription.id }}
+                      busyText="Canceling..."
+                      disabled={isMutating || source !== 'api'}
+                      feedback={mutationFeedback}
+                    >
                       Cancel subscription
-                    </button>
+                    </MutationButton>
                   </>
                 )}
               </div>
+              <InlineError message={mutationFeedback.errorFor('admin-payment-checkout', 'admin-payment-portal', 'admin-payment-sync', 'admin-payment-beta-comp', 'admin-payment-webhook-failed', 'admin-payment-webhook-paid', 'admin-payment-cancel')} />
               <CommandStrip commands={['npm run admin -- payments sync tenant_demo', 'npm run admin -- payments checkout tenant_demo plan_team', 'npm run admin -- payments checkout tenant_demo plan_team --live-provider', 'npm run admin -- payments portal tenant_demo --live-provider', 'npm run admin -- payments override tenant_demo beta_access Beta_extension plan_beta', 'npm run admin -- payments webhook invoice.payment_failed sub_demo', 'npm run admin -- payments webhook subscription.updated sub_demo past_due', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>', 'npm run admin -- payments recover <invoiceId>', 'npm run admin -- payments cancel sub_demo']} />
             </article>
             <article className="ops-panel">

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -23,7 +23,6 @@ import {
   PlayCircle,
   Plug,
   Radar,
-  RefreshCw,
   Route,
   Search,
   Settings2,
@@ -156,7 +155,7 @@ import {
   type User,
   type UserInvite,
 } from '../signalData';
-import type { Accent, AppMode, DataSource, LiveState, MutationOutcome, RegistrationFormErrors } from './appTypes';
+import type { Accent, AppMode, DataSource, LiveState, RegistrationFormErrors } from './appTypes';
 import {
   AccountActionCard,
   AccountEventRow,
@@ -164,13 +163,16 @@ import {
   AccountRecommendationCard,
   AccountReviewCard,
   AdminTable,
+  BusyLabel,
   CheckItem,
   CommandStrip,
+  InlineError,
   inviteClaimCodeSummary,
   InvoiceCard,
   lifecycleNoticeRows,
   MailboxCard,
   membershipsForTenant,
+  MutationButton,
   activeMembershipsForTenant,
   membershipForUser,
   MetricCard,
@@ -183,6 +185,7 @@ import {
   StateBanner,
   tenantTeamUser,
   useRevealObserver,
+  useMutationFeedback,
   validDomain,
   validEmail,
 } from './appShared';
@@ -641,14 +644,6 @@ async function fetchLiveStateBundle(mode: AppMode, signal?: AbortSignal) {
   };
 }
 
-function BusyLabel({ busy, busyText, children }: { busy: boolean; busyText: string; children: ReactNode }) {
-  return (
-    <>
-      {busy && <RefreshCw className="busy-spinner" size={15} aria-hidden="true" />}
-      <span className="button-label">{busy ? busyText : children}</span>
-    </>
-  );
-}
 function MarketingPage() {
   const [activeStep, setActiveStep] = useState(0);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -798,7 +793,10 @@ function MarketingPage() {
                     </div>
                     <h3>{card.title}</h3>
                     <p>{card.body}</p>
-                    <strong>{card.metric}</strong>
+                    <strong>
+                      <span className="demo-data-badge">Demo data</span>
+                      {card.metric}
+                    </strong>
                   </article>
                 );
               })}
@@ -844,7 +842,7 @@ function MarketingPage() {
                 <span className="panel-icon" aria-hidden="true">
                   <ActiveIcon size={28} />
                 </span>
-                <span className="panel-stat">{activeWorkflow.stat}</span>
+                <span className="panel-stat">Demo data · {activeWorkflow.stat}</span>
               </div>
               <h3>{activeWorkflow.title}</h3>
               <p>{activeWorkflow.body}</p>
@@ -1007,6 +1005,7 @@ function RegistrationOnboarding({ liveState }: { liveState: LiveState }) {
   const canRegisterWorkspace = canUseApi;
   const canAdminMutate = canUseApi && currentActor?.role === 'admin';
   const canCompleteOnboarding = canUseApi && Boolean(currentActor && tenant);
+  const onboardingFeedback = useMutationFeedback(mutate);
 
   function validateWorkspaceFields() {
     const next: RegistrationFormErrors = {};
@@ -1475,21 +1474,50 @@ function RegistrationOnboarding({ liveState }: { liveState: LiveState }) {
           <PanelHead icon={Gauge} title="Onboarding completion" action={tenant?.name ?? 'No workspace'} />
           <AdminTable columns={['Step', 'State']} rows={registrationRows} />
           <div className="button-row">
-            <button className="inline-action" disabled={!canUseApi || !currentActor || !tenant} type="button" onClick={() => currentActor && tenant ? mutate('mailboxes.connect-url', { ownerUserId: currentActor.id, provider: 'gmail', tenantId: tenant.id }) : undefined}>
+            <MutationButton
+              action="mailboxes.connect-url"
+              actionKey="onboarding-mailbox-connect"
+              args={{ ownerUserId: currentActor?.id, provider: 'gmail', tenantId: tenant?.id }}
+              busyText="Creating..."
+              disabled={!canUseApi || !currentActor || !tenant}
+              feedback={onboardingFeedback}
+            >
               Create Gmail auth
-            </button>
-            <button className="inline-action" disabled={!canUseApi || !latestReadyMailboxSession} type="button" onClick={() => latestReadyMailboxSession ? mutate('mailboxes.complete', { sessionId: latestReadyMailboxSession.id }) : undefined}>
+            </MutationButton>
+            <MutationButton
+              action="mailboxes.complete"
+              actionKey="onboarding-mailbox-complete"
+              args={{ sessionId: latestReadyMailboxSession?.id }}
+              busyText="Completing..."
+              disabled={!canUseApi || !latestReadyMailboxSession}
+              feedback={onboardingFeedback}
+            >
               Complete auth
-            </button>
-            <button className="inline-action" disabled={!canUseApi || !currentActor} type="button" onClick={() => mutate('notifications.preference', { patch: { digestCadence: 'daily', immediateAlerts: true }, userId: currentActor.id })}>
+            </MutationButton>
+            <MutationButton
+              action="notifications.preference"
+              actionKey="onboarding-digest"
+              args={{ patch: { digestCadence: 'daily', immediateAlerts: true }, userId: currentActor?.id }}
+              busyText="Saving..."
+              disabled={!canUseApi || !currentActor}
+              feedback={onboardingFeedback}
+            >
               Set daily digest
-            </button>
-            <button className="inline-action" disabled={!canCompleteOnboarding} type="button" onClick={() => tenant ? mutate('tenants.onboarding-complete', { tenantId: tenant.id }) : undefined}>
+            </MutationButton>
+            <MutationButton
+              action="tenants.onboarding-complete"
+              actionKey="onboarding-complete"
+              args={{ tenantId: tenant?.id }}
+              busyText="Completing..."
+              disabled={!canCompleteOnboarding}
+              feedback={onboardingFeedback}
+            >
               Complete onboarding
-            </button>
+            </MutationButton>
             <a className="inline-action" href="#workspace">Continue to workspace</a>
             <a className="inline-action" href="#admin">Review admin</a>
           </div>
+          <InlineError message={onboardingFeedback.errorFor('onboarding-mailbox-connect', 'onboarding-mailbox-complete', 'onboarding-digest', 'onboarding-complete')} />
           <CommandStrip commands={['npm run admin -- mailboxes connect-url tenant_demo gmail usr_admin', 'npm run admin -- mailboxes complete <sessionId>', 'npm run admin -- tenants complete-onboarding tenant_demo --actor usr_admin', 'curl -X POST http://127.0.0.1:8787/api/mutations -H "Content-Type: application/json" -H "X-Signal-Actor: usr_admin" -d \'{"action":"tenants.onboarding-complete","args":{"tenantId":"tenant_demo"}}\'']} />
         </section>
       </main>
@@ -1543,6 +1571,7 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
   const currentRole = activeCurrentMembership?.role ?? currentUser.role;
   const currentTeam = activeCurrentMembership?.team ?? currentUser.team;
   const [selectedAccountName, setSelectedAccountName] = useState('');
+  const workspaceFeedback = useMutationFeedback(mutate);
   const visibleSignals = data.signals.filter((signal) =>
     signal.tenantId === tenant.id &&
     (
@@ -1751,15 +1780,23 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
               <button className="inline-action" disabled={!canInviteMembers} type="button" onClick={() => mutate('users.invite', { tenantId: tenant.id, email: `member-${Date.now()}@${tenant.domain}`, role: 'member', team: 'sales' })}>
                 Invite member
               </button>
-              <button className="inline-action" disabled={!canStartMailboxAuth} type="button" onClick={() => mutate('mailboxes.connect-url', { ownerUserId: currentUser.id, provider: 'gmail', tenantId: tenant.id })}>
+              <MutationButton
+                action="mailboxes.connect-url"
+                actionKey="workspace-onboarding-mailbox-connect"
+                args={{ ownerUserId: currentUser.id, provider: 'gmail', tenantId: tenant.id }}
+                busyText="Creating..."
+                disabled={!canStartMailboxAuth}
+                feedback={workspaceFeedback}
+              >
                 Create Gmail auth
-              </button>
+              </MutationButton>
               {pendingInvites[0] && (
                 <button className="inline-action" disabled={!canInviteMembers} type="button" onClick={() => mutate('users.invite-accept', { inviteId: pendingInvites[0].id })}>
                   Accept latest invite
                 </button>
               )}
             </div>
+            <InlineError message={workspaceFeedback.errorFor('workspace-onboarding-mailbox-connect')} />
           </div>
         </section>
 
@@ -1937,22 +1974,47 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
                   key={invoice.id}
                   action={
                     ['open', 'past_due'].includes(invoice.status) ? (
-                      <button className="inline-action" disabled={!canMutateBilling} type="button" onClick={() => mutate('payments.recover', { invoiceId: invoice.id })}>
-                        Recovery link
-                      </button>
+                      <>
+                        <MutationButton
+                          action="payments.recover"
+                          actionKey={`workspace-payment-recover-${invoice.id}`}
+                          args={{ invoiceId: invoice.id }}
+                          busyText="Creating..."
+                          disabled={!canMutateBilling}
+                          feedback={workspaceFeedback}
+                        >
+                          Recovery link
+                        </MutationButton>
+                        <InlineError message={workspaceFeedback.errorFor(`workspace-payment-recover-${invoice.id}`)} />
+                      </>
                     ) : null
                   }
                 />
               ))}
             </div>
             <div className="button-row compact-actions">
-              <button className="inline-action" disabled={!canMutateBilling || !subscription} type="button" onClick={() => mutate('payments.portal', { tenantId: tenant.id })}>
+              <MutationButton
+                action="payments.portal"
+                actionKey="workspace-payment-portal"
+                args={{ tenantId: tenant.id }}
+                busyText="Opening..."
+                disabled={!canMutateBilling || !subscription}
+                feedback={workspaceFeedback}
+              >
                 Open billing portal
-              </button>
-              <button className="inline-action" disabled={!canMutateBilling} type="button" onClick={() => mutate('payments.checkout', { planId: checkoutTeamPlanId, tenantId: tenant.id })}>
+              </MutationButton>
+              <MutationButton
+                action="payments.checkout"
+                actionKey="workspace-payment-checkout"
+                args={{ planId: checkoutTeamPlanId, tenantId: tenant.id }}
+                busyText="Starting..."
+                disabled={!canMutateBilling}
+                feedback={workspaceFeedback}
+              >
                 Start team checkout
-              </button>
+              </MutationButton>
             </div>
+            <InlineError message={workspaceFeedback.errorFor('workspace-payment-portal', 'workspace-payment-checkout')} />
             <AdminTable columns={['Area', 'Trigger', 'Severity', 'Status', 'Action']} rows={lifecycleNoticeRows(sourceLifecycleNotices, 5)} />
           </article>
 
@@ -2028,31 +2090,69 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
           <article className="ops-panel large-panel" data-reveal>
             <PanelHead icon={Radar} title="Signal queue" action={source === 'api' ? 'Live local API' : 'Seed fallback'} />
             <div className="signal-list">
-              {assignedSignals.map((signal) => (
-                <SignalRow
-                  key={signal.id}
-                  signal={signal}
-                  users={users}
-                  feedbackLabel={signal.lastFeedbackLabel ?? latestFeedbackBySignal.get(signal.id)}
-                  handoff={latestHandoffBySignal.get(signal.id)}
-                  action={
-                    <>
-                      <button className="inline-action" disabled={isMutating || source !== 'api' || memberActionGated} type="button" onClick={() => mutate('signals.status', { signalId: signal.id, status: signal.status === 'routed' ? 'open' : 'routed' })}>
-                        {memberActionGated ? 'Billing gated' : signal.status === 'routed' ? 'Reopen' : 'Route'}
-                      </button>
-                      <button className="inline-action" disabled={isMutating || source !== 'api' || memberActionGated || !(currentRole === 'admin' || signal.ownerUserId === currentUser.id)} type="button" onClick={() => mutate('signals.handoff', { signalId: signal.id, target: 'crm', note: 'Workspace CRM handoff' })}>
-                        CRM handoff
-                      </button>
-                      <button className="inline-action" disabled={isMutating || source !== 'api' || memberActionGated || !(currentRole === 'admin' || signal.ownerUserId === currentUser.id)} type="button" onClick={() => mutate('signals.feedback', { signalId: signal.id, label: 'useful', note: 'Workspace quick feedback' })}>
-                        Useful
-                      </button>
-                      <button className="inline-action" disabled={isMutating || source !== 'api' || memberActionGated || !(currentRole === 'admin' || signal.ownerUserId === currentUser.id)} type="button" onClick={() => mutate('signals.feedback', { signalId: signal.id, label: 'noisy', note: 'Workspace quick feedback' })}>
-                        Noisy
-                      </button>
-                    </>
-                  }
-                />
-              ))}
+              {assignedSignals.map((signal) => {
+                const signalStatusKey = `workspace-signal-status-${signal.id}`;
+                const signalHandoffKey = `workspace-signal-handoff-${signal.id}`;
+                const signalUsefulKey = `workspace-signal-feedback-useful-${signal.id}`;
+                const signalNoisyKey = `workspace-signal-feedback-noisy-${signal.id}`;
+                const canMutateSignal = source === 'api' && !isMutating && !memberActionGated;
+                const canMutateOwnedSignal = canMutateSignal && (currentRole === 'admin' || signal.ownerUserId === currentUser.id);
+
+                return (
+                  <SignalRow
+                    key={signal.id}
+                    signal={signal}
+                    users={users}
+                    feedbackLabel={signal.lastFeedbackLabel ?? latestFeedbackBySignal.get(signal.id)}
+                    handoff={latestHandoffBySignal.get(signal.id)}
+                    action={
+                      <>
+                        <MutationButton
+                          action="signals.status"
+                          actionKey={signalStatusKey}
+                          args={{ signalId: signal.id, status: signal.status === 'routed' ? 'open' : 'routed' }}
+                          busyText={signal.status === 'routed' ? 'Reopening...' : 'Routing...'}
+                          disabled={!canMutateSignal}
+                          feedback={workspaceFeedback}
+                        >
+                          {memberActionGated ? 'Billing gated' : signal.status === 'routed' ? 'Reopen' : 'Route'}
+                        </MutationButton>
+                        <MutationButton
+                          action="signals.handoff"
+                          actionKey={signalHandoffKey}
+                          args={{ signalId: signal.id, target: 'crm', note: 'Workspace CRM handoff' }}
+                          busyText="Handing off..."
+                          disabled={!canMutateOwnedSignal}
+                          feedback={workspaceFeedback}
+                        >
+                          CRM handoff
+                        </MutationButton>
+                        <MutationButton
+                          action="signals.feedback"
+                          actionKey={signalUsefulKey}
+                          args={{ signalId: signal.id, label: 'useful', note: 'Workspace quick feedback' }}
+                          busyText="Saving..."
+                          disabled={!canMutateOwnedSignal}
+                          feedback={workspaceFeedback}
+                        >
+                          Useful
+                        </MutationButton>
+                        <MutationButton
+                          action="signals.feedback"
+                          actionKey={signalNoisyKey}
+                          args={{ signalId: signal.id, label: 'noisy', note: 'Workspace quick feedback' }}
+                          busyText="Saving..."
+                          disabled={!canMutateOwnedSignal}
+                          feedback={workspaceFeedback}
+                        >
+                          Noisy
+                        </MutationButton>
+                        <InlineError message={workspaceFeedback.errorFor(signalStatusKey, signalHandoffKey, signalUsefulKey, signalNoisyKey)} />
+                      </>
+                    }
+                  />
+                );
+              })}
               {assignedSignals.length === 0 && (
                 <div className="empty-state">
                   <strong>No signals match this session.</strong>
@@ -2094,6 +2194,13 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
                 const canManageMailbox = currentRole === 'admin' || mailbox.ownerUserId === currentUser.id;
                 const latestSession = latestSessionForMailbox(mailbox.id);
                 const readySession = latestSession?.status === 'ready' ? latestSession : undefined;
+                const canMutateMailbox = source === 'api' && !isMutating && !memberActionGated;
+                const mailboxSyncKey = `workspace-mailbox-sync-${mailbox.id}`;
+                const mailboxPauseKey = `workspace-mailbox-pause-${mailbox.id}`;
+                const mailboxDisconnectKey = `workspace-mailbox-disconnect-${mailbox.id}`;
+                const mailboxResumeKey = `workspace-mailbox-resume-${mailbox.id}`;
+                const mailboxConnectKey = `workspace-mailbox-connect-${mailbox.id}`;
+                const mailboxCompleteKey = `workspace-mailbox-complete-${readySession?.id ?? mailbox.id}`;
                 return (
                   <MailboxCard
                     key={mailbox.id}
@@ -2107,32 +2214,40 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
                         <>
                           {mailbox.status === 'connected' && (
                             <>
-                              <button className="inline-action" disabled={isMutating || source !== 'api' || memberActionGated} type="button" onClick={() => mutate('mailboxes.sync', { mailboxId: mailbox.id })}>
+                              <MutationButton action="mailboxes.sync" actionKey={mailboxSyncKey} args={{ mailboxId: mailbox.id }} busyText="Syncing..." disabled={!canMutateMailbox} feedback={workspaceFeedback}>
                                 Sync source
-                              </button>
-                              <button className="inline-action" disabled={isMutating || source !== 'api' || memberActionGated} type="button" onClick={() => mutate('mailboxes.pause', { mailboxId: mailbox.id })}>
+                              </MutationButton>
+                              <MutationButton action="mailboxes.pause" actionKey={mailboxPauseKey} args={{ mailboxId: mailbox.id }} busyText="Pausing..." disabled={!canMutateMailbox} feedback={workspaceFeedback}>
                                 Pause
-                              </button>
-                              <button className="inline-action" disabled={isMutating || source !== 'api' || memberActionGated} type="button" onClick={() => mutate('mailboxes.disconnect', { mailboxId: mailbox.id })}>
+                              </MutationButton>
+                              <MutationButton action="mailboxes.disconnect" actionKey={mailboxDisconnectKey} args={{ mailboxId: mailbox.id }} busyText="Disconnecting..." disabled={!canMutateMailbox} feedback={workspaceFeedback}>
                                 Disconnect
-                              </button>
+                              </MutationButton>
                             </>
                           )}
                           {mailbox.status === 'paused' && (
-                            <button className="inline-action" disabled={isMutating || source !== 'api' || memberActionGated} type="button" onClick={() => mutate('mailboxes.resume', { mailboxId: mailbox.id })}>
+                            <MutationButton action="mailboxes.resume" actionKey={mailboxResumeKey} args={{ mailboxId: mailbox.id }} busyText="Resuming..." disabled={!canMutateMailbox} feedback={workspaceFeedback}>
                               Resume
-                            </button>
+                            </MutationButton>
                           )}
                           {mailbox.status !== 'connected' && mailbox.status !== 'paused' && (
-                            <button className="inline-action" disabled={isMutating || source !== 'api' || memberActionGated} type="button" onClick={() => mutate('mailboxes.connect-url', { mailboxId: mailbox.id, ownerUserId: mailbox.ownerUserId, provider: mailbox.provider, tenantId: mailbox.tenantId })}>
+                            <MutationButton
+                              action="mailboxes.connect-url"
+                              actionKey={mailboxConnectKey}
+                              args={{ mailboxId: mailbox.id, ownerUserId: mailbox.ownerUserId, provider: mailbox.provider, tenantId: mailbox.tenantId }}
+                              busyText="Creating..."
+                              disabled={!canMutateMailbox}
+                              feedback={workspaceFeedback}
+                            >
                               Create auth link
-                            </button>
+                            </MutationButton>
                           )}
                           {readySession && (
-                            <button className="inline-action" disabled={isMutating || source !== 'api' || memberActionGated} type="button" onClick={() => mutate('mailboxes.complete', { sessionId: readySession.id })}>
+                            <MutationButton action="mailboxes.complete" actionKey={mailboxCompleteKey} args={{ sessionId: readySession.id }} busyText="Completing..." disabled={!canMutateMailbox} feedback={workspaceFeedback}>
                               Complete auth
-                            </button>
+                            </MutationButton>
                           )}
+                          <InlineError message={workspaceFeedback.errorFor(mailboxSyncKey, mailboxPauseKey, mailboxDisconnectKey, mailboxResumeKey, mailboxConnectKey, mailboxCompleteKey)} />
                         </>
                       ) : null
                     }
@@ -2143,9 +2258,17 @@ function UserWorkspace({ liveState }: { liveState: LiveState }) {
                 <div className="empty-state">
                   <strong>No mailbox sources are visible.</strong>
                   <small>{currentRole === 'admin' ? 'Connect a tenant source so signals, events, and notifications can be generated.' : 'Connect your mailbox source or ask an admin to grant access to an existing source.'}</small>
-                  <button className="inline-action" disabled={!canStartMailboxAuth} type="button" onClick={() => mutate('mailboxes.connect-url', { ownerUserId: currentUser.id, provider: 'gmail', tenantId: tenant.id })}>
+                  <MutationButton
+                    action="mailboxes.connect-url"
+                    actionKey="workspace-empty-mailbox-connect"
+                    args={{ ownerUserId: currentUser.id, provider: 'gmail', tenantId: tenant.id }}
+                    busyText="Creating..."
+                    disabled={!canStartMailboxAuth}
+                    feedback={workspaceFeedback}
+                  >
                     Create Gmail auth
-                  </button>
+                  </MutationButton>
+                  <InlineError message={workspaceFeedback.errorFor('workspace-empty-mailbox-connect')} />
                 </div>
               )}
             </div>
