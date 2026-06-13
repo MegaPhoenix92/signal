@@ -5129,6 +5129,9 @@ export function fallbackPaymentLifecycleAudit(
   const planChangeEvents = paymentEvents.filter((event) =>
     event.providerEventType === 'customer.subscription.trial_will_end' ||
     (event.appliedType === 'subscription.updated' && Boolean(event.providerPreviousPriceId)));
+  const distinctPaymentEventTypes = new Set(paymentEvents
+    .map((event) => event.appliedType ?? event.type ?? event.providerEventType)
+    .filter(Boolean));
   const stripeLaunch = fallbackProviderLaunchMatrix(data, backend, provider).rows.find((row) => row.id === 'stripe') ?? null;
   const stripeConfigured = Boolean(stripeLaunch?.configurationReady);
   const stripeSandboxPassed = stripeLaunch?.sandboxStatus === 'passed';
@@ -5250,6 +5253,23 @@ export function fallbackPaymentLifecycleAudit(
       commands: ['npm run admin -- payments sync tenant_demo --live-provider', 'npm run admin -- payment-lifecycle --json'],
     }),
     paymentLifecycleAuditRow({
+      area: 'billing_test_matrix',
+      check: 'Billing readiness proof exercises tenant isolation, billing_webhook retry/drain, override expiration, signed replay, recovery, refund, credit, and invoice status vectors.',
+      evidence: [`${distinctPaymentEventTypes.size} distinct payment event type(s)`, `${billingJobs.length} billing_webhook job(s), ${failedBillingJobs.length} failed`, `${billingOverrides.length} billing override record(s)`, `${invoiceStatusesCovered.length}/6 invoice status value(s) covered`],
+      localOk: distinctPaymentEventTypes.size >= 10 &&
+        billingJobs.length > 0 &&
+        failedBillingJobs.length === 0 &&
+        billingOverrides.length > 0 &&
+        invoiceStatusesCovered.length === 6,
+      productionOk: stripeLaunchReady &&
+        stripeSandboxPassed &&
+        signedStripeEvents.length > 0 &&
+        failedBillingJobs.length === 0,
+      recommendation: 'Keep the billing readiness proof tied to test:tenant-isolation, test:scheduler, verify-local, payment-provider, and payment-handoff so queue and tenant-scope regressions block launch evidence.',
+      requiredEnv: ['STRIPE_WEBHOOK_SECRET', 'SIGNAL_STATE_SERVICE_URL', 'DATABASE_URL'],
+      commands: ['npm run test:tenant-isolation', 'npm run test:scheduler', 'npm run test:verify-local', 'npm run test:payment-provider', 'npm run test:local'],
+    }),
+    paymentLifecycleAuditRow({
       area: 'stripe_launch_evidence',
       check: 'Stripe production launch needs configured prices/secrets, Billing Checkout/Portal sandbox proof, signed webhook replay, and active validation schedule.',
       evidence: [`configuration ${stripeConfigured ? 'ready' : 'missing'}`, `sandbox ${stripeLaunch?.sandboxStatus ?? 'not_recorded'}`, `schedule ${stripeLaunch?.schedule?.status ?? 'missing'}`, `${stripeLaunch?.missingEnv?.length ?? 0} missing required env name(s)`],
@@ -5367,6 +5387,7 @@ export function fallbackPaymentHandoff(
   const cancelResubscribe = paymentLifecycleFallbackRowByArea(payment, 'cancel_resubscribe');
   const entitlementTruth = paymentLifecycleFallbackRowByArea(payment, 'entitlement_source_of_truth');
   const signedWebhook = paymentLifecycleFallbackRowByArea(payment, 'signed_webhook_replay');
+  const billingTestMatrix = paymentLifecycleFallbackRowByArea(payment, 'billing_test_matrix');
   const stripeEvidence = paymentLifecycleFallbackRowByArea(payment, 'stripe_launch_evidence');
   const stripeRequiredEnv = stripeRow?.requiredEnv.length ? stripeRow.requiredEnv : ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'SIGNAL_STRIPE_PRICE_TEAM'];
   const checkoutEnv = uniquePlanValues(['STRIPE_SECRET_KEY', 'SIGNAL_STRIPE_PRICE_TEAM']);
@@ -5479,6 +5500,7 @@ export function fallbackPaymentHandoff(
       productionOk: paymentLaunchReady,
       evidence: [
         `${payment.summary.productionReady}/${payment.summary.total} payment lifecycle production row(s) ready`,
+        ...(billingTestMatrix?.evidence ?? []),
         `${summary.subscriptions} subscription record(s) | ${summary.activeEntitlements} active entitlement(s) | ${summary.openInvoices}/${summary.invoices} open invoice(s) | ${summary.paymentEvents} payment event(s)`,
         stripeRow ? `${stripeRow.label}: ${stripeRow.status}` : 'Stripe launch row missing',
       ],

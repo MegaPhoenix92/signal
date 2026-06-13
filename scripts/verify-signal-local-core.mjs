@@ -1508,18 +1508,28 @@ const expiredManualEntitlement = await createBillingOverride('tenant_demo', 'man
   reason: 'Expired verifier access',
 }, { actorUserId: 'usr_admin', statePath });
 assert.equal(expiredManualEntitlement.action, 'payments.override');
+const expiredManualSuspension = await createBillingOverride('tenant_demo', 'manual_suspension', {
+  expiresAt: '2020-01-01T00:00:00.000Z',
+  reason: 'Expired verifier suspension',
+}, { actorUserId: 'usr_admin', statePath });
+assert.equal(expiredManualSuspension.action, 'payments.override');
 paymentState = await loadState({ statePath });
 const expiredOverrideSubscription = paymentState.subscriptions.find((subscription) => subscription.billingOverrideId === expiredManualEntitlement.details.overrideId);
 assert.equal(expiredOverrideSubscription?.status, 'active');
+assert.equal(paymentState.tenants.find((tenant) => tenant.id === 'tenant_demo')?.status, 'suspended');
 
 const syncedPaymentState = await syncPaymentState({ tenantId: 'tenant_demo' }, { actorUserId: 'usr_admin', statePath });
 assert.equal(syncedPaymentState.action, 'payments.sync');
 assert(syncedPaymentState.details.expiredOverrideIds.includes(expiredManualEntitlement.details.overrideId));
+assert(syncedPaymentState.details.expiredOverrideIds.includes(expiredManualSuspension.details.overrideId));
 assert(syncedPaymentState.details.canceledSubscriptionIds.includes(expiredOverrideSubscription.id));
+assert(syncedPaymentState.details.results.some((result) => result.tenantStatusChange === 'reactivated'));
 paymentState = await loadState({ statePath });
 const syncedEntitlement = paymentState.entitlements.find((entitlement) => entitlement.tenantId === 'tenant_demo');
 assert.equal(paymentState.billingOverrides.find((override) => override.id === expiredManualEntitlement.details.overrideId)?.status, 'expired');
+assert.equal(paymentState.billingOverrides.find((override) => override.id === expiredManualSuspension.details.overrideId)?.status, 'expired');
 assert.equal(paymentState.subscriptions.find((subscription) => subscription.id === expiredOverrideSubscription.id)?.status, 'canceled');
+assert.equal(paymentState.tenants.find((tenant) => tenant.id === 'tenant_demo')?.status, 'active');
 assert.equal(syncedEntitlement?.source, 'subscription');
 assert.equal(syncedEntitlement?.seatLimit, 10);
 assert(paymentState.paymentEvents.some((event) => event.type === 'billing.sync.completed' && event.tenantId === 'tenant_demo'), 'payment sync should be recorded in payment events');

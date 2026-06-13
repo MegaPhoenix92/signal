@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   bootstrapState,
+  drainJobs,
   enforceStateRetention,
+  handlePaymentWebhook,
   jobClaimable,
   launchGateReport,
   loadState,
@@ -475,6 +477,156 @@ test('Signal scheduler due summary reports waiting jobs and excludes active leas
   }]);
   assert.equal(jobClaimable(state.jobs[4], now, leaseMs), false);
   assert.equal(jobClaimable(state.jobs[5], now, leaseMs), true);
+});
+
+test('Signal scheduler runs, retries, and drains billing_webhook jobs without double-applying payment events', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-billing-webhook-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const lockFile = path.join(tempDir, 'scheduler.lock');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  await handlePaymentWebhook('invoice.payment_failed', {
+    amountDueCents: 4900,
+    providerInvoiceId: 'in_scheduler_billing_retry',
+    subscriptionId: 'sub_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  let state = await loadState({ statePath });
+  const invoice = state.invoices.find((candidate) => candidate.providerInvoiceId === 'in_scheduler_billing_retry');
+  assert(invoice, 'billing scheduler test requires a webhook-created invoice');
+  const paymentEventCount = state.paymentEvents.length;
+  state.jobs = state.jobs.filter((job) => job.queue !== 'billing_webhook');
+  state.invoices.push({
+    id: 'inv_scheduler_missing_subscription',
+    tenantId: 'tenant_demo',
+    subscriptionId: 'sub_scheduler_missing',
+    provider: 'local_test',
+    status: 'past_due',
+    amountDueCents: 4900,
+    currency: 'usd',
+    hostedInvoiceUrl: 'signal://billing/invoice/tenant_demo/inv_scheduler_missing_subscription',
+    createdAt: '2026-06-13T00:00:00.000Z',
+    dueAt: '2026-06-20T00:00:00.000Z',
+    retryCount: 1,
+    nextPaymentAttemptAt: null,
+    creditedCents: 0,
+    refundedCents: 0,
+  });
+  state.jobs.push(
+    {
+      id: 'job_billing_claim_invoice',
+      tenantId: 'tenant_demo',
+      queue: 'billing_webhook',
+      type: 'payment.webhook.invoice.payment_failed',
+      targetId: invoice.id,
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      message: 'Claim and reconcile a webhook-created invoice.',
+    },
+    {
+      id: 'job_billing_retry_invoice',
+      tenantId: 'tenant_demo',
+      queue: 'billing_webhook',
+      type: 'payment.webhook.invoice.payment_failed',
+      targetId: 'inv_scheduler_missing_subscription',
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      message: 'Exercise billing retry when invoice subscription is temporarily missing.',
+    },
+    {
+      id: 'job_billing_scheduler_once',
+      tenantId: 'tenant_demo',
+      queue: 'billing_webhook',
+      type: 'payment.webhook.invoice.payment_failed',
+      targetId: invoice.id,
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      message: 'Exercise scheduler daemon billing run.',
+    },
+    {
+      id: 'job_billing_active_lease',
+      tenantId: 'tenant_demo',
+      queue: 'billing_webhook',
+      type: 'payment.webhook.invoice.payment_failed',
+      targetId: invoice.id,
+      status: 'running',
+      attempts: 0,
+      maxAttempts: 3,
+      claimedBy: 'worker_other',
+      runningSince: '2026-06-13T00:00:00.000Z',
+      leaseExpiresAt: '2099-01-01T00:00:00.000Z',
+      message: 'Active lease should not be claimed by another worker.',
+    },
+  );
+  await saveState(state, { statePath });
+
+  const firstRun = await runJobs({ queue: 'billing_webhook', limit: 2 }, {
+    actorUserId: 'usr_admin',
+    jobLeaseMs: 300_000,
+    statePath,
+    workerId: 'billing-test-worker',
+  });
+  assert.equal(firstRun.details.count, 2);
+  assert.equal(firstRun.details.succeeded, 1);
+  assert.equal(firstRun.details.failed, 1);
+
+  state = await loadState({ statePath });
+  assert.equal(state.paymentEvents.length, paymentEventCount, 'billing job reconciliation must not append duplicate payment events');
+  const claimedJob = state.jobs.find((job) => job.id === 'job_billing_claim_invoice');
+  assert.equal(claimedJob.status, 'succeeded');
+  assert.equal(claimedJob.attempts, 1);
+  assert.equal(claimedJob.claimedBy, undefined, 'successful job should clear claim metadata');
+  const retryJob = state.jobs.find((job) => job.id === 'job_billing_retry_invoice');
+  assert.equal(retryJob.status, 'queued');
+  assert.equal(retryJob.attempts, 1);
+  assert(retryJob.nextAttemptAt, 'failed billing job should receive retry backoff');
+  assert.equal(retryJob.failureHistory.length, 1);
+  const activeLeaseJob = state.jobs.find((job) => job.id === 'job_billing_active_lease');
+  assert.equal(activeLeaseJob.status, 'running', 'active billing lease should not be double-claimed');
+  assert.equal(activeLeaseJob.attempts, 0);
+
+  retryJob.nextAttemptAt = '2026-01-01T00:00:00.000Z';
+  retryJob.nextRunAt = retryJob.nextAttemptAt;
+  state.subscriptions.push({
+    id: 'sub_scheduler_missing',
+    tenantId: 'tenant_demo',
+    provider: 'local_test',
+    planId: 'plan_team',
+    status: 'past_due',
+  });
+  await saveState(state, { statePath });
+
+  const retryRun = await runJobs({ jobId: 'job_billing_retry_invoice', limit: 1 }, {
+    actorUserId: 'usr_admin',
+    jobLeaseMs: 300_000,
+    statePath,
+    workerId: 'billing-retry-worker',
+  });
+  assert.equal(retryRun.details.succeeded, 1);
+  state = await loadState({ statePath });
+  assert.equal(state.jobs.find((job) => job.id === 'job_billing_retry_invoice')?.status, 'succeeded');
+  assert.equal(state.paymentEvents.length, paymentEventCount, 'billing retry should reconcile state without replaying payment events');
+
+  const schedulerConfig = createSchedulerConfig({
+    argv: ['--once', '--queue', 'billing_webhook', '--limit', '1', '--lock-file', lockFile],
+    env: { SIGNAL_ADMIN_STATE: statePath },
+  });
+  const schedulerRun = await runSchedulerOnce(schedulerConfig);
+  assert.equal(schedulerRun.ok, true);
+  assert.equal(schedulerRun.ran, 1);
+  assert.equal(schedulerRun.outcomes.find((outcome) => outcome.queue === 'billing_webhook')?.count, 1);
+
+  const drained = await drainJobs('billing_webhook', { actorUserId: 'usr_admin', statePath });
+  assert.equal(drained.details.count, 1);
+  state = await loadState({ statePath });
+  assert.equal(state.jobs.find((job) => job.id === 'job_billing_active_lease')?.status, 'drained');
+  assert.equal(state.jobs.filter((job) => job.queue === 'billing_webhook' && ['queued', 'running'].includes(job.status)).length, 0);
 });
 
 test('Signal scheduler applies backoff, dead-letters exhausted jobs, and requeues DLQ entries', async (t) => {
