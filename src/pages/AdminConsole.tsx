@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -37,7 +37,7 @@ import {
   type SignalAppData,
   type StateSummary,
 } from '../signalData';
-import type { AdminTab, LiveState } from './appTypes';
+import type { AdminSubRoute, AdminTab, LiveState } from './appTypes';
 import {
   AdminTable,
   billingOverrideValue,
@@ -78,28 +78,98 @@ import {
   useMutationFeedback,
 } from './appShared';
 
+type AdminRoute = {
+  tab: AdminTab;
+  sub?: AdminSubRoute;
+};
+
 const adminTabs: Array<{ id: AdminTab; label: string; icon: LucideIcon }> = [
-  { id: 'overview', label: 'Overview', icon: Gauge },
-  { id: 'tenants', label: 'Tenants', icon: Database },
-  { id: 'users', label: 'Users', icon: UserCog },
+  { id: 'dashboard', label: 'Dashboard', icon: Gauge },
+  { id: 'organization', label: 'Organization', icon: Users },
   { id: 'email', label: 'Email flows', icon: Workflow },
-  { id: 'governance', label: 'Governance', icon: ShieldCheck },
+  { id: 'billing', label: 'Billing', icon: CreditCard },
   { id: 'integrations', label: 'Integrations', icon: Plug },
-  { id: 'payments', label: 'Payments', icon: CreditCard },
-  { id: 'ops', label: 'Operations', icon: Activity },
+  { id: 'platform', label: 'Platform', icon: Activity },
+  { id: 'launch', label: 'Launch readiness', icon: Route },
   { id: 'audit', label: 'Audit', icon: Fingerprint },
   { id: 'cli', label: 'CLI', icon: TerminalSquare },
 ];
 
-function getAdminTabFromHash(): AdminTab {
-  const rawTab = window.location.hash.startsWith('#admin/')
-    ? window.location.hash.slice('#admin/'.length).split(/[?#]/)[0]
-    : '';
-  return adminTabs.some((tab) => tab.id === rawTab) ? rawTab as AdminTab : 'overview';
+const adminSubRoutes: Partial<Record<AdminTab, readonly AdminSubRoute[]>> = {
+  organization: ['tenants', 'users'],
+  platform: ['governance'],
+};
+
+const legacyAdminRoutes: Record<string, AdminRoute> = {
+  overview: { tab: 'dashboard' },
+  tenants: { tab: 'organization', sub: 'tenants' },
+  users: { tab: 'organization', sub: 'users' },
+  email: { tab: 'email' },
+  governance: { tab: 'platform', sub: 'governance' },
+  integrations: { tab: 'integrations' },
+  payments: { tab: 'billing' },
+  ops: { tab: 'launch' },
+  audit: { tab: 'audit' },
+  cli: { tab: 'cli' },
+};
+
+function isAdminTab(value: string): value is AdminTab {
+  return adminTabs.some((tab) => tab.id === value);
 }
 
-function adminTabHash(tab: AdminTab) {
-  return `#admin/${tab}`;
+function normalizeAdminRoute(route: AdminRoute): AdminRoute {
+  const allowedSubRoutes = adminSubRoutes[route.tab] ?? [];
+  if (route.sub && allowedSubRoutes.includes(route.sub)) {
+    return route;
+  }
+  return { tab: route.tab };
+}
+
+function getAdminRouteFromHash(): AdminRoute {
+  const rawPath = window.location.hash.startsWith('#admin/')
+    ? window.location.hash.slice('#admin/'.length).split(/[?#]/)[0]
+    : '';
+  const [rawTab = '', rawSub = ''] = rawPath.split('/');
+  const legacyRoute = legacyAdminRoutes[rawTab];
+  if (legacyRoute) {
+    return legacyRoute;
+  }
+  if (!isAdminTab(rawTab)) {
+    return { tab: 'dashboard' };
+  }
+  return normalizeAdminRoute({ tab: rawTab, sub: rawSub as AdminSubRoute });
+}
+
+function getAdminTabFromHash(): AdminTab {
+  return getAdminRouteFromHash().tab;
+}
+
+function adminTabHash(tab: AdminTab, sub?: AdminSubRoute) {
+  return sub ? `#admin/${tab}/${sub}` : `#admin/${tab}`;
+}
+
+function adminTabId(tab: AdminTab) {
+  return `admin-tab-${tab}`;
+}
+
+function adminPanelId(tab: AdminTab) {
+  return `admin-panel-${tab}`;
+}
+
+function AdminTabPanel({ activeTab, children, tab }: { activeTab: AdminTab; children?: ReactNode; tab: AdminTab }) {
+  const selected = activeTab === tab;
+  return (
+    <section
+      aria-labelledby={adminTabId(tab)}
+      className="admin-tabpanel"
+      hidden={!selected}
+      id={adminPanelId(tab)}
+      role="tabpanel"
+      tabIndex={0}
+    >
+      {selected ? children : null}
+    </section>
+  );
 }
 
 function modelEvidenceForTenant(data: SignalAppData, tenantId: string) {
@@ -336,7 +406,9 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     summary,
     validateSandbox,
   } = liveState;
-  const [activeTab, setActiveTab] = useState<AdminTab>(() => getAdminTabFromHash());
+  const [activeRoute, setActiveRoute] = useState<AdminRoute>(() => getAdminRouteFromHash());
+  const activeTab = activeRoute.tab;
+  const adminTabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [tenantSearch, setTenantSearch] = useState('');
   const [tenantStatusFilter, setTenantStatusFilter] = useState('all');
   const [tenantPlanFilter, setTenantPlanFilter] = useState('all');
@@ -346,20 +418,52 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
   const [auditTextFilter, setAuditTextFilter] = useState('');
   const [selectedDeadLetterIds, setSelectedDeadLetterIds] = useState<string[]>([]);
   const mutationFeedback = useMutationFeedback(mutate);
-  useRevealObserver([activeTab]);
+  useRevealObserver([activeTab, activeRoute.sub ?? '']);
 
   useEffect(() => {
-    const onHashChange = () => setActiveTab(getAdminTabFromHash());
+    const syncAdminRoute = () => {
+      const route = getAdminRouteFromHash();
+      const nextHash = adminTabHash(route.tab, route.sub);
+      setActiveRoute(route);
+      if (window.location.hash.startsWith('#admin/') && window.location.hash !== nextHash) {
+        window.history.replaceState(null, '', nextHash);
+      }
+    };
+    const onHashChange = () => syncAdminRoute();
+    syncAdminRoute();
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  function selectAdminTab(tab: AdminTab) {
-    setActiveTab(tab);
-    const nextHash = adminTabHash(tab);
+  function selectAdminTab(tab: AdminTab, sub?: AdminSubRoute, focus = false) {
+    const route = normalizeAdminRoute({ tab, sub });
+    setActiveRoute(route);
+    const nextHash = adminTabHash(route.tab, route.sub);
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
+    if (focus) {
+      const nextIndex = adminTabs.findIndex((item) => item.id === route.tab);
+      window.requestAnimationFrame(() => adminTabRefs.current[nextIndex]?.focus());
+    }
+  }
+
+  function handleAdminTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const lastIndex = adminTabs.length - 1;
+    const nextIndexByKey: Partial<Record<string, number>> = {
+      ArrowDown: index === lastIndex ? 0 : index + 1,
+      ArrowRight: index === lastIndex ? 0 : index + 1,
+      ArrowUp: index === 0 ? lastIndex : index - 1,
+      ArrowLeft: index === 0 ? lastIndex : index - 1,
+      Home: 0,
+      End: lastIndex,
+    };
+    const nextIndex = nextIndexByKey[event.key];
+    if (nextIndex === undefined) {
+      return;
+    }
+    event.preventDefault();
+    selectAdminTab(adminTabs[nextIndex].id, undefined, true);
   }
 
   const currentActor = data.users.find((user) => user.id === actorUserId) ?? data.users[0];
@@ -751,19 +855,47 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
           </div>
         </section>
 
-        <section className="admin-tabbar" role="tablist" aria-label="Admin sections">
-          {adminTabs.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button key={tab.id} className="admin-tab" type="button" role="tab" aria-selected={activeTab === tab.id} onClick={() => selectAdminTab(tab.id)}>
-                <Icon size={18} aria-hidden="true" />
-                <span>{tab.label}</span>
-              </button>
-            );
-          })}
-        </section>
+        <div className="admin-console-layout">
+          <aside className="admin-sidebar" aria-label="Admin navigation">
+            <section className="admin-tabbar" role="tablist" aria-label="Admin sections" aria-orientation="vertical">
+              {adminTabs.map((tab, index) => {
+                const Icon = tab.icon;
+                return (
+                  <button
+                    aria-controls={adminPanelId(tab.id)}
+                    aria-selected={activeTab === tab.id}
+                    className="admin-tab"
+                    id={adminTabId(tab.id)}
+                    key={tab.id}
+                    onClick={() => selectAdminTab(tab.id)}
+                    onKeyDown={(event) => handleAdminTabKeyDown(event, index)}
+                    ref={(node) => {
+                      adminTabRefs.current[index] = node;
+                    }}
+                    role="tab"
+                    tabIndex={activeTab === tab.id ? 0 : -1}
+                    type="button"
+                  >
+                    <Icon size={18} aria-hidden="true" />
+                    <span>{tab.label}</span>
+                  </button>
+                );
+              })}
+            </section>
+          </aside>
+          <div className="admin-panel-region">
+            {adminTabs.filter((tab) => tab.id !== activeTab).map((tab) => (
+              <AdminTabPanel activeTab={activeTab} key={tab.id} tab={tab.id} />
+            ))}
+            <section
+              aria-labelledby={adminTabId(activeTab)}
+              className="admin-tabpanel"
+              id={adminPanelId(activeTab)}
+              role="tabpanel"
+              tabIndex={0}
+            >
 
-        {activeTab === 'tenants' && (
+        {activeTab === 'organization' && (
           <section className="admin-two-column is-visible" data-reveal>
             <article className="ops-panel wide-panel">
               <PanelHead icon={Database} title="Tenant operator view" action={`${visibleTenantRows.length}/${tenantRows.length} tenants`} />
@@ -942,8 +1074,32 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
           </section>
         )}
 
-        {activeTab === 'overview' && (
+        {activeTab === 'dashboard' && (
           <section className="admin-grid is-visible" data-reveal>
+            <article className={`ops-panel admin-launch-banner ${launchGate.goLiveReady ? 'is-ready' : 'is-blocked'}`}>
+              <PanelHead
+                icon={ShieldCheck}
+                title="Launch gate go/no-go"
+                action={launchGate.goLiveReady ? 'Go' : 'No-go'}
+              />
+              <div className="launch-banner-grid">
+                <div>
+                  <span>Decision</span>
+                  <strong>{launchGate.goLiveReady ? 'Go' : 'No-go'}</strong>
+                  <small>{launchGate.goLiveReady ? 'All launch gates have proof.' : 'Production launch remains blocked by missing proof.'}</small>
+                </div>
+                <div>
+                  <span>Blockers</span>
+                  <strong>{launchGate.blocked}</strong>
+                  <small>{launchGate.attention} attention item{launchGate.attention === 1 ? '' : 's'}</small>
+                </div>
+                <div>
+                  <span>Secret safety</span>
+                  <strong>{launchGate.secretSafe ? 'Safe' : 'Review'}</strong>
+                  <small>Environment names and proof commands only.</small>
+                </div>
+              </div>
+            </article>
             <MetricCard icon={Users} label="Users" value={String(data.users.length)} detail={`${summary.activeMemberships ?? activeTenantMemberships.length} active memberships · ${pendingInvites.length} pending invites`} accent="lime" />
             <MetricCard icon={Inbox} label="Reauth needed" value={String(reauthCount)} detail="Outlook source" accent="coral" />
             <MetricCard icon={Workflow} label="Enabled flows" value={`${enabledFlows}/${data.emailFlows.length}`} detail={`${summary.activeRoutingRules ?? routingRules.filter((rule) => rule.status === 'active').length} active routes · ${summary.generatedSignals ?? generatedSignals.length} generated`} accent="cyan" />
@@ -968,10 +1124,35 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                 ))}
               </div>
             </article>
+            <article className="ops-panel dashboard-audit-panel">
+              <PanelHead
+                icon={Database}
+                title="Dashboard calculation audit"
+                action={`${dashboardAudit.summary.passed}/${dashboardAudit.summary.total} checks`}
+              />
+              <div className="check-list">
+                <CheckItem ok={dashboardAudit.ok} label={dashboardAudit.ok ? 'Dashboard visible counts reconcile with shared state summary totals.' : `${dashboardAudit.summary.failed} dashboard calculation mismatch needs review.`} />
+                <CheckItem ok={dashboardAudit.summary.scopedRows > 0} label="User workspace rows are explicitly actor-scoped while admin rows reconcile against global state totals." />
+                <CheckItem ok={dashboardAudit.backend.mode !== 'unknown'} label={`Backend boundary for this audit is ${dashboardAudit.backend.mode}.`} />
+              </div>
+              <AdminTable
+                columns={['Area', 'Check', 'Display', 'Summary', 'Total', 'Scope', 'Status']}
+                rows={dashboardAudit.rows.map((row) => [
+                  titleize(row.area),
+                  row.check,
+                  String(row.displayValue),
+                  `${row.summaryKey}=${row.summaryValue}`,
+                  String(row.totalValue),
+                  titleize(row.scope),
+                  row.ok ? 'Pass' : 'Mismatch',
+                ])}
+              />
+              <CommandStrip commands={['npm run admin -- dashboard-audit --json', 'curl http://127.0.0.1:8787/api/dashboard-audit', 'npm run admin -- dashboard-audit --env-file ./.env.production --json']} />
+            </article>
           </section>
         )}
 
-        {activeTab === 'users' && (
+        {activeTab === 'organization' && (
           <section className="admin-two-column is-visible" data-reveal>
             <article className="ops-panel">
               <PanelHead icon={ShieldCheck} title="Tenant workspace" action={titleize(tenant.status)} />
@@ -1442,7 +1623,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
           </section>
         )}
 
-        {activeTab === 'governance' && (
+        {activeTab === 'platform' && (
           <section className="admin-two-column is-visible" data-reveal>
             <article className="ops-panel">
               <PanelHead icon={ShieldCheck} title="Retention and redaction" action={`${governancePolicy?.sourceRetentionDays ?? '-'} day source retention`} />
@@ -1545,33 +1726,6 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                 rows={providerReadiness.providers.map((provider) => [provider.label, provider.callbackPath, provider.webhookPath])}
               />
               <CommandStrip commands={['npm run admin -- integrations', 'npm run admin -- integrations --json', 'curl http://127.0.0.1:8787/api/integrations']} />
-            </article>
-            <article className="ops-panel wide-panel">
-              <PanelHead
-                icon={ShieldCheck}
-                title="Provider launch matrix"
-                action={`${providerLaunch.summary.launchReady}/${providerLaunch.summary.total} ready`}
-              />
-              <div className="check-list">
-                <CheckItem ok={providerLaunch.ok} label="The local agent can inspect Gmail, Outlook, SendGrid/outbound email, Stripe, and signed-session launch proof from one report." />
-                <CheckItem ok={providerLaunch.productionReady} label={providerLaunch.productionReady ? 'Every provider row is production-ready.' : providerLaunch.recommendation.productionGuardrail} />
-                <CheckItem ok={providerLaunch.summary.secretSafe} label="Provider launch output lists environment variable names, proof commands, digests, and request IDs without credential values." />
-                <CheckItem ok={providerLaunch.rows.some((row) => row.id === 'outbound-email' && row.signedReplayCommand?.includes('webhook-signed'))} label="Outbound email and Stripe launch rows include signed webhook replay commands." />
-              </div>
-              <AdminTable
-                columns={['Provider', 'Status', 'Owner', 'Config', 'Sandbox', 'Next command']}
-                rows={providerLaunchRows}
-              />
-              <AdminTable
-                columns={['Provider', 'Webhook', 'Evidence', 'Latest proof']}
-                rows={providerLaunch.rows.map((row) => [
-                  row.id,
-                  row.webhookPath,
-                  row.requiredEvidence.slice(0, 2).join(' | '),
-                  row.latestEvidenceAt ? `${new Date(row.latestEvidenceAt).toLocaleString()} · ${row.latestEvidenceDigest ?? row.latestEvidenceRunId ?? 'recorded'}` : 'No saved provider evidence',
-                ])}
-              />
-              <CommandStrip commands={['npm run admin -- provider-launch --json', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/provider-launch', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- mailboxes watch mbx_gmail_sales --live-provider', 'npm run admin -- notifications digest tenant_demo --live-provider', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>']} />
             </article>
             <article className="ops-panel wide-panel">
               <PanelHead
@@ -1730,7 +1884,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
           </section>
         )}
 
-        {activeTab === 'payments' && (
+        {activeTab === 'billing' && (
           <section className="admin-two-column is-visible" data-reveal>
             <article className="ops-panel">
               <PanelHead icon={CreditCard} title="Plans and entitlements" action="Local test provider" />
@@ -2010,8 +2164,9 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
           </section>
         )}
 
-        {activeTab === 'ops' && (
+        {(activeTab === 'platform' || activeTab === 'launch') && (
           <section className="admin-two-column is-visible" data-reveal>
+            {activeTab === 'launch' && (
             <article className="ops-panel">
               <PanelHead
                 icon={TerminalSquare}
@@ -2030,6 +2185,37 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- agent-handoff --json', 'npm run admin -- agent-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/agent-handoff', 'npm run admin -- launch-gate --json', 'npm run admin -- production-plan --json']} />
             </article>
+            )}
+            {activeTab === 'launch' && (
+            <article className="ops-panel wide-panel">
+              <PanelHead
+                icon={ShieldCheck}
+                title="Provider launch matrix"
+                action={`${providerLaunch.summary.launchReady}/${providerLaunch.summary.total} ready`}
+              />
+              <div className="check-list">
+                <CheckItem ok={providerLaunch.ok} label="The local agent can inspect Gmail, Outlook, SendGrid/outbound email, Stripe, and signed-session launch proof from one report." />
+                <CheckItem ok={providerLaunch.productionReady} label={providerLaunch.productionReady ? 'Every provider row is production-ready.' : providerLaunch.recommendation.productionGuardrail} />
+                <CheckItem ok={providerLaunch.summary.secretSafe} label="Provider launch output lists environment variable names, proof commands, digests, and request IDs without credential values." />
+                <CheckItem ok={providerLaunch.rows.some((row) => row.id === 'outbound-email' && row.signedReplayCommand?.includes('webhook-signed'))} label="Outbound email and Stripe launch rows include signed webhook replay commands." />
+              </div>
+              <AdminTable
+                columns={['Provider', 'Status', 'Owner', 'Config', 'Sandbox', 'Next command']}
+                rows={providerLaunchRows}
+              />
+              <AdminTable
+                columns={['Provider', 'Webhook', 'Evidence', 'Latest proof']}
+                rows={providerLaunch.rows.map((row) => [
+                  row.id,
+                  row.webhookPath,
+                  row.requiredEvidence.slice(0, 2).join(' | '),
+                  row.latestEvidenceAt ? `${new Date(row.latestEvidenceAt).toLocaleString()} · ${row.latestEvidenceDigest ?? row.latestEvidenceRunId ?? 'recorded'}` : 'No saved provider evidence',
+                ])}
+              />
+              <CommandStrip commands={['npm run admin -- provider-launch --json', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/provider-launch', 'npm run admin -- integrations validate-sandbox --save-evidence ./signal-provider-evidence.json --json', 'npm run admin -- mailboxes watch mbx_gmail_sales --live-provider', 'npm run admin -- notifications digest tenant_demo --live-provider', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>']} />
+            </article>
+            )}
+            {activeTab === 'platform' && (
             <article className="ops-panel">
               <PanelHead
                 icon={Database}
@@ -2048,6 +2234,8 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- backend-handoff --json', 'npm run admin -- backend-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/backend-handoff', 'npm run admin -- backend --env-file ./.env.production --json', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- health --json', 'npm run test:state-service', 'npm run test:jwks-auth', 'npm run scheduler -- --once --dry-run --json']} />
             </article>
+            )}
+            {activeTab === 'launch' && (
             <article className="ops-panel wide-panel">
               <PanelHead
                 icon={Route}
@@ -2066,6 +2254,8 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- backend-cutover --json', 'npm run admin -- backend-cutover --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/backend-cutover', 'SIGNAL_STATE_SERVICE_BACKEND=postgres DATABASE_URL=postgres://... SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- health --json', 'SIGNAL_BACKEND_MODE=external-service SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run api', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json']} />
             </article>
+            )}
+            {activeTab === 'platform' && (
             <article className="ops-panel wide-panel">
               <PanelHead
                 icon={RefreshCw}
@@ -2084,6 +2274,9 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- scheduler-handoff --json', 'npm run admin -- scheduler-handoff --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/scheduler-handoff', 'npm run scheduler -- --once --dry-run --json', 'SIGNAL_JOB_SCHEDULER=signal-scheduler SIGNAL_PROVIDER_VALIDATION_SCHEDULER=signal-scheduler npm run scheduler -- --once --json', 'npm run admin -- operations-health --json', 'npm run admin -- jobs retry <jobId>', 'npm run admin -- jobs drain billing_webhook', 'npm run admin -- launch-gate package ./signal-launch-evidence.json --env-file ./.env.production --json']} />
             </article>
+            )}
+            {activeTab === 'launch' && (
+            <>
             <article className="ops-panel wide-panel">
               <PanelHead
                 icon={CheckCircle2}
@@ -2140,6 +2333,10 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- qa-answers --json', 'npm run admin -- qa-answers --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/qa-answers', 'npm run admin -- dashboard-audit --json', 'npm run admin -- onboarding-readiness --json', 'npm run admin -- lifecycle-playbook --json', 'npm run admin -- provider-launch --env-file ./.env.production --json']} />
             </article>
+            </>
+            )}
+            {activeTab === 'platform' && (
+            <>
             <article className="ops-panel">
               <PanelHead
                 icon={Users}
@@ -2187,31 +2384,6 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
             </article>
             <article className="ops-panel">
               <PanelHead
-                icon={Database}
-                title="Dashboard calculation audit"
-                action={`${dashboardAudit.summary.passed}/${dashboardAudit.summary.total} checks`}
-              />
-              <div className="check-list">
-                <CheckItem ok={dashboardAudit.ok} label={dashboardAudit.ok ? 'Dashboard visible counts reconcile with shared state summary totals.' : `${dashboardAudit.summary.failed} dashboard calculation mismatch needs review.`} />
-                <CheckItem ok={dashboardAudit.summary.scopedRows > 0} label="User workspace rows are explicitly actor-scoped while admin rows reconcile against global state totals." />
-                <CheckItem ok={dashboardAudit.backend.mode !== 'unknown'} label={`Backend boundary for this audit is ${dashboardAudit.backend.mode}.`} />
-              </div>
-              <AdminTable
-                columns={['Area', 'Check', 'Display', 'Summary', 'Total', 'Scope', 'Status']}
-                rows={dashboardAudit.rows.map((row) => [
-                  titleize(row.area),
-                  row.check,
-                  String(row.displayValue),
-                  `${row.summaryKey}=${row.summaryValue}`,
-                  String(row.totalValue),
-                  titleize(row.scope),
-                  row.ok ? 'Pass' : 'Mismatch',
-                ])}
-              />
-              <CommandStrip commands={['npm run admin -- dashboard-audit --json', 'curl http://127.0.0.1:8787/api/dashboard-audit', 'npm run admin -- dashboard-audit --env-file ./.env.production --json']} />
-            </article>
-            <article className="ops-panel">
-              <PanelHead
                 icon={Activity}
                 title="Webhook and rate-limit health"
                 action={operationsHealth.ok ? 'Local ready' : 'Attention'}
@@ -2244,6 +2416,10 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- operations-health --json', 'curl http://127.0.0.1:8787/api/operations-health', 'npm run admin -- jobs run outbound_email --limit 1', 'npm run admin -- jobs drain billing_webhook', 'npm run admin -- integrations run-scheduled --json']} />
             </article>
+            </>
+            )}
+            {activeTab === 'launch' && (
+            <>
             <article className="ops-panel">
               <PanelHead
                 icon={ShieldCheck}
@@ -2320,6 +2496,10 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- production-drill --json', 'npm run admin -- production-drill --env-file ./.env.production --json', 'curl http://127.0.0.1:8787/api/production-drill', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- backup ./signal-prod-backup.json --json', 'npm run state-service:admin -- verify ./signal-prod-backup.json --json', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- restore ./signal-prod-backup.json --dry-run --json', 'npm run scheduler -- --once --dry-run --json']} />
             </article>
+            </>
+            )}
+            {activeTab === 'platform' && (
+            <>
             <article className="ops-panel">
               <PanelHead icon={Clock3} title="Operational jobs" action={`${failedJobs.length} failed · ${queuedJobs.length} queued`} />
               <div className="job-stack">
@@ -2521,6 +2701,8 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               />
               <CommandStrip commands={['npm run admin -- notifications --json', 'npm run admin -- notifications digest tenant_demo', 'SIGNAL_EMAIL_PROVIDER=sendgrid SIGNAL_EMAIL_PROVIDER_MODE=live SIGNAL_SENDGRID_ASM_GROUP_ID=... SIGNAL_SENDGRID_CATEGORIES=sales_signal,product_ideas npm run admin -- jobs run outbound_email --limit 1', 'SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET=<email-webhook-secret> npm run admin -- notifications webhook-signed ./email-event.json <Signal-Email-Signature>', 'SIGNAL_SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY=... npm run admin -- notifications sendgrid-webhook-signed ./sendgrid-events.json <signature> <timestamp>', 'npm run admin -- notifications unsubscribe usr_product']} />
             </article>
+            </>
+            )}
           </section>
         )}
 
@@ -2561,6 +2743,9 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
             </div>
           </section>
         )}
+            </section>
+          </div>
+        </div>
       </main>
     </div>
   );
