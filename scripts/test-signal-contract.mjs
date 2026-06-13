@@ -514,6 +514,9 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
   const cliReadiness = await runCli(['readiness', '--json']);
   assert.equal(cliReadiness.ok, true);
   assert.equal(cliReadiness.readiness.productionReady, false);
+  assert.equal(cliReadiness.readiness.summary.localReady, cliReadiness.readiness.summary.total);
+  assert.equal(cliReadiness.readiness.summary.total, 10);
+  assert(cliReadiness.readiness.requirements.every((requirement) => requirement.localOk), JSON.stringify(cliReadiness.readiness.requirements.filter((requirement) => !requirement.localOk)));
   assert(cliReadiness.readiness.requirements.some((requirement) => requirement.id === 'workspace_onboarding' && requirement.localOk === true));
   assert(cliReadiness.readiness.requirements.some((requirement) => requirement.id === 'provider_integrations' && requirement.status === 'needs_live_provider'));
   assert(cliReadiness.readiness.requirements.some((requirement) => requirement.id === 'production_backend_and_scheduler' && requirement.status === 'needs_production'));
@@ -526,6 +529,21 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
   assert.equal(cliCompletionAudit.completion.summary.secretSafe, true);
   assert.equal(cliCompletionAudit.completion.nextLocal, null);
   assert.equal(cliCompletionAudit.completion.nextProduction.id, 'workspace_registration_onboarding');
+  assert.equal(cliCompletionAudit.completion.rows.length, 8);
+  assert(cliCompletionAudit.completion.rows.every((row) => row.localOk), JSON.stringify(cliCompletionAudit.completion.rows.filter((row) => !row.localOk)));
+  assert.deepEqual(
+    cliCompletionAudit.completion.rows.map((row) => row.id).sort(),
+    [
+      'core_admin_area',
+      'core_user_workspace',
+      'email_flow_management',
+      'local_admin_cli_agent',
+      'payment_processing_architecture',
+      'public_product_entry',
+      'rbac_privacy_multi_member_org',
+      'workspace_registration_onboarding',
+    ],
+  );
   assert(cliCompletionAudit.completion.rows.some((row) => row.id === 'core_user_workspace' && row.localOk === true));
   assert(cliCompletionAudit.completion.rows.some((row) => row.id === 'email_flow_management' && row.commands.some((command) => command.includes('email-handoff'))));
   assert(cliCompletionAudit.completion.runnableCommands.some((command) => command.includes('completion-audit --json')));
@@ -902,6 +920,9 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(readiness.status, 200);
     assert.equal(readiness.payload.ok, true);
     assert.equal(readiness.payload.readiness.productionReady, false);
+    assert.equal(readiness.payload.readiness.summary.localReady, readiness.payload.readiness.summary.total);
+    assert.equal(readiness.payload.readiness.summary.total, 10);
+    assert(readiness.payload.readiness.requirements.every((requirement) => requirement.localOk), JSON.stringify(readiness.payload.readiness.requirements.filter((requirement) => !requirement.localOk)));
     assert(readiness.payload.readiness.requirements.some((requirement) => requirement.id === 'model_governance_and_tuning' && requirement.localOk === true));
     assert(readiness.payload.readiness.requirements.some((requirement) => requirement.id === 'provider_integrations' && requirement.status === 'needs_live_provider'));
     assert(readiness.payload.readiness.requirements.some((requirement) => requirement.id === 'production_backend_and_scheduler' && requirement.status === 'needs_production'));
@@ -916,6 +937,21 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(completionAudit.payload.completion.summary.secretSafe, true);
     assert.equal(completionAudit.payload.completion.nextLocal, null);
     assert.equal(completionAudit.payload.completion.nextProduction.id, 'workspace_registration_onboarding');
+    assert.equal(completionAudit.payload.completion.rows.length, 8);
+    assert(completionAudit.payload.completion.rows.every((row) => row.localOk), JSON.stringify(completionAudit.payload.completion.rows.filter((row) => !row.localOk)));
+    assert.deepEqual(
+      completionAudit.payload.completion.rows.map((row) => row.id).sort(),
+      [
+        'core_admin_area',
+        'core_user_workspace',
+        'email_flow_management',
+        'local_admin_cli_agent',
+        'payment_processing_architecture',
+        'public_product_entry',
+        'rbac_privacy_multi_member_org',
+        'workspace_registration_onboarding',
+      ],
+    );
     assert(completionAudit.payload.completion.rows.some((row) => row.id === 'local_admin_cli_agent' && row.api === '/api/agent-handoff'));
     assert(completionAudit.payload.completion.rows.some((row) => row.id === 'payment_processing_architecture' && row.commands.some((command) => command.includes('payment-handoff'))));
     assert(!JSON.stringify(completionAudit.payload.completion).includes(sessionSecret), 'completion audit API must not serialize local session secrets');
