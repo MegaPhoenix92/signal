@@ -18,6 +18,9 @@ import {
   createStateStore,
   StateServiceError,
 } from './signal-state-service.mjs';
+import {
+  backendReadiness,
+} from './signal-backend-readiness.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const execFileAsync = promisify(execFile);
@@ -153,11 +156,16 @@ async function requestApi(apiBaseUrl, pathname, { body, method = 'GET', token } 
 }
 
 class FakePgPool {
-  constructor() {
+  constructor({ omitPolicies = false } = {}) {
     this.backups = [];
     this.current = null;
     this.ended = false;
+    this.migrations = [];
+    this.omitPolicies = omitPolicies;
+    this.policies = new Map();
     this.queries = [];
+    this.rlsTables = new Set();
+    this.tables = new Set();
   }
 
   async query(sql, params = []) {
@@ -181,8 +189,66 @@ class FakePgPool {
     if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(normalized)) {
       return { rowCount: 0, rows: [] };
     }
-    if (normalized.startsWith('CREATE TABLE') || normalized.startsWith('CREATE INDEX')) {
+    if (normalized.startsWith('CREATE TABLE')) {
+      const tableName = normalized.match(/CREATE TABLE IF NOT EXISTS "([^"]+)"/)?.[1];
+      if (tableName) {
+        this.tables.add(tableName);
+      }
       return { rowCount: 0, rows: [] };
+    }
+    if (normalized.startsWith('CREATE INDEX')) {
+      return { rowCount: 0, rows: [] };
+    }
+    if (normalized.startsWith('SELECT to_regclass')) {
+      const tableName = params[0];
+      return { rowCount: 1, rows: [{ regclass: this.tables.has(tableName) ? tableName : null }] };
+    }
+    if (normalized.startsWith('SELECT version, name, checksum, applied_at')) {
+      return { rowCount: this.migrations.length, rows: this.migrations };
+    }
+    if (normalized.startsWith('ALTER TABLE') && normalized.includes('ENABLE ROW LEVEL SECURITY')) {
+      const tableName = normalized.match(/ALTER TABLE "([^"]+)"/)?.[1];
+      if (tableName) {
+        this.rlsTables.add(tableName);
+      }
+      return { rowCount: 0, rows: [] };
+    }
+    if (normalized.startsWith('DROP POLICY IF EXISTS')) {
+      const match = normalized.match(/DROP POLICY IF EXISTS "([^"]+)" ON "([^"]+)"/);
+      if (match) {
+        const [, policyName, tableName] = match;
+        const policies = this.policies.get(tableName) ?? new Set();
+        policies.delete(policyName);
+        this.policies.set(tableName, policies);
+      }
+      return { rowCount: 0, rows: [] };
+    }
+    if (normalized.startsWith('CREATE POLICY')) {
+      const match = normalized.match(/CREATE POLICY "([^"]+)" ON "([^"]+)"/);
+      if (match && !this.omitPolicies) {
+        const [, policyName, tableName] = match;
+        const policies = this.policies.get(tableName) ?? new Set();
+        policies.add(policyName);
+        this.policies.set(tableName, policies);
+      }
+      return { rowCount: 0, rows: [] };
+    }
+    if (normalized.startsWith('SELECT tablename, policyname FROM pg_policies')) {
+      const requestedTables = params[0] ?? [];
+      const rows = requestedTables.flatMap((tableName) =>
+        [...(this.policies.get(tableName) ?? [])].map((policyName) => ({
+          policyname: policyName,
+          tablename: tableName,
+        })));
+      return { rowCount: rows.length, rows };
+    }
+    if (normalized.startsWith('SELECT relname, relrowsecurity FROM pg_class')) {
+      const requestedTables = params[0] ?? [];
+      const rows = requestedTables.map((tableName) => ({
+        relname: tableName,
+        relrowsecurity: this.rlsTables.has(tableName),
+      }));
+      return { rowCount: rows.length, rows };
     }
     if (normalized.startsWith('SELECT count(*)::int AS backup_count')) {
       return {
@@ -219,6 +285,15 @@ class FakePgPool {
       });
       return { rowCount: 1, rows: [] };
     }
+    if (normalized.startsWith('INSERT INTO "signal_schema_migrations"')) {
+      this.migrations.push({
+        applied_at: new Date('2026-06-04T12:00:00.000Z'),
+        checksum: params[2],
+        name: params[1],
+        version: params[0],
+      });
+      return { rowCount: 1, rows: [] };
+    }
     if (normalized.startsWith('INSERT INTO') && normalized.includes('_current')) {
       this.current = {
         body: JSON.parse(params[1]),
@@ -248,6 +323,8 @@ test('Signal state service postgres backend migrates, versions, and backs up sta
   await store.init();
   assert(pool.queries.some((query) => query.sql.includes('CREATE TABLE IF NOT EXISTS "signal_state_test_current"')), 'postgres mode should create the current state table');
   assert(pool.queries.some((query) => query.sql.includes('CREATE TABLE IF NOT EXISTS "signal_state_test_backups"')), 'postgres mode should create the backup table');
+  assert.equal(pool.migrations.length, 1);
+  assert.equal(pool.migrations[0].version, 1);
 
   assert.equal(await store.read(), null);
   const firstMeta = await store.write(JSON.stringify({ auditEvents: [], meta: { tenantId: 'tenant_demo' } }));
@@ -255,6 +332,8 @@ test('Signal state service postgres backend migrates, versions, and backs up sta
   assert.equal(firstMeta.exists, true);
   assert.equal(firstMeta.revision, 1);
   assert.equal(firstMeta.backups, 0);
+  assert.equal(firstMeta.migrations.applied, 1);
+  assert.equal(firstMeta.migrations.pending, 0);
   assert.equal(firstMeta.stateTable, 'signal_state_test_current');
   assert(!JSON.stringify(firstMeta).includes('secret'), 'postgres metadata must not serialize database credentials');
 
@@ -278,6 +357,47 @@ test('Signal state service postgres backend migrates, versions, and backs up sta
   assert.equal(pool.ended, true);
 });
 
+test('Signal state service postgres backend refuses pending migrations when migrate is disabled', async () => {
+  const config = createStateServiceConfig({
+    DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+    SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+    SIGNAL_STATE_SERVICE_HOST: '127.0.0.1',
+    SIGNAL_STATE_SERVICE_MIGRATE: 'false',
+    SIGNAL_STATE_SERVICE_PORT: '8791',
+    SIGNAL_STATE_SERVICE_TABLE_PREFIX: 'signal_state_pending',
+    SIGNAL_STATE_SERVICE_TOKEN: 'state_service_token',
+  });
+  const store = await createStateStore(config, { pgPool: new FakePgPool() });
+  await assert.rejects(
+    () => store.init(),
+    (error) => error instanceof StateServiceError && error.code === 'STATE_SERVICE_MIGRATIONS_PENDING',
+  );
+});
+
+test('Signal state service postgres backend rejects tampered applied migration checksums', async () => {
+  const config = createStateServiceConfig({
+    DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+    SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+    SIGNAL_STATE_SERVICE_HOST: '127.0.0.1',
+    SIGNAL_STATE_SERVICE_PORT: '8791',
+    SIGNAL_STATE_SERVICE_TABLE_PREFIX: 'signal_state_checksum',
+    SIGNAL_STATE_SERVICE_TOKEN: 'state_service_token',
+  });
+  const pool = new FakePgPool();
+  pool.tables.add(config.migrationTable);
+  pool.migrations.push({
+    applied_at: new Date('2026-06-04T12:00:00.000Z'),
+    checksum: 'changed-checksum',
+    name: 'initial',
+    version: 1,
+  });
+  const store = await createStateStore(config, { pgPool: pool });
+  await assert.rejects(
+    () => store.init(),
+    (error) => error instanceof StateServiceError && error.code === 'STATE_SERVICE_MIGRATION_CHECKSUM_CHANGED',
+  );
+});
+
 test('Signal state service postgres backend requires database configuration', () => {
   assert.throws(
     () => createStateServiceConfig({
@@ -286,6 +406,81 @@ test('Signal state service postgres backend requires database configuration', ()
     }),
     /DATABASE_URL/,
   );
+});
+
+test('Signal state service postgres RLS mode creates and verifies policies', async () => {
+  const config = createStateServiceConfig({
+    DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+    SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+    SIGNAL_STATE_SERVICE_HOST: '127.0.0.1',
+    SIGNAL_STATE_SERVICE_PORT: '8791',
+    SIGNAL_STATE_SERVICE_RLS: 'true',
+    SIGNAL_STATE_SERVICE_STATE_ID: 'tenant_demo',
+    SIGNAL_STATE_SERVICE_TABLE_PREFIX: 'signal_state_rls',
+    SIGNAL_STATE_SERVICE_TOKEN: 'state_service_token',
+  });
+  const pool = new FakePgPool();
+  const store = await createStateStore(config, { pgPool: pool });
+  await store.init();
+  assert(pool.queries.some((query) => query.sql.includes('ALTER TABLE "signal_state_rls_current" ENABLE ROW LEVEL SECURITY')), 'RLS mode should enable RLS on current state table');
+  assert(pool.queries.some((query) => query.sql.includes('CREATE POLICY "signal_state_rls_current_service_role_policy"')), 'RLS mode should create current table policy');
+  assert(pool.queries.some((query) => query.sql.includes('FROM pg_policies')), 'RLS mode should verify policies through pg_policies');
+  const meta = await store.meta();
+  assert.equal(meta.rls.ok, true);
+  assert.equal(meta.rls.tables.length, 2);
+  assert(meta.rls.tables.every((table) => table.rlsEnabled && table.policyCount > 0));
+});
+
+test('Signal state service postgres RLS mode fails startup when policies are absent', async () => {
+  const config = createStateServiceConfig({
+    DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+    SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+    SIGNAL_STATE_SERVICE_HOST: '127.0.0.1',
+    SIGNAL_STATE_SERVICE_PORT: '8791',
+    SIGNAL_STATE_SERVICE_RLS: 'true',
+    SIGNAL_STATE_SERVICE_STATE_ID: 'tenant_demo',
+    SIGNAL_STATE_SERVICE_TABLE_PREFIX: 'signal_state_missing_rls',
+    SIGNAL_STATE_SERVICE_TOKEN: 'state_service_token',
+  });
+  const store = await createStateStore(config, { pgPool: new FakePgPool({ omitPolicies: true }) });
+  await assert.rejects(
+    () => store.init(),
+    (error) => error instanceof StateServiceError && error.code === 'STATE_SERVICE_RLS_NOT_VERIFIED',
+  );
+});
+
+test('Backend readiness requires real state-service RLS verification when RLS mode is claimed', () => {
+  const missingRls = backendReadiness({
+    env: {
+      DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+      SIGNAL_BACKEND_MODE: 'external-service',
+      SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+      SIGNAL_STATE_SERVICE_URL: 'http://state-service:8791',
+      SIGNAL_TENANT_ISOLATION_MODE: 'rls',
+    },
+  });
+  assert.equal(missingRls.checks.find((item) => item.id === 'tenant_isolation')?.ok, false);
+
+  const verifiedRls = backendReadiness({
+    env: {
+      DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+      SIGNAL_BACKEND_MODE: 'external-service',
+      SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+      SIGNAL_STATE_SERVICE_RLS: 'true',
+      SIGNAL_STATE_SERVICE_URL: 'http://state-service:8791',
+      SIGNAL_TENANT_ISOLATION_MODE: 'rls',
+    },
+  });
+  const check = verifiedRls.checks.find((item) => item.id === 'tenant_isolation');
+  assert.equal(check?.ok, true);
+  assert.equal(check?.details.rlsCatalogVerifiedOnStartup, true);
+});
+
+test('Signal state-service admin HTTP calls thread the active env into auth headers', async () => {
+  const source = await fs.readFile(path.join(rootDir, 'scripts', 'signal-state-service-admin.mjs'), 'utf8');
+  assert.equal((source.match(/authHeaders\(env\)/g) ?? []).length, 5);
+  assert.equal((source.match(/authHeaders\(\)/g) ?? []).length, 0);
+  assert.match(source, /requestState\(stateUrl, env\)/);
 });
 
 test('Signal state-service admin CLI backs up, verifies, and restores through bearer-protected service', async (t) => {

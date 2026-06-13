@@ -322,6 +322,37 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assertTextIncludes(publicRoute.text, 'Create workspace', 'public route should expose the registration CTA');
   assertTextIncludes(publicRoute.text, 'Gmail + Outlook', 'public route should describe supported inbox sources');
 
+  await client.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  const mobileNav = await evaluate(client, `(async () => {
+    const button = document.querySelector('.mobile-nav-toggle');
+    if (!button) {
+      throw new Error('Mobile navigation toggle missing');
+    }
+    button.click();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const panel = document.querySelector('#mobile-nav-menu');
+    const open = {
+      ariaExpanded: button.getAttribute('aria-expanded'),
+      buttonDisplay: getComputedStyle(button).display,
+      hidden: panel?.hidden,
+      text: panel?.innerText ?? '',
+    };
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return {
+      open,
+      closedExpanded: button.getAttribute('aria-expanded'),
+      closedHidden: panel?.hidden,
+    };
+  })()`);
+  assert.notEqual(mobileNav.open.buttonDisplay, 'none', 'mobile navigation toggle should be visible at narrow widths');
+  assert.equal(mobileNav.open.ariaExpanded, 'true', 'mobile navigation should report expanded after toggle');
+  assert.equal(mobileNav.open.hidden, false, 'mobile navigation panel should open from hamburger');
+  assertTextIncludes(mobileNav.open.text, 'Admin', 'mobile navigation should include app area links');
+  assert.equal(mobileNav.closedExpanded, 'false', 'Escape should close the mobile navigation');
+  assert.equal(mobileNav.closedHidden, true, 'Escape should hide the mobile navigation panel');
+  await client.send('Emulation.clearDeviceMetricsOverride');
+
   const registerRoute = await navigate(client, `${baseUrl}#register`, 'Create the workspace before the dashboard.');
   assert.equal(registerRoute.snapshot.hash, '#register');
   assert.equal(registerRoute.snapshot.errorOverlay, false);
@@ -370,6 +401,29 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assert.equal(adminRoute.snapshot.errorOverlay, false);
   assertTextIncludes(adminRoute.text, 'Readiness checks', 'admin overview should render readiness checks');
   assertTextIncludes(adminRoute.text, 'Admin console', 'admin route should render the admin console heading');
+
+  const adminOverviewRoute = await navigate(client, `${baseUrl}#admin/overview`, 'Readiness checks');
+  assert.equal(adminOverviewRoute.snapshot.hash, '#admin/overview');
+  assertTextIncludes(adminOverviewRoute.text, 'Admin console', 'admin overview deep link should render overview tab content');
+
+  const adminOpsRoute = await navigate(client, `${baseUrl}#admin/ops`, 'Webhook and rate-limit health');
+  assert.equal(adminOpsRoute.snapshot.hash, '#admin/ops');
+  assertTextIncludes(adminOpsRoute.text, 'API session registry', 'admin operations deep link should render operations tab content');
+
+  const adminPaymentsRoute = await navigate(client, `${baseUrl}#admin/payments`, 'Billing overrides');
+  assert.equal(adminPaymentsRoute.snapshot.hash, '#admin/payments');
+  assertTextIncludes(adminPaymentsRoute.text, 'Payment lifecycle audit', 'admin payments deep link should render payments tab content');
+
+  await evaluate(client, 'history.back()');
+  const backText = await waitForText(client, 'Webhook and rate-limit health');
+  const backHash = await evaluate(client, 'window.location.hash');
+  assert.equal(backHash, '#admin/ops');
+  assertTextIncludes(backText, 'API session registry', 'admin back button should restore operations tab');
+
+  const unknownAdminRoute = await navigate(client, `${baseUrl}#admin/not-a-tab`, 'Readiness checks');
+  assert.equal(unknownAdminRoute.snapshot.hash, '#admin/not-a-tab');
+  assertTextIncludes(unknownAdminRoute.text, 'Admin console', 'unknown admin tab should fall back to overview content');
+
   await evaluate(client, `(() => {
     const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Users'));
     if (!button) {

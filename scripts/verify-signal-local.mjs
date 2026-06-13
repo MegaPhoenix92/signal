@@ -154,8 +154,13 @@ const productionBackendReadiness = backendReadiness({
     SIGNAL_AUTH_PROVIDER: 'jwks',
     SIGNAL_BACKEND_MODE: 'production-node',
     SIGNAL_JOB_SCHEDULER: 'worker',
+    SIGNAL_PROVIDER_VALIDATION_SCHEDULER: 'worker',
     SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
     SIGNAL_SESSION_SECRET: 'super_secret_session_value',
+    SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+    SIGNAL_STATE_SERVICE_DATABASE_URL: 'postgres://signal:db_password@db.example/signal',
+    SIGNAL_STATE_SERVICE_RLS: 'true',
+    SIGNAL_STATE_SERVICE_URL: 'https://state.signal.example/state',
     SIGNAL_TENANT_ISOLATION_MODE: 'rls',
   },
   statePath,
@@ -559,7 +564,7 @@ const callbackUrl = new URL(gmailCallbackSession.details.localCallbackUrl);
 await expectStateError('tampered OAuth state is rejected', 'OAUTH_STATE_SIGNATURE_INVALID', () =>
   completeMailboxConnectionFromOAuthCallback('gmail', { code: 'provider-code', state: `${callbackUrl.searchParams.get('state')}tampered` }, { actorUserId: 'usr_product', statePath }),
 );
-const callbackConnection = await completeMailboxConnectionFromOAuthCallback('gmail', { code: 'provider-code', state: callbackUrl.searchParams.get('state') }, { actorUserId: 'usr_product', statePath });
+const callbackConnection = await completeMailboxConnectionFromOAuthCallback('gmail', { code: callbackUrl.searchParams.get('code'), state: callbackUrl.searchParams.get('state') }, { actorUserId: 'usr_product', statePath });
 assert.equal(callbackConnection.action, 'mailboxes.oauth-callback');
 assert.equal(callbackConnection.details.oauthStateStatus, 'verified');
 assert.equal(callbackConnection.summary.connectedMailboxes, 3);
@@ -1871,6 +1876,12 @@ const signedUpdatedActivePayment = await handleSignedStripePaymentWebhook(stripe
 assert.equal(signedUpdatedActivePayment.details.status, 'active');
 paymentState = await loadState({ statePath });
 assert.equal(paymentState.entitlements.find((entitlement) => entitlement.tenantId === 'tenant_demo')?.status, 'active');
+
+const retryState = await loadState({ statePath });
+const retryTarget = retryState.jobs.find((job) => job.id === 'job_outlook_reauth_001');
+retryTarget.status = 'failed';
+retryTarget.attempts = 1;
+await saveState(retryState, { statePath });
 
 await expectForbidden('member cannot retry job', () =>
   retryJob('job_outlook_reauth_001', { actorUserId: 'usr_product', statePath }),

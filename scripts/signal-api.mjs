@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import crypto from 'node:crypto';
 import http from 'node:http';
 import {
   SignalStateError,
@@ -38,10 +39,12 @@ import {
   qaAnswersReport,
   providerValidationSchedulesDue,
   productReadinessReport,
+  recordWebhookIngestOutcome,
   recordProviderSandboxValidation,
   registerTenantWorkspace,
   resolveStatePath,
   schedulerHandoffReport,
+  scopeStateForActor,
   signalDigestionPipelineReport,
   summarizeState,
   switchSession,
@@ -56,6 +59,7 @@ import {
   requestAuth,
   requestSessionToken,
   requireAdminRequestAuth,
+  requireKnownLocalActor,
   requireRegisteredSessionRequestAuth,
   requireOAuthActor,
   requireWebhookActor,
@@ -73,6 +77,9 @@ import {
 import {
   backendReadiness,
 } from './signal-backend-readiness.mjs';
+import {
+  createLogger,
+} from './signal-logger.mjs';
 
 assertApiSecurityConfig(process.env);
 
@@ -80,6 +87,95 @@ const host = process.env.SIGNAL_API_HOST ?? '127.0.0.1';
 const port = Number(process.env.SIGNAL_API_PORT ?? 8787);
 const statePath = resolveStatePath(process.env.SIGNAL_ADMIN_STATE);
 const corsHeaders = 'Authorization, Content-Type, Signal-Email-Signature, Stripe-Signature, X-Signal-Actor, X-Signal-Session, X-Twilio-Email-Event-Webhook-Signature, X-Twilio-Email-Event-Webhook-Timestamp';
+const rateBuckets = new Map();
+const logger = createLogger({ service: 'signal-api' });
+
+function positiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function bodyLimitBytes() {
+  return positiveInteger(process.env.SIGNAL_API_MAX_BODY_BYTES, 1024 * 1024);
+}
+
+function rateLimitConfig(kind) {
+  if (kind === 'webhook') {
+    return {
+      burst: positiveInteger(process.env.SIGNAL_API_WEBHOOK_RATE_LIMIT_BURST, positiveInteger(process.env.SIGNAL_API_RATE_LIMIT_BURST, 60)),
+      rps: positiveNumber(process.env.SIGNAL_API_WEBHOOK_RATE_LIMIT_RPS, positiveNumber(process.env.SIGNAL_API_RATE_LIMIT_RPS, 20)),
+    };
+  }
+  if (kind === 'unauthenticated') {
+    return {
+      burst: positiveInteger(process.env.SIGNAL_API_UNAUTH_RATE_LIMIT_BURST, positiveInteger(process.env.SIGNAL_API_RATE_LIMIT_BURST, 40)),
+      rps: positiveNumber(process.env.SIGNAL_API_UNAUTH_RATE_LIMIT_RPS, positiveNumber(process.env.SIGNAL_API_RATE_LIMIT_RPS, 10)),
+    };
+  }
+  return {
+    burst: positiveInteger(process.env.SIGNAL_API_RATE_LIMIT_BURST, 120),
+    rps: positiveNumber(process.env.SIGNAL_API_RATE_LIMIT_RPS, 40),
+  };
+}
+
+function clientAddress(req) {
+  const forwardedFor = req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim();
+  return forwardedFor || req.socket.remoteAddress || 'unknown';
+}
+
+function rateLimitKind(pathname) {
+  if (pathname === '/api/health') {
+    return 'exempt';
+  }
+  if (pathname.startsWith('/api/webhooks/')) {
+    return 'webhook';
+  }
+  if (pathname === '/api/registration' || pathname === '/api/invites/claim' || pathname === '/api/session/token' || pathname.startsWith('/api/oauth/')) {
+    return 'unauthenticated';
+  }
+  return 'authenticated';
+}
+
+function rateLimitIdentity(req, kind) {
+  const token = requestSessionToken(req, {});
+  const actor = req.headers['x-signal-actor']?.toString();
+  return [
+    kind,
+    clientAddress(req),
+    token ? `session:${token.slice(0, 32)}` : '',
+    actor ? `actor:${actor}` : '',
+  ].filter(Boolean).join('|');
+}
+
+function enforceRateLimit(req, pathname) {
+  const kind = rateLimitKind(pathname);
+  if (kind === 'exempt') {
+    return;
+  }
+  const config = rateLimitConfig(kind);
+  const key = rateLimitIdentity(req, kind);
+  const now = Date.now();
+  const bucket = rateBuckets.get(key) ?? { tokens: config.burst, updatedAt: now };
+  const elapsedSeconds = Math.max(0, (now - bucket.updatedAt) / 1000);
+  bucket.tokens = Math.min(config.burst, bucket.tokens + elapsedSeconds * config.rps);
+  bucket.updatedAt = now;
+  if (bucket.tokens < 1) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((1 - bucket.tokens) / config.rps));
+    rateBuckets.set(key, bucket);
+    throw new SignalStateError('Rate limit exceeded.', {
+      code: 'RATE_LIMITED',
+      status: 429,
+      details: { kind, retryAfterSeconds },
+    });
+  }
+  bucket.tokens -= 1;
+  rateBuckets.set(key, bucket);
+}
 
 function configuredCorsOrigins() {
   return (process.env.SIGNAL_API_CORS_ORIGINS ?? process.env.SIGNAL_API_CORS_ORIGIN ?? '')
@@ -164,7 +260,17 @@ async function readBody(req) {
 
 async function readRawBody(req) {
   const chunks = [];
+  let bytes = 0;
+  const maxBodyBytes = bodyLimitBytes();
   for await (const chunk of req) {
+    bytes += chunk.length;
+    if (bytes > maxBodyBytes) {
+      throw new SignalStateError('Request body is too large.', {
+        code: 'REQUEST_BODY_TOO_LARGE',
+        status: 413,
+        details: { maxBodyBytes },
+      });
+    }
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8');
@@ -172,14 +278,14 @@ async function readRawBody(req) {
 
 async function requestStateAuth(req, body = {}) {
   const auth = await requestAuth(req, body);
+  const state = await loadState({ statePath });
+  requireKnownLocalActor(state, auth);
   if (auth.auth.mode !== 'signed_session') {
     if (auth.auth.mode === 'jwks') {
-      const state = await loadState({ statePath });
       requireRegisteredSessionRequestAuth(state, auth);
     }
     return auth;
   }
-  const state = await loadState({ statePath });
   requireRegisteredSessionRequestAuth(state, auth);
   return auth;
 }
@@ -187,8 +293,45 @@ async function requestStateAuth(req, body = {}) {
 async function authenticatedState(req, body = {}) {
   const auth = await requestAuth(req, body);
   const state = await loadState({ statePath });
+  requireKnownLocalActor(state, auth);
   requireRegisteredSessionRequestAuth(state, auth);
   return { auth, state };
+}
+
+function statePayloadForActor(state, actorOrUserId) {
+  const scopedState = scopeStateForActor(state, actorOrUserId);
+  return {
+    state: scopedState,
+    summary: summarizeState(scopedState, statePath),
+    doctor: doctor(scopedState),
+  };
+}
+
+async function noteWebhookOutcome(provider, { accepted, eventType = 'unknown', reason = null, status = null, tenantId = null } = {}) {
+  try {
+    await recordWebhookIngestOutcome({ accepted, eventType, provider, reason, status, tenantId }, { statePath });
+  } catch (error) {
+    logger.warn('webhook_outcome_record_failed', {
+      error: error instanceof Error ? error.message : String(error),
+      provider,
+    });
+  }
+}
+
+function webhookProviderForPath(pathname) {
+  if (pathname === '/api/webhooks/stripe') {
+    return 'stripe';
+  }
+  if (pathname === '/api/webhooks/email') {
+    return 'email';
+  }
+  if (pathname === '/api/webhooks/gmail') {
+    return 'gmail';
+  }
+  if (pathname === '/api/webhooks/outlook') {
+    return 'outlook';
+  }
+  return null;
 }
 
 function errorPayload(error) {
@@ -214,8 +357,21 @@ function errorPayload(error) {
   };
 }
 
+async function preflightRequest(req, url) {
+  enforceRateLimit(req, url.pathname);
+  const contentLength = req.headers['content-length'];
+  if (contentLength && Number(contentLength) > bodyLimitBytes()) {
+    throw new SignalStateError('Request body is too large.', {
+      code: 'REQUEST_BODY_TOO_LARGE',
+      status: 413,
+      details: { maxBodyBytes: bodyLimitBytes() },
+    });
+  }
+}
+
 async function route(req, res) {
   const url = new URL(req.url ?? '/', `http://${host}:${port}`);
+  await preflightRequest(req, url);
 
   if (req.method === 'OPTIONS') {
     sendJson(res, 204, {});
@@ -223,6 +379,54 @@ async function route(req, res) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/health') {
+    sendJson(res, 200, {
+      ok: true,
+      service: 'signal-local-api',
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/ready') {
+    const components = [];
+    try {
+      const { state, summary } = await ensureState({ statePath });
+      components.push({ component: 'state', ok: true });
+      if (/^https?:\/\//i.test(statePath)) {
+        const healthUrl = new URL(statePath);
+        healthUrl.pathname = '/health';
+        healthUrl.search = '';
+        const health = await fetch(healthUrl, { signal: AbortSignal.timeout(Number(process.env.SIGNAL_READY_TIMEOUT_MS ?? 1500)) });
+        components.push({ component: 'state-service', ok: health.ok, status: health.status });
+        if (!health.ok) {
+          throw new SignalStateError('State service readiness check failed.', {
+            code: 'READY_STATE_SERVICE_UNAVAILABLE',
+            status: 503,
+            details: { component: 'state-service', status: health.status },
+          });
+        }
+      }
+      sendJson(res, 200, {
+        ok: true,
+        service: 'signal-local-api',
+        statePath,
+        components,
+        summary,
+        backend: backendReadiness({ statePath }),
+        doctor: doctor(state),
+      });
+    } catch (error) {
+      sendJson(res, 503, {
+        ok: false,
+        service: 'signal-local-api',
+        code: error.code ?? 'READY_CHECK_FAILED',
+        error: error instanceof Error ? error.message : String(error),
+        components,
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/status') {
     const { state, summary } = await ensureState({ statePath });
     sendJson(res, 200, {
       ok: true,
@@ -971,13 +1175,14 @@ async function route(req, res) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/state') {
-    const { state } = await authenticatedState(req);
+    const { auth, state } = await authenticatedState(req);
+    const payload = statePayloadForActor(state, auth.actorUserId);
     sendJson(res, 200, {
       ok: true,
-      state,
-      summary: summarizeState(state, statePath),
+      state: payload.state,
+      summary: payload.summary,
       backend: backendReadiness({ statePath }),
-      doctor: doctor(state),
+      doctor: payload.doctor,
     });
     return;
   }
@@ -1170,6 +1375,7 @@ async function route(req, res) {
     const body = await readBody(req);
     const auth = await requestStateAuth(req, body);
     const result = await applyMutation(body.action, body.args ?? {}, { actorUserId: auth.actorUserId, statePath });
+    const payload = statePayloadForActor(result.state, result.actor);
     sendJson(res, 200, {
       ok: true,
       action: result.action,
@@ -1180,10 +1386,10 @@ async function route(req, res) {
         role: result.actor.role,
       },
       details: result.details,
-      state: result.state,
-      summary: result.summary,
+      state: payload.state,
+      summary: payload.summary,
       auth: auth.auth,
-      doctor: doctor(result.state),
+      doctor: payload.doctor,
     });
     return;
   }
@@ -1195,6 +1401,12 @@ async function route(req, res) {
     const result = await handleSignedStripePaymentWebhook(rawBody, signatureHeader, {
       actorUserId: webhookActorUserId,
       statePath,
+    });
+    await noteWebhookOutcome('stripe', {
+      accepted: true,
+      eventType: result.details?.providerEventType ?? result.details?.type ?? result.action,
+      tenantId: result.details?.tenantId ?? null,
+      status: 200,
     });
     sendJson(res, 200, {
       ok: true,
@@ -1221,6 +1433,12 @@ async function route(req, res) {
           actorUserId: webhookActorUserId,
           statePath,
         });
+    await noteWebhookOutcome('email', {
+      accepted: true,
+      eventType: result.details?.event ?? result.details?.nextStatus ?? result.action,
+      tenantId: result.details?.tenantId ?? null,
+      status: 200,
+    });
     sendJson(res, 200, {
       ok: true,
       action: result.action,
@@ -1238,6 +1456,12 @@ async function route(req, res) {
     const result = await handleProviderWatchNotification('gmail', body, {
       actorUserId: webhookActorUserId,
       statePath,
+    });
+    await noteWebhookOutcome('gmail', {
+      accepted: true,
+      eventType: body?.message?.attributes?.eventType ?? body?.eventType ?? result.action,
+      tenantId: result.details?.tenantId ?? null,
+      status: 200,
     });
     sendJson(res, 200, {
       ok: true,
@@ -1261,6 +1485,12 @@ async function route(req, res) {
       actorUserId: webhookActorUserId,
       statePath,
     });
+    await noteWebhookOutcome('outlook', {
+      accepted: true,
+      eventType: body?.value?.[0]?.changeType ?? body?.changeType ?? result.action,
+      tenantId: result.details?.tenantId ?? null,
+      status: 200,
+    });
     sendJson(res, 200, {
       ok: true,
       action: result.action,
@@ -1275,15 +1505,52 @@ async function route(req, res) {
 }
 
 const server = http.createServer((req, res) => {
+  const requestId = req.headers['x-request-id']?.toString() || crypto.randomUUID();
+  const startedAt = process.hrtime.bigint();
+  res.setHeader('X-Request-Id', requestId);
+  res.once('finish', () => {
+    logger.info('request', {
+      durationMs: Number(process.hrtime.bigint() - startedAt) / 1_000_000,
+      method: req.method,
+      path: new URL(req.url ?? '/', `http://${host}:${port}`).pathname,
+      requestId,
+      status: res.statusCode,
+    });
+  });
   applyCorsHeaders(req, res);
-  route(req, res).catch((error) => {
+  route(req, res).catch(async (error) => {
+    logger.error('request_error', {
+      code: error.code,
+      error: error instanceof Error ? error.message : String(error),
+      requestId,
+    });
     const { status, payload } = errorPayload(error);
-    sendJson(res, status, payload);
+    const pathname = new URL(req.url ?? '/', `http://${host}:${port}`).pathname;
+    const webhookProvider = req.method === 'POST' ? webhookProviderForPath(pathname) : null;
+    if (webhookProvider) {
+      await noteWebhookOutcome(webhookProvider, {
+        accepted: false,
+        eventType: error.code ?? 'rejected',
+        reason: error instanceof Error ? error.message : String(error),
+        status,
+      });
+    }
+    const headers = status === 429 && payload.details?.retryAfterSeconds
+      ? { 'Retry-After': String(payload.details.retryAfterSeconds) }
+      : {};
+    sendJson(res, status, payload, headers);
   });
 });
 
 server.listen(port, host, async () => {
-  await ensureState({ statePath });
-  console.log(`Signal local API listening on http://${host}:${port}`);
-  console.log(`State: ${statePath}`);
+  logger.info('listening', { host, port, statePath });
+  try {
+    await ensureState({ statePath });
+  } catch (error) {
+    logger.warn('startup_dependency_not_ready', {
+      code: error.code,
+      error: error instanceof Error ? error.message : String(error),
+      statePath,
+    });
+  }
 });

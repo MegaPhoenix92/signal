@@ -531,6 +531,7 @@ export function summarizeState(state, statePath = resolveStatePath()) {
     activeEntitlements: state.entitlements?.filter((entitlement) => entitlement.status === 'active').length ?? 0,
     jobs: state.jobs?.length ?? 0,
     failedJobs: state.jobs?.filter((job) => job.status === 'failed').length ?? 0,
+    deadLetterJobs: state.deadLetter?.length ?? 0,
     apiSessions: state.apiSessions?.length ?? 0,
     activeApiSessions: activeApiSessions(state).length,
     revokedApiSessions: state.apiSessions?.filter((session) => session.status === 'revoked').length ?? 0,
@@ -544,6 +545,111 @@ export function summarizeState(state, statePath = resolveStatePath()) {
     activeUserId: activeUser?.id ?? null,
     activeUserRole: activeUser?.role ?? null,
   };
+}
+
+export function isPlatformOperator(user) {
+  return user?.platformRole === 'operator' || user?.role === 'operator';
+}
+
+function scopeAuditEventsForActor(state, scoped, actor) {
+  if (actor?.role !== 'admin') {
+    return undefined;
+  }
+  if (isPlatformOperator(actor)) {
+    return state.auditEvents ?? [];
+  }
+  const targetIds = new Set([
+    ...(scoped.tenants ?? []).map((item) => item.id),
+    ...(scoped.users ?? []).map((item) => item.id),
+    ...(scoped.memberships ?? []).map((item) => item.id),
+    ...(scoped.invites ?? []).map((item) => item.id),
+    ...(scoped.mailboxes ?? []).map((item) => item.id),
+    ...(scoped.emailFlows ?? []).map((item) => item.id),
+    ...(scoped.jobs ?? []).map((item) => item.id),
+    ...(scoped.deadLetter ?? []).flatMap((item) => [item.id, item.originalJobId, item.deadLetterId].filter(Boolean)),
+    ...(scoped.subscriptions ?? []).map((item) => item.id),
+    ...(scoped.invoices ?? []).map((item) => item.id),
+  ]);
+  const actorIds = new Set((scoped.users ?? []).map((item) => item.id));
+  return (state.auditEvents ?? []).filter((event) => actorIds.has(event.actor) || targetIds.has(event.targetId));
+}
+
+export function scopeStateForActor(state, actorOrUserId) {
+  const actor = typeof actorOrUserId === 'string'
+    ? (state.users ?? []).find((user) => user.id === actorOrUserId)
+    : actorOrUserId;
+  if (!actor) {
+    const clone = structuredClone(state);
+    delete clone.auditEvents;
+    return clone;
+  }
+  if (isPlatformOperator(actor)) {
+    return structuredClone(state);
+  }
+
+  const tenantIds = new Set([
+    actor.tenantId,
+    ...(state.memberships ?? [])
+      .filter((membership) => membership.userId === actor.id && membership.status === 'active')
+      .map((membership) => membership.tenantId),
+  ].filter(Boolean));
+  const scoped = structuredClone(state);
+  const belongsToTenant = (item) => !item?.tenantId || tenantIds.has(item.tenantId);
+  scoped.tenants = (state.tenants ?? []).filter((item) => tenantIds.has(item.id));
+  scoped.users = (state.users ?? []).filter(belongsToTenant);
+  const userIds = new Set(scoped.users.map((item) => item.id));
+  scoped.memberships = (state.memberships ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.userId));
+  scoped.invites = (state.invites ?? []).filter(belongsToTenant);
+  scoped.mailboxes = (state.mailboxes ?? []).filter(belongsToTenant);
+  const mailboxIds = new Set((scoped.mailboxes ?? []).map((item) => item.id));
+  scoped.mailboxConnectionSessions = (state.mailboxConnectionSessions ?? []).filter((item) => tenantIds.has(item.tenantId) || mailboxIds.has(item.mailboxId));
+  scoped.emailSyncCursors = (state.emailSyncCursors ?? []).filter((item) => tenantIds.has(item.tenantId) || mailboxIds.has(item.mailboxId));
+  scoped.emailWatchSubscriptions = (state.emailWatchSubscriptions ?? []).filter((item) => tenantIds.has(item.tenantId) || mailboxIds.has(item.mailboxId));
+  scoped.emailFlows = (state.emailFlows ?? []).filter(belongsToTenant);
+  const flowIds = new Set((scoped.emailFlows ?? []).map((item) => item.id));
+  scoped.routingRules = (state.routingRules ?? []).filter((item) => tenantIds.has(item.tenantId) || flowIds.has(item.flowId));
+  scoped.sourceMessages = (state.sourceMessages ?? []).filter((item) => tenantIds.has(item.tenantId) || mailboxIds.has(item.mailboxId));
+  scoped.flowRuns = (state.flowRuns ?? []).filter(belongsToTenant);
+  scoped.accountProfiles = (state.accountProfiles ?? []).filter(belongsToTenant);
+  scoped.accountEvents = (state.accountEvents ?? []).filter(belongsToTenant);
+  scoped.accountActions = (state.accountActions ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.ownerUserId));
+  scoped.accountReviews = (state.accountReviews ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.ownerUserId));
+  scoped.accountRecommendations = (state.accountRecommendations ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.ownerUserId));
+  scoped.notificationPreferences = (state.notificationPreferences ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.userId));
+  scoped.notificationEvents = (state.notificationEvents ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.userId));
+  scoped.notificationDigestRuns = (state.notificationDigestRuns ?? []).filter(belongsToTenant);
+  scoped.emailDeliveryMessages = (state.emailDeliveryMessages ?? []).filter(belongsToTenant);
+  scoped.signalQualitySettings = (state.signalQualitySettings ?? []).filter(belongsToTenant);
+  scoped.suppressionRules = (state.suppressionRules ?? []).filter(belongsToTenant);
+  scoped.signalFeedback = (state.signalFeedback ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.userId));
+  scoped.modelGovernancePolicies = (state.modelGovernancePolicies ?? []).filter(belongsToTenant);
+  scoped.governancePolicies = (state.governancePolicies ?? []).filter(belongsToTenant);
+  scoped.redactionRules = (state.redactionRules ?? []).filter(belongsToTenant);
+  scoped.dataRequests = (state.dataRequests ?? []).filter(belongsToTenant);
+  scoped.incidentNotes = (state.incidentNotes ?? []).filter(belongsToTenant);
+  scoped.signals = (state.signals ?? []).filter((item) => tenantIds.has(item.tenantId) || userIds.has(item.ownerUserId));
+  const signalIds = new Set((scoped.signals ?? []).map((item) => item.id));
+  scoped.signalHandoffs = (state.signalHandoffs ?? []).filter((item) => tenantIds.has(item.tenantId) || signalIds.has(item.signalId));
+  scoped.subscriptions = (state.subscriptions ?? []).filter(belongsToTenant);
+  scoped.entitlements = (state.entitlements ?? []).filter(belongsToTenant);
+  scoped.billingSessions = (state.billingSessions ?? []).filter(belongsToTenant);
+  scoped.billingOverrides = (state.billingOverrides ?? []).filter(belongsToTenant);
+  scoped.invoices = (state.invoices ?? []).filter(belongsToTenant);
+  scoped.paymentEvents = (state.paymentEvents ?? []).filter(belongsToTenant);
+  scoped.lifecycleNotices = (state.lifecycleNotices ?? []).filter(belongsToTenant);
+  scoped.jobs = (state.jobs ?? []).filter(belongsToTenant);
+  scoped.deadLetter = (state.deadLetter ?? []).filter(belongsToTenant);
+  scoped.apiSessions = (state.apiSessions ?? []).filter((item) => userIds.has(item.userId));
+  scoped.webhookEvents = (state.webhookEvents ?? []).filter((item) => !item.tenantId || tenantIds.has(item.tenantId));
+  scoped.auditEvents = scopeAuditEventsForActor(state, scoped, actor);
+  if (!scoped.auditEvents) {
+    delete scoped.auditEvents;
+  }
+  scoped.session = {
+    ...(scoped.session ?? {}),
+    activeUserId: actor.id,
+  };
+  return scoped;
 }
 
 function dashboardAuditRow({
@@ -1298,7 +1404,10 @@ function webhookHealthRows(state) {
   const deliveries = state.emailDeliveryMessages ?? [];
   const paymentEvents = state.paymentEvents ?? [];
   const jobs = state.jobs ?? [];
+  const outcomes = state.webhookEvents ?? [];
   return operationsWebhookCatalog.map((item) => {
+    const channelOutcomes = outcomes.filter((event) => event.provider === item.channel || (item.channel === 'outbound_email' && event.provider === 'email'));
+    const rejected = channelOutcomes.filter((event) => !event.accepted).length;
     if (item.channel === 'gmail' || item.channel === 'outlook') {
       const providerWatches = watches.filter((watch) => watch.provider === item.provider);
       const activeWatches = providerWatches.filter((watch) => watch.status === 'active');
@@ -1313,11 +1422,13 @@ function webhookHealthRows(state) {
           `${activeWatches.length}/${providerWatches.length} active watch subscription(s)`,
           `${providerWatches.reduce((total, watch) => total + (watch.notificationCount ?? 0), 0)} provider notification(s)`,
           `${failedWatches.length} failed watch subscription(s)`,
+          `${channelOutcomes.length} webhook outcome(s), ${rejected} rejected`,
         ],
         label: item.label,
-        latestAt: latestIso(providerWatches, ['lastNotificationAt', 'updatedAt', 'setupAt', 'createdAt']),
-        localOk: failedWatches.length === 0 && backoffWatches.length === 0,
+        latestAt: latestIso([...providerWatches, ...channelOutcomes], ['lastNotificationAt', 'updatedAt', 'setupAt', 'createdAt', 'receivedAt']),
+        localOk: failedWatches.length === 0 && backoffWatches.length === 0 && rejected === 0,
         path: item.path,
+        rejected,
         status,
       };
     }
@@ -1332,11 +1443,13 @@ function webhookHealthRows(state) {
           `${deliveries.length} delivery ledger record(s)`,
           `${queued} queued, ${statuses.sent ?? 0} sent, ${failed} failed or bounced, ${statuses.suppressed ?? 0} suppressed`,
           `${jobs.filter((job) => job.queue === 'outbound_email').length} outbound_email worker job(s)`,
+          `${channelOutcomes.length} webhook outcome(s), ${rejected} rejected`,
         ],
         label: item.label,
-        latestAt: latestIso(deliveries, ['providerStatusUpdatedAt', 'sentAt', 'createdAt']),
-        localOk: failed === 0,
+        latestAt: latestIso([...deliveries, ...channelOutcomes], ['providerStatusUpdatedAt', 'sentAt', 'createdAt', 'receivedAt']),
+        localOk: failed === 0 && rejected === 0,
         path: item.path,
+        rejected,
         status: failed ? 'attention' : queued ? 'queued' : deliveries.length ? 'ready' : 'idle',
       };
     }
@@ -1350,11 +1463,13 @@ function webhookHealthRows(state) {
         `${paymentEvents.length} payment event(s)`,
         `${signedEvents.length} signed provider event(s)`,
         `${failedBillingJobs.length}/${billingJobs.length} failed billing_webhook job(s)`,
+        `${channelOutcomes.length} webhook outcome(s), ${rejected} rejected`,
       ],
       label: item.label,
-      latestAt: latestIso([...paymentEvents, ...billingJobs], ['signatureVerifiedAt', 'createdAt', 'lastRunAt']),
-      localOk: paymentEvents.length > 0 && failedBillingJobs.length === 0,
+      latestAt: latestIso([...paymentEvents, ...billingJobs, ...channelOutcomes], ['signatureVerifiedAt', 'createdAt', 'lastRunAt', 'receivedAt']),
+      localOk: paymentEvents.length > 0 && failedBillingJobs.length === 0 && rejected === 0,
       path: item.path,
+      rejected,
       status: failedBillingJobs.length ? 'attention' : paymentEvents.length ? 'ready' : 'idle',
     };
   });
@@ -1363,19 +1478,21 @@ function webhookHealthRows(state) {
 function queueHealthRows(state) {
   return operationsQueues.map((queue) => {
     const jobs = (state.jobs ?? []).filter((job) => job.queue === queue);
+    const deadLetter = (state.deadLetter ?? []).filter((job) => job.queue === queue);
     const statuses = countStatuses(jobs);
     const failed = statuses.failed ?? 0;
     const queued = statuses.queued ?? 0;
     const running = statuses.running ?? 0;
     return {
       queue,
+      deadLetter: deadLetter.length,
       drained: statuses.drained ?? 0,
       failed,
       latestAt: latestIso(jobs, ['lastRunAt', 'nextRunAt']),
-      localOk: failed === 0,
+      localOk: failed === 0 && deadLetter.length === 0,
       queued,
       running,
-      status: failed ? 'attention' : running ? 'running' : queued ? 'queued' : jobs.length ? 'ready' : 'idle',
+      status: deadLetter.length ? 'attention' : failed ? 'attention' : running ? 'running' : queued ? 'queued' : jobs.length ? 'ready' : 'idle',
       succeeded: statuses.succeeded ?? 0,
       total: jobs.length,
     };
@@ -1485,14 +1602,14 @@ export function operationsHealthReport(state, {
   const rateLimits = providerBackoffRows(state);
   const lifecycle = lifecycleHealth(state);
   const blockingQueues = new Set(['billing_webhook', 'outbound_email']);
-  const failedQueues = queues.filter((queue) => queue.failed > 0 && blockingQueues.has(queue.queue));
+  const failedQueues = queues.filter((queue) => (queue.failed > 0 || queue.deadLetter > 0) && blockingQueues.has(queue.queue));
   const failedDeliveries = (state.emailDeliveryMessages ?? []).filter((message) => ['failed', 'bounced'].includes(message.status));
   const activeBackoffs = rateLimits.filter((row) => row.active);
   const blockingLifecycleCategories = new Set(['payment', 'access']);
   const criticalLifecycle = lifecycle.categories.filter((category) => category.critical > 0 && blockingLifecycleCategories.has(category.category));
   const issues = [
     ...webhooks.filter((row) => !row.localOk).map((row) => `${row.channel}: ${row.label} is ${row.status}`),
-    ...failedQueues.map((row) => `${row.queue}: ${row.failed} failed job(s)`),
+    ...failedQueues.map((row) => `${row.queue}: ${row.failed} failed job(s), ${row.deadLetter} dead-letter job(s)`),
     ...failedDeliveries.map((message) => `outbound_email: ${message.id} is ${message.status}`),
     ...activeBackoffs.map((row) => `${row.kind}:${row.targetId} backoff until ${row.retryAfterAt}`),
     ...criticalLifecycle.map((row) => `${row.category}: ${row.critical} critical open lifecycle notice(s)`),
@@ -1517,6 +1634,7 @@ export function operationsHealthReport(state, {
       failedDeliveries: failedDeliveries.length,
       failedQueues: failedQueues.length,
       failedJobs: summary.failedJobs ?? 0,
+      deadLetterJobs: state.deadLetter?.length ?? 0,
       monitoredQueues: queues.length,
       openLifecycle: summary.openLifecycleNotices ?? 0,
       productionReady: Boolean(backendBoundary.productionReady && backendBoundary.schedulerReady),
@@ -6532,6 +6650,19 @@ function registerApiSession(state, issued, target, actor) {
   return record;
 }
 
+function revokeApiSessionsForUser(state, userId, actor, reason = 'user_session_revocation') {
+  const revokedAt = nowIso();
+  const sessions = activeApiSessions(state).filter((session) => session.userId === userId);
+  for (const session of sessions) {
+    session.status = 'revoked';
+    session.revokedAt = revokedAt;
+    session.revokedByUserId = actor.id;
+    session.revocationReason = reason;
+    session.updatedAt = revokedAt;
+  }
+  return sessions;
+}
+
 export function validateApiSession(state, verification) {
   const session = (state.apiSessions ?? []).find((candidate) => candidate.digest === verification.tokenDigest);
   if (!session) {
@@ -6557,6 +6688,10 @@ export function validateApiSession(state, verification) {
     });
   }
   const actor = getActor(state, session.userId);
+  session.currentRole = actor.role;
+  session.currentStatus = actor.status;
+  session.currentMembershipId = actor.membershipId ?? null;
+  session.currentMembershipStatus = actor.membershipStatus ?? null;
   return {
     actor,
     session: {
@@ -9328,6 +9463,28 @@ export async function revokeSessionToken(sessionRef, options = {}) {
   );
 }
 
+export async function revokeUserSessions(userId, options = {}) {
+  return mutateState(
+    'users.revoke-sessions',
+    (state, actor) => {
+      requireAdmin(actor, 'users.revoke-sessions');
+      const target = getActor(state, requireArg(userId, 'user id', 'users revoke-sessions <userId>'), { allowMissing: true });
+      if (!target) {
+        findById(state.users, userId, 'User');
+      }
+      const revoked = revokeApiSessionsForUser(state, userId, actor, 'admin_user_session_revocation');
+      return {
+        message: `Revoked ${revoked.length} API session(s) for ${target?.email ?? userId}`,
+        revokedSessionIds: revoked.map((session) => session.id),
+        revokedSessions: revoked.length,
+        targetId: userId,
+        userId,
+      };
+    },
+    options,
+  );
+}
+
 export async function recordProviderSandboxValidation(sandbox, options = {}) {
   return mutateState(
     'integrations.sandbox.record',
@@ -9470,6 +9627,46 @@ export async function setTenantStatus(tenantId, nextStatus, { reason } = {}, opt
   );
 }
 
+export async function setTenantStatuses(tenantIds, nextStatus, { reason } = {}, options = {}) {
+  return mutateState(
+    'tenants.status-bulk',
+    (state, actor) => {
+      requirePlatformOperator(actor, 'tenants.status-bulk');
+      const ids = [...new Set((Array.isArray(tenantIds) ? tenantIds : [tenantIds]).map((id) => String(id ?? '').trim()).filter(Boolean))];
+      if (ids.length === 0) {
+        throw new SignalStateError('At least one tenant id is required for tenants.status-bulk.', {
+          code: 'TENANT_IDS_REQUIRED',
+          status: 400,
+          details: { action: 'tenants.status-bulk' },
+        });
+      }
+      const status = requireOneOf(nextStatus, ['active', 'suspended'], 'tenant status', 'tenants status-bulk <tenantIds> <active|suspended> [reason]');
+      const results = ids.map((tenantId) => {
+        const tenant = (state.tenants ?? []).find((candidate) => candidate.id === tenantId);
+        if (!tenant) {
+          return { ok: false, tenantId, code: 'TENANT_NOT_FOUND', message: `Tenant not found: ${tenantId}` };
+        }
+        const previousStatus = tenant.status ?? 'active';
+        tenant.status = status;
+        tenant.statusUpdatedAt = nowIso();
+        tenant.statusUpdatedByUserId = actor.id;
+        tenant.suspensionReason = status === 'suspended' ? (String(reason ?? '').replaceAll('_', ' ').trim() || 'Suspended by platform operator') : null;
+        tenant.suspendedAt = status === 'suspended' ? tenant.statusUpdatedAt : null;
+        tenant.suspendedByUserId = status === 'suspended' ? actor.id : null;
+        return { ok: true, tenantId, previousStatus, nextStatus: status, message: `${tenant.domain} changed from ${previousStatus} to ${status}` };
+      });
+      return {
+        message: `${results.filter((result) => result.ok).length}/${results.length} tenant status update(s) applied`,
+        nextStatus: status,
+        reason: status === 'suspended' ? (String(reason ?? '').replaceAll('_', ' ').trim() || 'Suspended by platform operator') : null,
+        results,
+        targetId: 'bulk_tenants',
+      };
+    },
+    options,
+  );
+}
+
 export async function setTenantDomain(tenantId, domain, options = {}) {
   return mutateState(
     'tenants.domain',
@@ -9509,6 +9706,18 @@ function requireAdmin(actor, action) {
       details: { action, actorUserId: actor.id, actorRole: actor.role, requiredRole: 'admin' },
     });
   }
+}
+
+function requirePlatformOperator(actor, action) {
+  requireAdmin(actor, action);
+  if (isPlatformOperator(actor)) {
+    return;
+  }
+  throw new SignalStateError(`Platform operator role required for ${action}.`, {
+    code: 'FORBIDDEN',
+    status: 403,
+    details: { action, actorUserId: actor.id, actorRole: actor.role, requiredPlatformRole: 'operator' },
+  });
 }
 
 function requireAdminOrOwner(actor, ownerUserId, action) {
@@ -9662,6 +9871,33 @@ function appendAudit(state, action, targetId, message, actor) {
     createdAt: new Date().toISOString(),
     actor: actor.id,
     actorRole: actor.role,
+  });
+}
+
+export async function recordWebhookIngestOutcome({
+  accepted,
+  eventType = 'unknown',
+  provider,
+  reason = null,
+  status = null,
+  tenantId = null,
+} = {}, { statePath } = {}) {
+  const resolvedStatePath = resolveStatePath(statePath);
+  return runLockedStateWriter(resolvedStatePath, async () => {
+    const state = await loadState({ statePath: resolvedStatePath });
+    const event = {
+      id: `wh_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+      accepted: Boolean(accepted),
+      eventType: String(eventType ?? 'unknown'),
+      provider: String(provider ?? 'unknown'),
+      reason: reason === null || reason === undefined ? null : String(reason),
+      receivedAt: nowIso(),
+      status: status === null || status === undefined ? null : Number(status),
+      tenantId,
+    };
+    state.webhookEvents = [...(state.webhookEvents ?? []), event].slice(-200);
+    await saveState(state, { statePath: resolvedStatePath });
+    return event;
   });
 }
 
@@ -10018,11 +10254,14 @@ export async function setUserRole(userId, nextRole, options = {}) {
         membership.updatedAt = nowIso();
         membership.updatedByUserId = actor.id;
       }
+      const revoked = previousRole === role ? [] : revokeApiSessionsForUser(state, user.id, actor, 'role_changed');
       return {
         message: `${user.email} is now ${role}`,
         membershipId: membership?.id ?? null,
         nextRole: role,
         previousRole,
+        revokedSessions: revoked.length,
+        revokedSessionIds: revoked.map((session) => session.id),
         targetId: user.id,
         userId: user.id,
       };
@@ -10050,11 +10289,14 @@ export async function setUserStatus(userId, nextStatus, options = {}) {
           membership.disabledByUserId = actor.id;
         }
       }
+      const revoked = status === 'disabled' ? revokeApiSessionsForUser(state, user.id, actor, 'user_disabled') : [];
       return {
         message: `${user.email} status is now ${status}`,
         membershipId: membership?.id ?? null,
         nextStatus: status,
         previousStatus,
+        revokedSessions: revoked.length,
+        revokedSessionIds: revoked.map((session) => session.id),
         targetId: user.id,
         userId: user.id,
       };
@@ -10536,13 +10778,22 @@ function shouldExchangeOAuthCode(sourceProvider, callbackCode, { env = process.e
   if (!exchangeCredentials) {
     return false;
   }
-  if (forceCredentialExchange) {
-    return true;
-  }
   if (String(callbackCode).startsWith('local_')) {
     return false;
   }
-  return isOAuthTokenExchangeConfigured(sourceProvider, env);
+  if (forceCredentialExchange || isOAuthTokenExchangeConfigured(sourceProvider, env)) {
+    return true;
+  }
+  throw new OAuthProviderError('OAuth token exchange is not configured for this provider.', {
+    code: 'OAUTH_TOKEN_EXCHANGE_NOT_CONFIGURED',
+    status: 412,
+    details: {
+      provider: sourceProvider,
+      requiredEnv: sourceProvider === 'gmail'
+        ? ['SIGNAL_GMAIL_CLIENT_ID', 'SIGNAL_GMAIL_CLIENT_SECRET', 'SIGNAL_GMAIL_REDIRECT_URI']
+        : ['SIGNAL_OUTLOOK_CLIENT_ID', 'SIGNAL_OUTLOOK_CLIENT_SECRET', 'SIGNAL_OUTLOOK_TENANT_ID', 'SIGNAL_OUTLOOK_REDIRECT_URI'],
+    },
+  });
 }
 
 function signalErrorFromProviderError(error) {
@@ -10557,7 +10808,7 @@ function signalErrorFromProviderError(error) {
 }
 
 export async function completeMailboxConnectionFromOAuthCallback(provider, { code, state: oauthState, error, errorDescription } = {}, options = {}) {
-  return mutateState(
+  const result = await mutateState(
     'mailboxes.oauth-callback',
     async (localState, actor) => {
       const sourceProvider = requireOneOf(provider, ['gmail', 'outlook'], 'provider', 'mailboxes oauth-callback <gmail|outlook> <code> <state>');
@@ -10608,9 +10859,45 @@ export async function completeMailboxConnectionFromOAuthCallback(provider, { cod
           details: { sessionId: session.id, status: session.status },
         });
       }
+      if (session.provider !== sourceProvider) {
+        throw new SignalStateError('OAuth connection session provider does not match callback provider.', {
+          code: 'OAUTH_SESSION_PROVIDER_MISMATCH',
+          status: 400,
+          details: { callbackProvider: sourceProvider, sessionId: session.id, sessionProvider: session.provider },
+        });
+      }
 
       let credentialRecord = null;
-      let credentialExchangeStatus = shouldExchangeOAuthCode(sourceProvider, callbackCode, options) ? 'pending' : 'skipped';
+      let credentialExchangeStatus;
+      try {
+        credentialExchangeStatus = shouldExchangeOAuthCode(sourceProvider, callbackCode, options) ? 'pending' : 'skipped';
+      } catch (providerError) {
+        const signalError = signalErrorFromProviderError(providerError);
+        session.status = 'failed';
+        session.failedAt = nowIso();
+        session.failureCode = signalError.code ?? 'OAUTH_CALLBACK_FAILED';
+        session.failureReason = signalError.message;
+        appendJob(localState, {
+          tenantId: session.tenantId,
+          queue: 'email_sync',
+          type: 'mailbox.oauth.callback.failed',
+          targetId: session.id,
+          status: 'failed',
+          attempts: 1,
+          maxAttempts: 1,
+          message: signalError.message,
+        });
+        return {
+          credentialExchangeStatus: 'failed',
+          message: signalError.message,
+          oauthCallbackFailed: true,
+          status: signalError.status ?? 400,
+          code: signalError.code ?? 'OAUTH_CALLBACK_FAILED',
+          errorDetails: signalError.details ?? {},
+          sessionId: session.id,
+          targetId: session.id,
+        };
+      }
       if (credentialExchangeStatus === 'pending') {
         try {
           const exchange = await exchangeOAuthCodeForTokens({
@@ -10620,7 +10907,7 @@ export async function completeMailboxConnectionFromOAuthCallback(provider, { cod
             fetchImpl: options.fetchImpl ?? globalThis.fetch,
             redirectUri: session.redirectUri,
           });
-          const scopes = provider === sourceProvider ? session.selectedScopes ?? [] : [];
+          const scopes = session.provider === sourceProvider ? session.selectedScopes ?? [] : [];
           const placeholderMailboxId = session.mailboxId ?? `mbx_${session.provider}_${session.ownerUserId}`;
           credentialRecord = await storeProviderCredential({
             env: options.env ?? process.env,
@@ -10634,7 +10921,31 @@ export async function completeMailboxConnectionFromOAuthCallback(provider, { cod
           });
           credentialExchangeStatus = 'stored';
         } catch (providerError) {
-          throw signalErrorFromProviderError(providerError);
+          const signalError = signalErrorFromProviderError(providerError);
+          session.status = 'failed';
+          session.failedAt = nowIso();
+          session.failureCode = signalError.code ?? 'OAUTH_CALLBACK_FAILED';
+          session.failureReason = signalError.message;
+          appendJob(localState, {
+            tenantId: session.tenantId,
+            queue: 'email_sync',
+            type: 'mailbox.oauth.callback.failed',
+            targetId: session.id,
+            status: 'failed',
+            attempts: 1,
+            maxAttempts: 1,
+            message: signalError.message,
+          });
+          return {
+            credentialExchangeStatus: 'failed',
+            message: signalError.message,
+            oauthCallbackFailed: true,
+            status: signalError.status ?? 400,
+            code: signalError.code ?? 'OAUTH_CALLBACK_FAILED',
+            errorDetails: signalError.details ?? {},
+            sessionId: session.id,
+            targetId: session.id,
+          };
         }
       }
 
@@ -10656,6 +10967,14 @@ export async function completeMailboxConnectionFromOAuthCallback(provider, { cod
     },
     { ...options, requireExplicitActor: true, retryOnConflict: false },
   );
+  if (result.details?.oauthCallbackFailed) {
+    throw new SignalStateError(result.details.message, {
+      code: result.details.code,
+      status: result.details.status,
+      details: result.details.errorDetails,
+    });
+  }
+  return result;
 }
 
 export async function disconnectMailbox(mailboxId, options = {}) {
@@ -14232,11 +14551,53 @@ function jobRunLimit(limit) {
 }
 
 function jobIsDue(job, now = Date.now()) {
+  if (job.nextAttemptAt) {
+    const nextAttemptMs = Date.parse(job.nextAttemptAt);
+    if (Number.isFinite(nextAttemptMs) && nextAttemptMs > now) {
+      return false;
+    }
+  }
   if (!job.nextRunAt) {
     return true;
   }
   const nextRunMs = Date.parse(job.nextRunAt);
   return !Number.isFinite(nextRunMs) || nextRunMs <= now;
+}
+
+function jobBackoffDelayMs(job, { baseMs = 30_000, capMs = 30 * 60_000, factor = 2, jitterRatio = 0.2 } = {}) {
+  const attempt = Math.max(1, Number(job.attempts ?? 1));
+  const rawDelay = Math.min(capMs, baseMs * (factor ** Math.max(0, attempt - 1)));
+  const jitterSeed = crypto.createHash('sha256').update(`${job.id}:${attempt}`, 'utf8').digest()[0] / 255;
+  const jitter = rawDelay * jitterRatio * jitterSeed;
+  return Math.round(Math.min(capMs, rawDelay + jitter));
+}
+
+function appendJobFailure(job, error) {
+  job.failureHistory = [
+    ...(job.failureHistory ?? []),
+    {
+      attempt: job.attempts ?? 0,
+      code: error.code,
+      message: error.message,
+      recordedAt: nowIso(),
+    },
+  ].slice(-10);
+}
+
+function moveJobToDeadLetter(state, job, error, actor) {
+  state.deadLetter = state.deadLetter ?? [];
+  const failedAt = nowIso();
+  const deadLetterJob = {
+    ...job,
+    deadLetterId: `dlq_${job.id}`,
+    failedAt,
+    failedByUserId: actor.id,
+    originalJobId: job.id,
+    status: 'dead-letter',
+  };
+  state.deadLetter.push(deadLetterJob);
+  state.jobs = (state.jobs ?? []).filter((candidate) => candidate.id !== job.id);
+  return deadLetterJob;
 }
 
 export async function runJobs({ jobId, queue, limit } = {}, options = {}) {
@@ -14268,8 +14629,9 @@ export async function runJobs({ jobId, queue, limit } = {}, options = {}) {
       for (const job of jobs) {
         const previousStatus = job.status;
         job.status = 'running';
-        job.attempts = Math.max(1, job.attempts ?? 0);
+        job.attempts = (job.attempts ?? 0) + 1;
         job.lastRunAt = nowIso();
+        job.nextAttemptAt = null;
         try {
           const result = await runLocalJobInState(state, actor, job, options);
           job.status = result.status ?? 'succeeded';
@@ -14327,13 +14689,29 @@ export async function runJobs({ jobId, queue, limit } = {}, options = {}) {
           });
         } catch (error) {
           const signalError = error instanceof SignalStateError ? error : new SignalStateError(error instanceof Error ? error.message : String(error), { code: 'JOB_RUN_FAILED' });
-          job.status = 'failed';
           job.lastRunAt = nowIso();
           job.message = signalError.message;
+          job.providerErrorCode = signalError.code;
+          appendJobFailure(job, signalError);
+          const exhausted = (job.attempts ?? 0) >= (job.maxAttempts ?? 3);
+          let deadLetterJob = null;
+          if (exhausted) {
+            job.status = 'failed';
+            deadLetterJob = moveJobToDeadLetter(state, job, signalError, actor);
+          } else {
+            const delayMs = jobBackoffDelayMs(job);
+            const nextAttemptAt = new Date(Date.now() + delayMs).toISOString();
+            job.status = 'queued';
+            job.nextAttemptAt = nextAttemptAt;
+            job.nextRunAt = nextAttemptAt;
+          }
           outcomes.push({
             code: signalError.code,
+            deadLetterId: deadLetterJob?.deadLetterId ?? null,
             error: signalError.message,
+            exhausted,
             jobId: job.id,
+            nextAttemptAt: job.nextAttemptAt ?? null,
             previousStatus,
             queue: job.queue,
             status: 'failed',
@@ -14399,6 +14777,99 @@ export async function retryJob(jobId, options = {}) {
   );
 }
 
+export async function requeueDeadLetterJob(deadLetterRef, options = {}) {
+  return mutateState(
+    'jobs.requeue',
+    (state, actor) => {
+      requireAdmin(actor, 'jobs.requeue');
+      const ref = requireArg(deadLetterRef, 'dead-letter job id', 'jobs requeue <deadLetterId|jobId>');
+      const deadLetterIndex = (state.deadLetter ?? []).findIndex((job) => job.deadLetterId === ref || job.id === ref || job.originalJobId === ref);
+      if (deadLetterIndex < 0) {
+        throw new SignalStateError(`Dead-letter job was not found: ${ref}`, {
+          code: 'JOB_DLQ_NOT_FOUND',
+          status: 404,
+          details: { ref },
+        });
+      }
+      const [deadLetterJob] = state.deadLetter.splice(deadLetterIndex, 1);
+      const requeued = {
+        ...deadLetterJob,
+        attempts: 0,
+        lastRunAt: null,
+        message: `Requeued from DLQ by ${actor.email}.`,
+        nextAttemptAt: null,
+        nextRunAt: null,
+        providerErrorCode: null,
+        providerResponseStatus: null,
+        providerRetryAfterAt: null,
+        requeuedAt: nowIso(),
+        requeuedByUserId: actor.id,
+        status: 'queued',
+      };
+      delete requeued.deadLetterId;
+      delete requeued.failedAt;
+      delete requeued.failedByUserId;
+      state.jobs = [...(state.jobs ?? []), requeued];
+      return {
+        message: `${requeued.id} requeued from dead letter`,
+        jobId: requeued.id,
+        queue: requeued.queue,
+        targetId: requeued.id,
+      };
+    },
+    options,
+  );
+}
+
+export async function requeueDeadLetterJobs(deadLetterRefs, options = {}) {
+  return mutateState(
+    'jobs.requeue-bulk',
+    (state, actor) => {
+      requireAdmin(actor, 'jobs.requeue-bulk');
+      const refs = [...new Set((Array.isArray(deadLetterRefs) ? deadLetterRefs : [deadLetterRefs]).map((ref) => String(ref ?? '').trim()).filter(Boolean))];
+      if (refs.length === 0) {
+        throw new SignalStateError('At least one dead-letter job id is required.', {
+          code: 'JOB_DLQ_IDS_REQUIRED',
+          status: 400,
+          details: { action: 'jobs.requeue-bulk' },
+        });
+      }
+      const results = refs.map((ref) => {
+        const deadLetterIndex = (state.deadLetter ?? []).findIndex((job) => job.deadLetterId === ref || job.id === ref || job.originalJobId === ref);
+        if (deadLetterIndex < 0) {
+          return { ok: false, ref, code: 'JOB_DLQ_NOT_FOUND', message: `Dead-letter job was not found: ${ref}` };
+        }
+        const [deadLetterJob] = state.deadLetter.splice(deadLetterIndex, 1);
+        const requeued = {
+          ...deadLetterJob,
+          attempts: 0,
+          lastRunAt: null,
+          message: `Requeued from DLQ by ${actor.email}.`,
+          nextAttemptAt: null,
+          nextRunAt: null,
+          providerErrorCode: null,
+          providerResponseStatus: null,
+          providerRetryAfterAt: null,
+          requeuedAt: nowIso(),
+          requeuedByUserId: actor.id,
+          status: 'queued',
+        };
+        delete requeued.deadLetterId;
+        delete requeued.failedAt;
+        delete requeued.failedByUserId;
+        state.jobs = [...(state.jobs ?? []), requeued];
+        return { ok: true, ref, jobId: requeued.id, queue: requeued.queue, message: `${requeued.id} requeued from dead letter` };
+      });
+      return {
+        message: `${results.filter((result) => result.ok).length}/${results.length} dead-letter job(s) requeued`,
+        results,
+        targetId: 'bulk_dead_letter_jobs',
+      };
+    },
+    options,
+  );
+}
+
 export async function drainJobs(queue, options = {}) {
   return mutateState(
     'jobs.drain',
@@ -14427,12 +14898,16 @@ export async function applyMutation(action, args = {}, options = {}) {
       return issueSessionToken(args.userId, { ...options, ttlSeconds: args.ttlSeconds });
     case 'session.revoke':
       return revokeSessionToken(args.sessionRef ?? args.sessionId ?? args.digest ?? args.token, options);
+    case 'users.revoke-sessions':
+      return revokeUserSessions(args.userId, options);
     case 'tenants.create':
       return createTenantWorkspace(args, options);
     case 'tenants.onboarding-complete':
       return completeTenantOnboarding(args.tenantId, options);
     case 'tenants.status':
       return setTenantStatus(args.tenantId, args.status, args, options);
+    case 'tenants.status-bulk':
+      return setTenantStatuses(args.tenantIds ?? args.ids ?? args.tenantId, args.status, args, options);
     case 'tenants.domain':
       return setTenantDomain(args.tenantId, args.domain, options);
     case 'users.role':
@@ -14567,6 +15042,10 @@ export async function applyMutation(action, args = {}, options = {}) {
       return runJobs(args, { ...options, liveProviderSync: args.liveProviderSync ?? options.liveProviderSync });
     case 'jobs.retry':
       return retryJob(args.jobId, options);
+    case 'jobs.requeue':
+      return requeueDeadLetterJob(args.deadLetterId ?? args.jobId, options);
+    case 'jobs.requeue-bulk':
+      return requeueDeadLetterJobs(args.deadLetterIds ?? args.jobIds ?? args.refs ?? args.deadLetterId ?? args.jobId, options);
     case 'jobs.drain':
       return drainJobs(args.queue, options);
     default:

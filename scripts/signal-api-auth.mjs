@@ -63,6 +63,13 @@ export function localActorAllowed(env = process.env) {
   return env.SIGNAL_ALLOW_LOCAL_ACTOR === 'true';
 }
 
+export function productionModeEnabled(env = process.env) {
+  return env.NODE_ENV === 'production'
+    || env.SIGNAL_BACKEND_MODE === 'production-node'
+    || env.SIGNAL_BACKEND_MODE === 'external-service'
+    || env.SIGNAL_RUNTIME_ENV === 'production';
+}
+
 export function isLoopbackApiHost(host = process.env.SIGNAL_API_HOST ?? '127.0.0.1') {
   const normalized = String(host).trim().toLowerCase();
   return normalized === '127.0.0.1'
@@ -103,6 +110,10 @@ export function assertApiSecurityConfig(env = process.env) {
   const host = env.SIGNAL_API_HOST ?? '127.0.0.1';
   const authEnforced = signedSessionRequired(env) || productionAuthProvider(env) === 'jwks';
   const loopback = isLoopbackApiHost(host);
+
+  if (localActorAllowed(env) && productionModeEnabled(env)) {
+    throw new Error('SIGNAL_ALLOW_LOCAL_ACTOR=true is not allowed in production mode.');
+  }
 
   if (!loopback && !authEnforced) {
     throw new Error(
@@ -373,12 +384,31 @@ export async function requestAuth(req, body = {}, { env = process.env, fetchImpl
       },
     });
   }
+  const actorUserId = body.actorUserId ?? headerValue(req, 'x-signal-actor');
+  if (!actorUserId) {
+    throw new SignalStateError('A local actor identity is required for this API operation.', {
+      code: 'LOCAL_ACTOR_REQUIRED',
+      status: 401,
+      details: { requiredBody: 'actorUserId', requiredHeader: 'X-Signal-Actor' },
+    });
+  }
   return {
-    actorUserId: body.actorUserId ?? headerValue(req, 'x-signal-actor'),
+    actorUserId,
     auth: {
       mode: 'local_actor',
     },
   };
+}
+
+export function requireKnownLocalActor(state, requestActor) {
+  if (requestActor?.auth?.mode !== 'local_actor') {
+    return null;
+  }
+  const actor = getActor(state, requestActor.actorUserId, { requireExplicit: true });
+  requestActor.auth.actorStatus = actor.status;
+  requestActor.auth.membershipId = actor.membershipId ?? null;
+  requestActor.auth.membershipStatus = actor.membershipStatus ?? null;
+  return actor;
 }
 
 export function requireAdminRequestAuth(state, requestActor, action) {

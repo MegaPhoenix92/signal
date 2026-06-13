@@ -12,9 +12,13 @@ import {
   bootstrapState,
   loadState,
   providerValidationSchedulesDue,
+  requeueDeadLetterJob,
+  requeueDeadLetterJobs,
+  runJobs,
   saveState,
 } from './signal-state.mjs';
 import {
+  acquirePostgresSchedulerLock,
   acquireSchedulerLock,
   createSchedulerConfig,
   runSchedulerOnce,
@@ -175,6 +179,7 @@ test('Signal scheduler due summary reports waiting jobs', () => {
     jobs: [
       { id: 'job_due', queue: 'email_sync', status: 'queued', nextRunAt: null },
       { id: 'job_waiting', queue: 'email_sync', status: 'queued', nextRunAt: '2026-06-04T12:05:00.000Z' },
+      { id: 'job_backoff', queue: 'email_sync', status: 'queued', nextAttemptAt: '2026-06-04T12:10:00.000Z' },
       { id: 'job_failed', queue: 'email_sync', status: 'failed', nextRunAt: null },
     ],
   };
@@ -184,6 +189,119 @@ test('Signal scheduler due summary reports waiting jobs', () => {
     nextRunAt: '2026-06-04T12:05:00.000Z',
     queue: 'email_sync',
     sampledJobIds: ['job_due'],
-    waiting: 1,
+    waiting: 2,
   }]);
+});
+
+test('Signal scheduler applies backoff, dead-letters exhausted jobs, and requeues DLQ entries', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-dlq-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const state = await loadState({ statePath });
+  state.deadLetter = [];
+  state.jobs.push({
+    id: 'job_no_worker',
+    tenantId: 'tenant_demo',
+    queue: 'missing_worker',
+    type: 'missing.worker',
+    targetId: 'target_missing',
+    status: 'queued',
+    attempts: 0,
+    maxAttempts: 2,
+    message: 'exercise failure path',
+  });
+  await saveState(state, { statePath });
+
+  const first = await runJobs({ queue: 'missing_worker', limit: 1 }, { actorUserId: 'usr_admin', statePath });
+  assert.equal(first.details.failed, 1);
+  const backedOffState = await loadState({ statePath });
+  const backedOffJob = backedOffState.jobs.find((job) => job.id === 'job_no_worker');
+  assert.equal(backedOffJob.status, 'queued');
+  assert.equal(backedOffJob.attempts, 1);
+  assert(backedOffJob.nextAttemptAt, 'failed job should receive nextAttemptAt before retry');
+  const waiting = schedulerDueSummary(backedOffState, { queues: ['missing_worker'], now: Date.now() });
+  assert.equal(waiting[0].due, 0);
+  assert.equal(waiting[0].waiting, 1);
+
+  backedOffJob.nextAttemptAt = '2026-01-01T00:00:00.000Z';
+  backedOffJob.nextRunAt = backedOffJob.nextAttemptAt;
+  await saveState(backedOffState, { statePath });
+
+  const second = await runJobs({ queue: 'missing_worker', limit: 1 }, { actorUserId: 'usr_admin', statePath });
+  assert.equal(second.details.failed, 1);
+  const deadLetterState = await loadState({ statePath });
+  assert.equal(deadLetterState.jobs.some((job) => job.id === 'job_no_worker'), false);
+  assert.equal(deadLetterState.deadLetter?.length, 1);
+  assert.equal(deadLetterState.deadLetter[0].status, 'dead-letter');
+  assert.equal(deadLetterState.deadLetter[0].failureHistory.length, 2);
+
+  const requeued = await requeueDeadLetterJob(deadLetterState.deadLetter[0].deadLetterId, { actorUserId: 'usr_admin', statePath });
+  assert.equal(requeued.details.jobId, 'job_no_worker');
+  const requeuedState = await loadState({ statePath });
+  assert.equal(requeuedState.deadLetter.length, 0);
+  const activeJob = requeuedState.jobs.find((job) => job.id === 'job_no_worker');
+  assert.equal(activeJob.status, 'queued');
+  assert.equal(activeJob.attempts, 0);
+
+  requeuedState.deadLetter.push({
+    ...activeJob,
+    id: 'job_bulk_dlq',
+    originalJobId: 'job_bulk_dlq',
+    deadLetterId: 'dlq_job_bulk_dlq',
+    status: 'dead-letter',
+  });
+  await saveState(requeuedState, { statePath });
+  const bulk = await requeueDeadLetterJobs(['dlq_job_bulk_dlq'], { actorUserId: 'usr_admin', statePath });
+  assert.equal(bulk.details.results[0].ok, true);
+  const bulkState = await loadState({ statePath });
+  assert.equal(bulkState.deadLetter.length, 0);
+  assert.equal(bulkState.jobs.find((job) => job.id === 'job_bulk_dlq')?.status, 'queued');
+});
+
+test('Signal scheduler can coordinate with a Postgres advisory lock', async () => {
+  const calls = [];
+  const held = new Set();
+  const pgPool = {
+    async query(sql, params) {
+      calls.push({ params, sql });
+      if (sql.includes('pg_try_advisory_lock')) {
+        const key = params[0];
+        if (held.has(key)) {
+          return { rows: [{ acquired: false }] };
+        }
+        held.add(key);
+        return { rows: [{ acquired: true }] };
+      }
+      if (sql.includes('pg_advisory_unlock')) {
+        held.delete(params[0]);
+        return { rows: [{ released: true }] };
+      }
+      throw new Error(`Unexpected advisory lock query: ${sql}`);
+    },
+  };
+  const config = createSchedulerConfig({
+    argv: ['--once', '--queue', 'provider_validation'],
+    env: {
+      DATABASE_URL: 'postgres://signal:secret@db.example/signal',
+      SIGNAL_ADMIN_STATE: '/tmp/signal-state.json',
+      SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+    },
+    overrides: { pgPool },
+  });
+
+  const first = await acquirePostgresSchedulerLock(config, { pgPool });
+  assert.equal(first.acquired, true);
+  const second = await acquirePostgresSchedulerLock(config, { pgPool });
+  assert.equal(second.acquired, false);
+  assert.equal(second.reason, 'advisory_lock_held');
+  await first.release();
+  const third = await acquirePostgresSchedulerLock(config, { pgPool });
+  assert.equal(third.acquired, true);
+  await third.release();
+  assert(calls.some((call) => call.sql.includes('pg_try_advisory_lock')));
+  assert(calls.some((call) => call.sql.includes('pg_advisory_unlock')));
 });

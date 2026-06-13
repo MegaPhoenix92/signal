@@ -29,8 +29,20 @@ function stateServiceUrls(env = process.env) {
   if (healthUrl.pathname === stateUrl.pathname) {
     healthUrl.pathname = '/health';
   }
+  const readyUrl = new URL(stateUrl.href);
+  readyUrl.pathname = readyUrl.pathname.replace(/\/state\/?$/, '/ready');
+  if (readyUrl.pathname === stateUrl.pathname) {
+    readyUrl.pathname = '/ready';
+  }
+  const migrationsUrl = new URL(stateUrl.href);
+  migrationsUrl.pathname = migrationsUrl.pathname.replace(/\/state\/?$/, '/migrations');
+  if (migrationsUrl.pathname === stateUrl.pathname) {
+    migrationsUrl.pathname = '/migrations';
+  }
   return {
     healthUrl: healthUrl.href,
+    migrationsUrl: migrationsUrl.href,
+    readyUrl: readyUrl.href,
     stateUrl: stateUrl.href,
   };
 }
@@ -135,9 +147,11 @@ function fail(error) {
   process.exit(1);
 }
 
-async function commandHealth() {
-  const { healthUrl, stateUrl } = stateServiceUrls();
-  const health = await requestJson(healthUrl);
+async function commandHealth(env = process.env) {
+  const { readyUrl, stateUrl } = stateServiceUrls(env);
+  const health = await requestJson(readyUrl, {
+    headers: authHeaders(env),
+  });
   emit(wantsJson ? { ok: true, health, stateUrl } : [
     `State service: ${health.ok ? 'ok' : 'not ok'}`,
     `Storage: ${health.storage?.backend ?? 'unknown'}`,
@@ -146,12 +160,27 @@ async function commandHealth() {
   ].join('\n'));
 }
 
-async function commandBackup() {
-  const { healthUrl, stateUrl } = stateServiceUrls();
+async function commandMigrations(env = process.env) {
+  const { migrationsUrl, stateUrl } = stateServiceUrls(env);
+  const status = await requestJson(migrationsUrl, {
+    headers: authHeaders(env),
+  });
+  emit(wantsJson ? { ok: true, stateUrl, ...status } : [
+    `State service migrations: ${status.migrations?.ok ? 'ok' : 'attention'}`,
+    `Applied: ${status.migrations?.applied ?? 0}`,
+    `Pending: ${status.migrations?.pending ?? 0}`,
+    ...((status.migrations?.rows ?? []).map((row) => `${String(row.version).padStart(3, '0')} ${row.name}: ${row.status}`)),
+  ].join('\n'));
+}
+
+async function commandBackup(env = process.env) {
+  const { healthUrl, stateUrl } = stateServiceUrls(env);
   const outputPath = path.resolve(process.cwd(), positionals[1] ?? flagValue('--output') ?? defaultBackupPath());
   const [health, current] = await Promise.all([
-    requestJson(healthUrl),
-    requestState(stateUrl),
+    requestJson(healthUrl, {
+      headers: authHeaders(env),
+    }),
+    requestState(stateUrl, env),
   ]);
   const artifact = parseStateArtifact(current.body, 'state service response');
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
@@ -187,12 +216,12 @@ async function commandVerify() {
   });
 }
 
-async function commandRestore() {
+async function commandRestore(env = process.env) {
   const inputPath = path.resolve(process.cwd(), positionals[1] ?? '');
   if (!positionals[1]) {
     throw new Error('Backup file path is required for restore.');
   }
-  const { stateUrl } = stateServiceUrls();
+  const { stateUrl } = stateServiceUrls(env);
   const raw = await fs.readFile(inputPath, 'utf8');
   const artifact = parseStateArtifact(raw, inputPath);
   if (dryRun) {
@@ -210,7 +239,7 @@ async function commandRestore() {
   }
   let ifMatch = null;
   try {
-    const current = await requestState(stateUrl);
+    const current = await requestState(stateUrl, env);
     ifMatch = current.etag;
   } catch (error) {
     if (error.status !== 404) {
@@ -222,7 +251,7 @@ async function commandRestore() {
     headers: {
       'Content-Type': 'application/json',
       ...(ifMatch ? { 'If-Match': ifMatch } : {}),
-      ...authHeaders(),
+      ...authHeaders(env),
     },
     method: 'PUT',
   });
@@ -241,16 +270,22 @@ async function commandRestore() {
 async function run() {
   switch (command) {
     case 'health':
-      await commandHealth();
+      await commandHealth(process.env);
+      return;
+    case 'migrations':
+      if (positionals[1] !== 'status') {
+        throw new Error('Use: migrations status');
+      }
+      await commandMigrations(process.env);
       return;
     case 'backup':
-      await commandBackup();
+      await commandBackup(process.env);
       return;
     case 'verify':
       await commandVerify();
       return;
     case 'restore':
-      await commandRestore();
+      await commandRestore(process.env);
       return;
     case 'help':
     case '--help':
@@ -258,10 +293,11 @@ async function run() {
       emit([
         'Signal state-service admin CLI',
         '',
-        'Usage: npm run state-service:admin -- <health|backup|verify|restore> [path] [--json] [--dry-run]',
+        'Usage: npm run state-service:admin -- <health|migrations status|backup|verify|restore> [path] [--json] [--dry-run]',
         '',
         'Examples:',
         '  SIGNAL_STATE_SERVICE_URL=http://127.0.0.1:8791/state SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- health',
+        '  SIGNAL_STATE_SERVICE_URL=http://127.0.0.1:8791/state SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- migrations status --json',
         '  SIGNAL_STATE_SERVICE_URL=http://127.0.0.1:8791/state SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- backup ./backup.json --json',
         '  SIGNAL_STATE_SERVICE_URL=http://127.0.0.1:8791/state SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- restore ./backup.json --dry-run --json',
         '  SIGNAL_STATE_SERVICE_URL=http://127.0.0.1:8791/state SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- restore ./backup.json --json',

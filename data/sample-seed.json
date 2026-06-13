@@ -30,6 +30,7 @@
       "name": "Avery Lane",
       "email": "avery@acme.example",
       "role": "admin",
+      "platformRole": "operator",
       "status": "active"
     },
     {
@@ -870,11 +871,11 @@
       "queue": "email_sync",
       "type": "mailbox.reauth",
       "targetId": "mbx_outlook_success",
-      "status": "failed",
-      "attempts": 2,
+      "status": "queued",
+      "attempts": 0,
       "maxAttempts": 3,
-      "lastRunAt": "2026-06-03T00:00:00.000Z",
-      "message": "Outlook connection requires mailbox owner reauthorization."
+      "lastRunAt": null,
+      "message": "Outlook connection is queued for mailbox owner reauthorization."
     },
     {
       "id": "job_billing_webhook_001",
@@ -887,6 +888,55 @@
       "maxAttempts": 5,
       "lastRunAt": "2026-06-03T00:00:00.000Z",
       "message": "Recorded local checkout readiness event."
+    }
+  ],
+  "auditEvents": [
+    {
+      "id": "audit_seed_tenant_created",
+      "action": "tenants.create",
+      "targetId": "tenant_demo",
+      "message": "Created Acme Revenue Lab workspace.",
+      "createdAt": "2026-06-03T00:00:00.000Z",
+      "actor": "usr_admin",
+      "actorRole": "admin"
+    },
+    {
+      "id": "audit_seed_invite_accepted",
+      "action": "users.invite-accept",
+      "targetId": "usr_product",
+      "message": "Accepted product team invite.",
+      "createdAt": "2026-06-03T00:08:00.000Z",
+      "actor": "usr_product",
+      "actorRole": "member"
+    },
+    {
+      "id": "audit_seed_job_requeue",
+      "action": "jobs.requeue",
+      "targetId": "job_outlook_reauth_001",
+      "message": "Queued digest job review from DLQ.",
+      "createdAt": "2026-06-03T00:12:00.000Z",
+      "actor": "usr_admin",
+      "actorRole": "admin"
+    }
+  ],
+  "webhookEvents": [
+    {
+      "id": "wh_seed_stripe_accepted",
+      "provider": "stripe",
+      "eventType": "checkout.session.completed",
+      "accepted": true,
+      "reason": null,
+      "receivedAt": "2026-06-03T00:05:00.000Z",
+      "status": 200
+    },
+    {
+      "id": "wh_seed_gmail_accepted",
+      "provider": "gmail",
+      "eventType": "history",
+      "accepted": true,
+      "reason": null,
+      "receivedAt": "2026-06-03T00:06:00.000Z",
+      "status": 200
     }
   ]
 }

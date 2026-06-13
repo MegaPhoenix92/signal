@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +10,9 @@ import {
   runJobs,
   summarizeState,
 } from './signal-state.mjs';
+import {
+  createLogger,
+} from './signal-logger.mjs';
 
 export const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const defaultSchedulerQueues = [
@@ -66,6 +70,7 @@ export function createSchedulerConfig({ argv = process.argv.slice(2), env = proc
   const intervalMs = positiveInteger(flagValue(argv, '--interval-ms') ?? env.SIGNAL_SCHEDULER_INTERVAL_MS, 60_000, 'Scheduler interval');
   const limit = positiveInteger(flagValue(argv, '--limit') ?? env.SIGNAL_SCHEDULER_LIMIT, 5, 'Scheduler limit');
   const lockFile = path.resolve(flagValue(argv, '--lock-file') ?? env.SIGNAL_SCHEDULER_LOCK_FILE ?? path.join(rootDir, 'data', 'signal-scheduler.lock'));
+  const lockBackend = env.SIGNAL_SCHEDULER_LOCK_BACKEND ?? (env.SIGNAL_STATE_SERVICE_BACKEND === 'postgres' ? 'postgres' : 'file');
 
   return {
     actorUserId: flagValue(argv, '--actor') ?? env.SIGNAL_SCHEDULER_ACTOR ?? env.SIGNAL_ADMIN_ACTOR ?? 'usr_admin',
@@ -75,9 +80,12 @@ export function createSchedulerConfig({ argv = process.argv.slice(2), env = proc
     json: argv.includes('--json'),
     limit,
     lockFile,
+    lockBackend,
     lockStaleMs: positiveInteger(env.SIGNAL_SCHEDULER_LOCK_STALE_MS, Math.max(intervalMs * 3, 300_000), 'Scheduler lock stale window'),
     lock: !argv.includes('--no-lock') && env.SIGNAL_SCHEDULER_LOCK !== 'false',
     once: argv.includes('--once') || env.SIGNAL_SCHEDULER_ONCE === 'true',
+    pgPool: overrides.pgPool,
+    heartbeatFile: path.resolve(env.SIGNAL_SCHEDULER_HEARTBEAT_FILE ?? path.join(rootDir, 'data', 'signal-scheduler-heartbeat.json')),
     providerSandboxTimeoutMs: positiveInteger(env.SIGNAL_PROVIDER_SANDBOX_TIMEOUT_MS, 10_000, 'Provider sandbox timeout'),
     queues,
     statePath: flagValue(argv, '--state') ?? env.SIGNAL_ADMIN_STATE,
@@ -85,11 +93,71 @@ export function createSchedulerConfig({ argv = process.argv.slice(2), env = proc
 }
 
 function jobIsDue(job, now = Date.now()) {
+  if (job.nextAttemptAt) {
+    const nextAttemptMs = Date.parse(job.nextAttemptAt);
+    if (Number.isFinite(nextAttemptMs) && nextAttemptMs > now) {
+      return false;
+    }
+  }
   if (!job.nextRunAt) {
     return true;
   }
   const nextRunMs = Date.parse(job.nextRunAt);
   return !Number.isFinite(nextRunMs) || nextRunMs <= now;
+}
+
+function advisoryLockKey(config) {
+  const hash = crypto.createHash('sha256')
+    .update(`signal-scheduler:${resolveStatePath(config.statePath)}:${config.queues.join(',')}`, 'utf8')
+    .digest();
+  return hash.readInt32BE(0);
+}
+
+export async function acquirePostgresSchedulerLock(config, { pgPool } = {}) {
+  let pool = pgPool ?? config.pgPool;
+  let shouldClosePool = false;
+  if (!pool) {
+    const databaseUrl = config.env.SIGNAL_STATE_SERVICE_DATABASE_URL ?? config.env.DATABASE_URL;
+    if (!databaseUrl) {
+      throw new Error('Postgres scheduler lock requires SIGNAL_STATE_SERVICE_DATABASE_URL or DATABASE_URL.');
+    }
+    const pg = await import('pg');
+    const Pool = pg.Pool ?? pg.default?.Pool;
+    pool = new Pool({
+      application_name: 'signal-scheduler-lock',
+      connectionString: databaseUrl,
+      max: 1,
+    });
+    shouldClosePool = true;
+  }
+  const key = advisoryLockKey(config);
+  const result = await pool.query('SELECT pg_try_advisory_lock($1) AS acquired', [key]);
+  const acquired = result.rows?.[0]?.acquired === true;
+  if (!acquired) {
+    if (shouldClosePool) {
+      await pool.end?.();
+    }
+    return {
+      acquired: false,
+      lockBackend: 'postgres',
+      reason: 'advisory_lock_held',
+      async release() {},
+    };
+  }
+  return {
+    acquired: true,
+    lockBackend: 'postgres',
+    lockKey: key,
+    async release() {
+      try {
+        await pool.query('SELECT pg_advisory_unlock($1) AS released', [key]);
+      } finally {
+        if (shouldClosePool) {
+          await pool.end?.();
+        }
+      }
+    },
+  };
 }
 
 function runnableJobsForQueue(state, queue, limit, now = Date.now()) {
@@ -105,7 +173,7 @@ export function schedulerDueSummary(state, { queues = defaultSchedulerQueues, li
     return {
       due: dueJobs.length,
       nextRunAt: waitingJobs
-        .map((job) => Date.parse(job.nextRunAt ?? ''))
+        .map((job) => Date.parse(job.nextAttemptAt ?? job.nextRunAt ?? ''))
         .filter((value) => Number.isFinite(value))
         .sort((left, right) => left - right)
         .map((value) => new Date(value).toISOString())[0] ?? null,
@@ -123,6 +191,10 @@ export async function acquireSchedulerLock(config) {
       disabled: true,
       async release() {},
     };
+  }
+
+  if (config.lockBackend === 'postgres') {
+    return acquirePostgresSchedulerLock(config);
   }
 
   await fs.mkdir(path.dirname(config.lockFile), { recursive: true });
@@ -243,7 +315,8 @@ export async function runSchedulerOnce(config, options = {}) {
   }
 }
 
-export async function startSchedulerDaemon(config, { log = console.log } = {}) {
+export async function startSchedulerDaemon(config, { log } = {}) {
+  const logger = createLogger({ env: config.env, service: 'signal-scheduler', sink: log ?? console.log });
   const lock = await acquireSchedulerLock(config);
   if (!lock.acquired) {
     throw new Error(`Signal scheduler lock is held at ${lock.lockFile}.`);
@@ -269,7 +342,14 @@ export async function startSchedulerDaemon(config, { log = console.log } = {}) {
   async function runLoop() {
     while (!stopped) {
       const result = await runSchedulerTick({ ...config, lock: false });
-      log(`Signal scheduler tick: ran ${result.ran ?? 0} job(s), ok=${result.ok}`);
+      await fs.mkdir(path.dirname(config.heartbeatFile), { recursive: true });
+      await fs.writeFile(config.heartbeatFile, `${JSON.stringify({
+        ok: result.ok,
+        ran: result.ran ?? 0,
+        recordedAt: new Date().toISOString(),
+        statePath: result.statePath,
+      }, null, 2)}\n`);
+      logger.info('tick', { ok: result.ok, ran: result.ran ?? 0, statePath: result.statePath });
       if (!stopped) {
         await waitInterval();
       }
@@ -320,12 +400,17 @@ async function main() {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-  console.log(`Signal scheduler running every ${config.intervalMs}ms for queues: ${config.queues.join(', ')}`);
+  createLogger({ env: config.env, service: 'signal-scheduler' }).info('daemon_started', {
+    intervalMs: config.intervalMs,
+    queues: config.queues,
+  });
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
+    createLogger({ service: 'signal-scheduler', sink: console.error }).error('fatal', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     process.exit(1);
   });
 }

@@ -59,9 +59,11 @@ async function stopProcess(child) {
 }
 
 test('frontend source guards empty live state and non-JSON POST failures', async () => {
-  const appSource = await fs.readFile(path.join(rootDir, 'src', 'App.tsx'), 'utf8');
+  const appEntrySource = await fs.readFile(path.join(rootDir, 'src', 'App.tsx'), 'utf8');
+  const appSource = await fs.readFile(path.join(rootDir, 'src', 'pages', 'AppSurface.tsx'), 'utf8');
   const dataSource = await fs.readFile(path.join(rootDir, 'src', 'signalData.ts'), 'utf8');
 
+  assert.match(appEntrySource, /lazy\(\(\) => import\('\.\/pages\/AppSurface'\)\)/);
   assert.match(appSource, /if \(!currentUser \|\| !tenant\)/);
   assert.match(appSource, /Workspace data unavailable/);
   assert.match(appSource, /if \(!currentActor \|\| !tenant\)/);
@@ -165,8 +167,10 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
   }
 
   await t.test('app route source exposes public, workspace, and admin modes', async () => {
-    const appSource = await fs.readFile(path.join(rootDir, 'src', 'App.tsx'), 'utf8');
+    const appEntrySource = await fs.readFile(path.join(rootDir, 'src', 'App.tsx'), 'utf8');
+    const appSource = await fs.readFile(path.join(rootDir, 'src', 'pages', 'AppSurface.tsx'), 'utf8');
     const dataSource = await fs.readFile(path.join(rootDir, 'src', 'signalData.ts'), 'utf8');
+    assert.match(appEntrySource, /Suspense/);
     assert.match(appSource, /window\.addEventListener\('hashchange'/);
     assert.match(appSource, /mode === 'register'/);
     assert.match(appSource, /mode === 'workspace'/);
@@ -935,6 +939,7 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
       'SIGNAL_JOB_SCHEDULER=signal-scheduler',
       'SIGNAL_PROVIDER_VALIDATION_SCHEDULER=signal-scheduler',
       'SIGNAL_TENANT_ISOLATION_MODE=rls',
+      'SIGNAL_STATE_SERVICE_RLS=true',
       'SIGNAL_STATE_BACKUP_SCHEDULE=daily',
       'SIGNAL_STATE_BACKUP_RETENTION_DAYS=30',
       'SIGNAL_STATE_RESTORE_REHEARSAL_AT=2026-06-04T09:00:00.000Z',
@@ -980,12 +985,12 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     const backendHandoffPreflight = await runCli(['backend-handoff', '--env-file', envFilePath, '--json'], blankSandboxProviderEnv);
     assert.equal(backendHandoffPreflight.envSource.type, 'env-file');
     assert.equal(backendHandoffPreflight.handoff.ok, true);
-    assert.equal(backendHandoffPreflight.handoff.productionReady, false);
+    assert.equal(backendHandoffPreflight.handoff.productionReady, true);
     assert.equal(backendHandoffPreflight.handoff.summary.productionReady, true);
     assert.equal(backendHandoffPreflight.handoff.summary.secretSafe, true);
     assert.equal(backendHandoffPreflight.handoff.backend.readyChecks, backendHandoffPreflight.handoff.backend.totalChecks);
-    assert.equal(backendHandoffPreflight.handoff.nextAction.id, 'scheduler_daemon');
-    assert(backendHandoffPreflight.handoff.actions.some((row) => row.id === 'scheduler_daemon' && row.command.includes('scheduler')));
+    assert.equal(backendHandoffPreflight.handoff.nextAction.id, 'backend_launch_evidence');
+    assert(backendHandoffPreflight.handoff.nextAction.command.includes('launch-gate package'));
     const backendHandoffPreflightJson = JSON.stringify(backendHandoffPreflight);
     assert(!backendHandoffPreflightJson.includes('db_password'), 'backend handoff preflight must not serialize database passwords');
     assert(!backendHandoffPreflightJson.includes('super_secret_session_value'), 'backend handoff preflight must not serialize session secrets');
