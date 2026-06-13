@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Radar,
   RefreshCw,
+  TerminalSquare,
   type LucideIcon,
 } from 'lucide-react';
 import {
@@ -232,6 +233,25 @@ export function StateBanner({
         <RefreshCw size={16} aria-hidden="true" />
         {isLoading ? 'Refreshing' : 'Refresh state'}
       </button>
+    </section>
+  );
+}
+
+export function SeedReadOnlyCallout({ area }: { area: 'workspace' | 'admin' }) {
+  return (
+    <section className="ops-panel seed-mode-callout" role="note" aria-label="Read-only seed mode" data-reveal>
+      <div className="seed-mode-copy">
+        <TerminalSquare size={20} aria-hidden="true" />
+        <div>
+          <span>Read-only seed mode</span>
+          <strong>{area === 'admin' ? 'Admin writes are disabled until the live API is running.' : 'Workspace actions are disabled until the live API is running.'}</strong>
+          <small>Start the full local stack or the API-only server before using write actions. Seed data stays available for review without persisting changes.</small>
+        </div>
+      </div>
+      <div className="seed-mode-command-row" aria-label="Live API commands">
+        <code>npm run dev:local</code>
+        <code>npm run api</code>
+      </div>
     </section>
   );
 }

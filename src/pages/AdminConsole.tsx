@@ -67,6 +67,7 @@ import {
   ProviderReadinessCard,
   RedactionRuleCard,
   resolveTeamCheckoutPlanId,
+  SeedReadOnlyCallout,
   SourceMessageCard,
   StateBanner,
   SuppressionRuleCard,
@@ -361,13 +362,22 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
   const tenant = data.tenants.find((item) => item.id === currentActor?.tenantId) ?? data.tenants[0];
   if (!currentActor || !tenant) {
     return (
-      <section className="admin-shell">
-        <section className="ops-panel empty-state" data-reveal>
-          <h3>Admin data unavailable</h3>
-          <p>The live API returned no tenant or user records for the admin view.</p>
-          <small>Refresh after creating an admin-backed tenant, or use the local seeded state until the backend is populated.</small>
-        </section>
-      </section>
+      <div className="product-shell admin-shell">
+        <ProductHeader active="admin" />
+        <main className="product-main">
+          <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+          {source === 'seed' && <SeedReadOnlyCallout area="admin" />}
+          <section className="ops-panel empty-state" data-reveal>
+            <h3>Admin data unavailable</h3>
+            <p>The live API returned no tenant or user records for the admin view.</p>
+            <small>Refresh after creating an admin-backed tenant, or use the local seeded state until the backend is populated.</small>
+            <div className="button-row">
+              <a className="inline-action" href="#register">Register workspace</a>
+              <a className="inline-action" href="#top">Return to public site</a>
+            </div>
+          </section>
+        </main>
+      </div>
     );
   }
   const plan = data.plans.find((item) => item.id === tenant.planId);
@@ -664,6 +674,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
         <ProductHeader active="admin" />
         <main className="product-main">
           <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+          {source === 'seed' && <SeedReadOnlyCallout area="admin" />}
           <section className="admin-hero access-denied-panel">
             <div>
               <p className="kicker">
@@ -717,6 +728,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
       <ProductHeader active="admin" />
       <main className="product-main">
         <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+        {source === 'seed' && <SeedReadOnlyCallout area="admin" />}
         <section className="admin-hero" data-reveal>
           <div>
             <p className="kicker">
