@@ -6716,7 +6716,7 @@ function fallbackProductionEnvRow({
   templateKeys: string[];
 }): ProductionEnvAuditRow {
   const required = uniquePlanValues(requiredEnv);
-  const optional = uniquePlanValues(optionalEnv);
+  const optional = uniquePlanValues(optionalEnv).filter((key) => !required.includes(key));
   const sourceKeys = fallbackProductionEnvSourceKeys(envSource);
   const templateKeySet = new Set(templateKeys);
   const missingRequired = required.filter((key) => !env[key]);
@@ -7164,7 +7164,8 @@ export function fallbackProductionEnvAudit(
     },
   };
   report.summary.secretSafe = unsafePaths.length === 0;
-  report.ok = report.summary.secretSafe && report.template.invalid.length === 0 && rows.length === 9;
+  const expectedRowCount = fallbackProductionEnvSections.length + 1;
+  report.ok = report.summary.secretSafe && report.template.invalid.length === 0 && rows.length === expectedRowCount;
   return report;
 }
 

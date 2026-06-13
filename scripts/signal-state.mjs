@@ -5879,7 +5879,7 @@ function productionEnvSourceKeys(envSource) {
 
 function productionEnvRow({ env, envSource, owner, label, id, requiredEnv = [], optionalEnv = [], templateKeys, commands = [] }) {
   const required = uniqueValues(requiredEnv);
-  const optional = uniqueValues(optionalEnv);
+  const optional = uniqueValues(optionalEnv).filter((key) => !required.includes(key));
   const sourceKeys = productionEnvSourceKeys(envSource);
   const templateKeySet = new Set(templateKeys);
   const missingRequired = required.filter((key) => !env[key]);
@@ -6000,7 +6000,8 @@ export function productionEnvAuditReport({
     },
   };
   report.summary.secretSafe = unsafePaths.length === 0;
-  report.ok = report.summary.secretSafe && report.template.invalid.length === 0 && rows.length === 9;
+  const expectedRowCount = sections.length + 1;
+  report.ok = report.summary.secretSafe && report.template.invalid.length === 0 && rows.length === expectedRowCount;
   return report;
 }
 
