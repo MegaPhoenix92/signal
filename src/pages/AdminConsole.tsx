@@ -40,6 +40,9 @@ import {
 import type { AdminSubRoute, AdminTab, LiveState } from './appTypes';
 import {
   AdminTable,
+  AccountEventRow,
+  AccountRecommendationCard,
+  AccountReviewCard,
   billingOverrideValue,
   CheckItem,
   CommandStrip,
@@ -83,6 +86,8 @@ type AdminRoute = {
   sub?: AdminSubRoute;
 };
 
+const adminContextTenantStorageKey = 'signal.admin.contextTenantId';
+
 const adminTabs: Array<{ id: AdminTab; label: string; icon: LucideIcon }> = [
   { id: 'dashboard', label: 'Dashboard', icon: Gauge },
   { id: 'organization', label: 'Organization', icon: Users },
@@ -97,8 +102,14 @@ const adminTabs: Array<{ id: AdminTab; label: string; icon: LucideIcon }> = [
 
 const adminSubRoutes: Partial<Record<AdminTab, readonly AdminSubRoute[]>> = {
   organization: ['tenants', 'users'],
-  platform: ['governance'],
+  platform: ['governance', 'signals', 'accounts'],
 };
+
+const platformSubRoutes: Array<{ id: AdminSubRoute; label: string }> = [
+  { id: 'governance', label: 'Governance' },
+  { id: 'signals', label: 'Signals' },
+  { id: 'accounts', label: 'Accounts' },
+];
 
 const legacyAdminRoutes: Record<string, AdminRoute> = {
   overview: { tab: 'dashboard' },
@@ -106,6 +117,8 @@ const legacyAdminRoutes: Record<string, AdminRoute> = {
   users: { tab: 'organization', sub: 'users' },
   email: { tab: 'email' },
   governance: { tab: 'platform', sub: 'governance' },
+  signals: { tab: 'platform', sub: 'signals' },
+  accounts: { tab: 'platform', sub: 'accounts' },
   integrations: { tab: 'integrations' },
   payments: { tab: 'billing' },
   ops: { tab: 'launch' },
@@ -123,6 +136,43 @@ function normalizeAdminRoute(route: AdminRoute): AdminRoute {
     return route;
   }
   return { tab: route.tab };
+}
+
+function adminHashQuery(hash = window.location.hash) {
+  const queryStart = hash.indexOf('?');
+  if (queryStart < 0) {
+    return new URLSearchParams();
+  }
+  const queryEnd = hash.indexOf('#', queryStart + 1);
+  return new URLSearchParams(hash.slice(queryStart + 1, queryEnd < 0 ? undefined : queryEnd));
+}
+
+function getAdminTenantFromHash() {
+  return adminHashQuery().get('tenant');
+}
+
+function readStoredAdminContextTenant() {
+  try {
+    return window.sessionStorage.getItem(adminContextTenantStorageKey);
+  } catch {
+    return null;
+  }
+}
+
+function storeAdminContextTenant(tenantId: string) {
+  try {
+    window.sessionStorage.setItem(adminContextTenantStorageKey, tenantId);
+  } catch {
+    // Session storage can be unavailable in private or constrained browser contexts.
+  }
+}
+
+function tenantExists(data: SignalAppData, tenantId?: string | null) {
+  return Boolean(tenantId && data.tenants.some((tenant) => tenant.id === tenantId));
+}
+
+function fallbackAdminContextTenantId(data: SignalAppData, actorTenantId?: string) {
+  return tenantExists(data, actorTenantId) ? actorTenantId ?? '' : data.tenants[0]?.id ?? '';
 }
 
 function getAdminRouteFromHash(): AdminRoute {
@@ -144,8 +194,9 @@ function getAdminTabFromHash(): AdminTab {
   return getAdminRouteFromHash().tab;
 }
 
-function adminTabHash(tab: AdminTab, sub?: AdminSubRoute) {
-  return sub ? `#admin/${tab}/${sub}` : `#admin/${tab}`;
+function adminTabHash(tab: AdminTab, sub?: AdminSubRoute, tenantId?: string | null) {
+  const base = sub ? `#admin/${tab}/${sub}` : `#admin/${tab}`;
+  return tenantId ? `${base}?tenant=${encodeURIComponent(tenantId)}` : base;
 }
 
 function adminTabId(tab: AdminTab) {
@@ -406,13 +457,28 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     summary,
     validateSandbox,
   } = liveState;
+  const currentActor = data.users.find((user) => user.id === actorUserId) ?? data.users[0];
   const [activeRoute, setActiveRoute] = useState<AdminRoute>(() => getAdminRouteFromHash());
   const activeTab = activeRoute.tab;
+  const [contextTenantId, setContextTenantId] = useState(() => {
+    const hashTenantId = getAdminTenantFromHash();
+    const storedTenantId = readStoredAdminContextTenant();
+    return tenantExists(data, hashTenantId)
+      ? hashTenantId ?? ''
+      : tenantExists(data, storedTenantId)
+        ? storedTenantId ?? ''
+        : fallbackAdminContextTenantId(data, currentActor?.tenantId);
+  });
   const adminTabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [tenantSearch, setTenantSearch] = useState('');
   const [tenantStatusFilter, setTenantStatusFilter] = useState('all');
   const [tenantPlanFilter, setTenantPlanFilter] = useState('all');
   const [selectedTenantIds, setSelectedTenantIds] = useState<string[]>([]);
+  const [signalStatusFilter, setSignalStatusFilter] = useState('all');
+  const [signalOwnerFilter, setSignalOwnerFilter] = useState('all');
+  const [signalFlowFilter, setSignalFlowFilter] = useState('all');
+  const [selectedOperatorAccountId, setSelectedOperatorAccountId] = useState('');
+  const [accountReviewNote, setAccountReviewNote] = useState('Admin operator review');
   const [auditActorFilter, setAuditActorFilter] = useState('all');
   const [auditActionFilter, setAuditActionFilter] = useState('all');
   const [auditTextFilter, setAuditTextFilter] = useState('');
@@ -423,8 +489,14 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
   useEffect(() => {
     const syncAdminRoute = () => {
       const route = getAdminRouteFromHash();
-      const nextHash = adminTabHash(route.tab, route.sub);
+      const hashTenantId = getAdminTenantFromHash();
+      const validHashTenantId = tenantExists(data, hashTenantId) ? hashTenantId : null;
+      const nextHash = adminTabHash(route.tab, route.sub, validHashTenantId);
       setActiveRoute(route);
+      if (validHashTenantId && validHashTenantId !== contextTenantId) {
+        setContextTenantId(validHashTenantId);
+        storeAdminContextTenant(validHashTenantId);
+      }
       if (window.location.hash.startsWith('#admin/') && window.location.hash !== nextHash) {
         window.history.replaceState(null, '', nextHash);
       }
@@ -433,12 +505,34 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     syncAdminRoute();
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
-  }, []);
+  }, [contextTenantId, data]);
+
+  useEffect(() => {
+    if (tenantExists(data, contextTenantId)) {
+      return;
+    }
+    const fallbackTenantId = fallbackAdminContextTenantId(data, currentActor?.tenantId);
+    if (fallbackTenantId) {
+      setContextTenantId(fallbackTenantId);
+      storeAdminContextTenant(fallbackTenantId);
+    }
+  }, [contextTenantId, currentActor?.tenantId, data]);
+
+  // Reset operator-panel filters/selection when the admin context tenant changes.
+  // Owner/flow filters hold ids scoped to the previous tenant; without this reset a
+  // stale filter would silently filter the new tenant's signals to an empty list (#82/#89 review).
+  useEffect(() => {
+    setSignalStatusFilter('all');
+    setSignalOwnerFilter('all');
+    setSignalFlowFilter('all');
+    setSelectedOperatorAccountId('');
+    setAccountReviewNote('Admin operator review');
+  }, [contextTenantId]);
 
   function selectAdminTab(tab: AdminTab, sub?: AdminSubRoute, focus = false) {
     const route = normalizeAdminRoute({ tab, sub });
     setActiveRoute(route);
-    const nextHash = adminTabHash(route.tab, route.sub);
+    const nextHash = adminTabHash(route.tab, route.sub, contextTenantId);
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
@@ -466,8 +560,19 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     selectAdminTab(adminTabs[nextIndex].id, undefined, true);
   }
 
-  const currentActor = data.users.find((user) => user.id === actorUserId) ?? data.users[0];
-  const tenant = data.tenants.find((item) => item.id === currentActor?.tenantId) ?? data.tenants[0];
+  function selectAdminContextTenant(tenantId: string) {
+    if (!tenantExists(data, tenantId)) {
+      return;
+    }
+    setContextTenantId(tenantId);
+    storeAdminContextTenant(tenantId);
+    const nextHash = adminTabHash(activeRoute.tab, activeRoute.sub, tenantId);
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, '', nextHash);
+    }
+  }
+
+  const tenant = data.tenants.find((item) => item.id === contextTenantId) ?? data.tenants.find((item) => item.id === currentActor?.tenantId) ?? data.tenants[0];
   if (!currentActor || !tenant) {
     return (
       <div className="product-shell admin-shell">
@@ -489,40 +594,70 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     );
   }
   const plan = data.plans.find((item) => item.id === tenant.planId);
-  const salesDemoUser = tenantTeamUser(data.users, tenant.id, 'sales');
-  const productDemoUser = tenantTeamUser(data.users, tenant.id, 'product');
+  const tenantUsers = data.users.filter((user) => user.tenantId === tenant.id);
+  const tenantActiveUsers = tenantUsers.filter((user) => user.status === 'active');
+  const tenantAdminUser = tenantUsers.find((user) => user.role === 'admin' && user.status === 'active') ?? tenantActiveUsers[0] ?? tenantUsers[0];
+  const salesDemoUser = tenantTeamUser(tenantUsers, tenant.id, 'sales');
+  const productDemoUser = tenantTeamUser(tenantUsers, tenant.id, 'product');
+  const tenantMailboxes = data.mailboxes.filter((mailbox) => mailbox.tenantId === tenant.id);
+  const tenantEmailFlows = data.emailFlows.filter((flow) => flow.tenantId === tenant.id);
+  const tenantFlowRuns = (data.flowRuns ?? []).filter((run) => run.tenantId === tenant.id);
+  const tenantSourceMessages = (data.sourceMessages ?? []).filter((message) => message.tenantId === tenant.id);
+  const tenantSignals = data.signals.filter((signal) => signal.tenantId === tenant.id);
+  const tenantSignalHandoffs = (data.signalHandoffs ?? []).filter((handoff) => handoff.tenantId === tenant.id);
+  const tenantAccountProfiles = (data.accountProfiles ?? []).filter((account) => account.tenantId === tenant.id);
+  const tenantAccountRecommendations = (data.accountRecommendations ?? []).filter((recommendation) => recommendation.tenantId === tenant.id);
+  const tenantAccountActions = (data.accountActions ?? []).filter((action) => action.tenantId === tenant.id);
+  const tenantAccountEvents = (data.accountEvents ?? []).filter((event) => event.tenantId === tenant.id);
+  const tenantAccountReviews = (data.accountReviews ?? []).filter((review) => review.tenantId === tenant.id);
+  const tenantSubscriptionsForContext = data.subscriptions.filter((item) => item.tenantId === tenant.id);
+  const tenantBillingSessions = data.billingSessions.filter((session) => session.tenantId === tenant.id);
+  const tenantBillingOverrides = (data.billingOverrides ?? []).filter((override) => override.tenantId === tenant.id);
+  const tenantInvoices = (data.invoices ?? []).filter((invoice) => invoice.tenantId === tenant.id);
+  const tenantPaymentEventsForContext = data.paymentEvents.filter((event) => event.tenantId === tenant.id);
+  const tenantLifecycleNoticesForContext = (data.lifecycleNotices ?? []).filter((notice) => notice.tenantId === tenant.id);
+  const tenantNotificationEvents = (data.notificationEvents ?? []).filter((event) => event.tenantId === tenant.id);
+  const tenantDigestRuns = (data.notificationDigestRuns ?? []).filter((run) => run.tenantId === tenant.id);
+  const tenantEmailDeliveries = (data.emailDeliveryMessages ?? []).filter((message) => message.tenantId === tenant.id);
+  const tenantNotificationPreferences = (data.notificationPreferences ?? []).filter((preference) => preference.tenantId === tenant.id);
+  const tenantSuppressionRules = (data.suppressionRules ?? []).filter((rule) => rule.tenantId === tenant.id);
+  const tenantSignalFeedback = (data.signalFeedback ?? []).filter((feedback) => feedback.tenantId === tenant.id);
+  const tenantRedactionRules = (data.redactionRules ?? []).filter((rule) => rule.tenantId === tenant.id);
+  const tenantDataRequests = (data.dataRequests ?? []).filter((request) => request.tenantId === tenant.id);
+  const tenantIncidentNotes = (data.incidentNotes ?? []).filter((note) => note.tenantId === tenant.id);
+  const tenantInvites = (data.invites ?? []).filter((invite) => invite.tenantId === tenant.id);
   const checkoutTeamPlanId = resolveTeamCheckoutPlanId(data, tenant.planId);
-  const subscription = data.subscriptions.find((item) => item.tenantId === tenant.id);
-  const reauthCount = data.mailboxes.filter((mailbox) => mailbox.status === 'needs_reauth').length;
-  const enabledFlows = data.emailFlows.filter((flow) => flow.status === 'enabled').length;
-  const routingRules = [...(data.routingRules ?? [])].sort((left, right) => Date.parse(right.updatedAt ?? right.createdAt ?? '') - Date.parse(left.updatedAt ?? left.createdAt ?? ''));
+  const subscription = tenantSubscriptionsForContext[0];
+  const reauthCount = tenantMailboxes.filter((mailbox) => mailbox.status === 'needs_reauth').length;
+  const enabledFlows = tenantEmailFlows.filter((flow) => flow.status === 'enabled').length;
+  const routingRules = [...(data.routingRules ?? [])].filter((rule) => rule.tenantId === tenant.id).sort((left, right) => Date.parse(right.updatedAt ?? right.createdAt ?? '') - Date.parse(left.updatedAt ?? left.createdAt ?? ''));
   const routingRuleForFlow = (flowId: string) => routingRules.find((rule) => rule.flowId === flowId && rule.status === 'active') ?? routingRules.find((rule) => rule.flowId === flowId);
   const entitlement = data.entitlements.find((item) => item.tenantId === tenant.id);
-  const latestBillingSessions = [...data.billingSessions].slice(-5).reverse();
-  const billingOverrides = [...(data.billingOverrides ?? [])].sort((left, right) => Date.parse(right.createdAt ?? '') - Date.parse(left.createdAt ?? ''));
+  const latestBillingSessions = [...tenantBillingSessions].slice(-5).reverse();
+  const billingOverrides = [...tenantBillingOverrides].sort((left, right) => Date.parse(right.createdAt ?? '') - Date.parse(left.createdAt ?? ''));
   const activeBillingOverrides = billingOverrides.filter((override) => override.status === 'active');
-  const recentInvoices = [...(data.invoices ?? [])].slice(-5).reverse();
-  const recoverableInvoices = (data.invoices ?? []).filter((invoice) => ['open', 'past_due'].includes(invoice.status));
-  const recentPaymentEvents = [...data.paymentEvents].slice(-5).reverse();
+  const recentInvoices = [...tenantInvoices].slice(-5).reverse();
+  const recoverableInvoices = tenantInvoices.filter((invoice) => ['open', 'past_due'].includes(invoice.status));
+  const recentPaymentEvents = [...tenantPaymentEventsForContext].slice(-5).reverse();
   const failedJobs = data.jobs.filter((job) => job.status === 'failed');
   const queuedJobs = data.jobs.filter((job) => ['queued', 'running'].includes(job.status));
   const queuedSignalHandoffJobs = queuedJobs.filter((job) => job.queue === 'signal_handoff');
   const providerValidationJobs = data.jobs.filter((job) => job.queue === 'provider_validation');
   const queuedProviderValidationJobs = queuedJobs.filter((job) => job.queue === 'provider_validation');
-  const mailboxSessionsDescending = [...data.mailboxConnectionSessions].reverse();
+  const mailboxSessionsDescending = [...data.mailboxConnectionSessions].filter((session) => session.tenantId === tenant.id).reverse();
   const latestMailboxSessions = mailboxSessionsDescending.slice(0, 4);
   const latestSessionForMailbox = (mailboxId: string) => mailboxSessionsDescending.find((session) => session.mailboxId === mailboxId);
-  const mailboxWatchesDescending = [...(data.emailWatchSubscriptions ?? [])].reverse();
+  const mailboxWatchesDescending = [...(data.emailWatchSubscriptions ?? [])].filter((watch) => watch.tenantId === tenant.id).reverse();
   const latestWatchForMailbox = (mailboxId: string) => mailboxWatchesDescending.find((watch) => watch.mailboxId === mailboxId);
-  const latestFlowRuns = [...(data.flowRuns ?? [])].slice(-5).reverse();
-  const latestSourceMessages = [...(data.sourceMessages ?? [])].slice(-5).reverse();
-  const generatedSignals = data.signals.filter((signal) => signal.sourceMessageId && signal.flowId);
-  const unreadNotifications = (data.notificationEvents ?? []).filter((event) => event.status === 'unread');
-  const mutedNotifications = (data.notificationEvents ?? []).filter((event) => event.status === 'muted');
-  const latestDigestRuns = [...(data.notificationDigestRuns ?? [])].slice(-5).reverse();
-  const latestEmailDeliveries = [...(data.emailDeliveryMessages ?? [])].slice(-6).reverse();
-  const queuedEmailDeliveries = (data.emailDeliveryMessages ?? []).filter((message) => message.status === 'queued');
-  const failedEmailDeliveries = (data.emailDeliveryMessages ?? []).filter((message) => ['failed', 'bounced'].includes(message.status));
+  const latestFlowRuns = [...tenantFlowRuns].slice(-5).reverse();
+  const latestSourceMessages = [...tenantSourceMessages].slice(-5).reverse();
+  const generatedSignals = tenantSignals.filter((signal) => signal.sourceMessageId && signal.flowId);
+  const unreadNotifications = tenantNotificationEvents.filter((event) => event.status === 'unread');
+  const mutedNotifications = tenantNotificationEvents.filter((event) => event.status === 'muted');
+  const latestDigestRuns = [...tenantDigestRuns].slice(-5).reverse();
+  const latestEmailDeliveries = [...tenantEmailDeliveries].slice(-6).reverse();
+  const queuedEmailDeliveries = tenantEmailDeliveries.filter((message) => message.status === 'queued');
+  const failedEmailDeliveries = tenantEmailDeliveries.filter((message) => ['failed', 'bounced'].includes(message.status));
   const apiSessions = [...(data.apiSessions ?? [])].sort((left, right) => Date.parse(right.issuedAt ?? '') - Date.parse(left.issuedAt ?? ''));
   const activeApiSessions = apiSessions.filter((session) => session.status === 'active');
   const revokedApiSessions = apiSessions.filter((session) => session.status === 'revoked');
@@ -535,25 +670,25 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     const nextRunMs = Date.parse(schedule.nextRunAt);
     return Number.isFinite(nextRunMs) && nextRunMs <= Date.now();
   });
-  const pendingInvites = (data.invites ?? []).filter((invite) => invite.status === 'pending');
-  const recentInvites = [...(data.invites ?? [])].slice(-6).reverse();
+  const pendingInvites = tenantInvites.filter((invite) => invite.status === 'pending');
+  const recentInvites = [...tenantInvites].slice(-6).reverse();
   const qualitySettings = data.signalQualitySettings?.find((settings) => settings.tenantId === tenant.id);
-  const suppressionRules = data.suppressionRules ?? [];
-  const latestFeedback = [...(data.signalFeedback ?? [])].slice(-6).reverse();
+  const suppressionRules = tenantSuppressionRules;
+  const latestFeedback = [...tenantSignalFeedback].slice(-6).reverse();
   const modelGovernancePolicy = data.modelGovernancePolicies?.find((policy) => policy.tenantId === tenant.id);
   const modelGovernanceEvidence = modelGovernancePolicy ? modelEvidenceForTenant(data, tenant.id) : null;
   const governancePolicy = data.governancePolicies?.find((policy) => policy.tenantId === tenant.id);
-  const activeRedactionRules = (data.redactionRules ?? []).filter((rule) => rule.status === 'active');
-  const latestDataRequests = [...(data.dataRequests ?? [])].slice(-6).reverse();
-  const activeDataRequests = (data.dataRequests ?? []).filter((request) => ['open', 'processing'].includes(request.status));
-  const latestIncidentNotes = [...(data.incidentNotes ?? [])].slice(-6).reverse();
-  const openIncidentNotes = (data.incidentNotes ?? []).filter((note) => note.status === 'open');
+  const activeRedactionRules = tenantRedactionRules.filter((rule) => rule.status === 'active');
+  const latestDataRequests = [...tenantDataRequests].slice(-6).reverse();
+  const activeDataRequests = tenantDataRequests.filter((request) => ['open', 'processing'].includes(request.status));
+  const latestIncidentNotes = [...tenantIncidentNotes].slice(-6).reverse();
+  const openIncidentNotes = tenantIncidentNotes.filter((note) => note.status === 'open');
   const tenantMemberships = membershipsForTenant(data, tenant.id);
   const activeTenantMemberships = activeMembershipsForTenant(data, tenant.id);
-  const activeSeats = activeTenantMemberships.length || summary.activeSeats || data.users.filter((user) => user.tenantId === tenant.id && user.status === 'active').length;
-  const pendingInviteSeats = summary.pendingInviteSeats ?? pendingInvites.length;
-  const seatLimit = summary.seatLimit ?? entitlement?.seatLimit ?? plan?.seatLimit ?? null;
-  const seatsAvailable = summary.seatsAvailable ?? (seatLimit === null ? null : Math.max(0, seatLimit - activeSeats - pendingInviteSeats));
+  const activeSeats = activeTenantMemberships.length || tenantActiveUsers.length;
+  const pendingInviteSeats = pendingInvites.length;
+  const seatLimit = entitlement?.seatLimit ?? plan?.seatLimit ?? null;
+  const seatsAvailable = seatLimit === null ? null : Math.max(0, seatLimit - activeSeats - pendingInviteSeats);
   const tenantSuspended = tenant.status === 'suspended';
   const tenantPlans = new Map(data.plans.map((item) => [item.id, item]));
   const tenantSubscriptions = new Map(data.subscriptions.map((item) => [item.tenantId, item]));
@@ -563,7 +698,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     const tenantSubscription = tenantSubscriptions.get(item.id);
     const tenantEntitlement = tenantEntitlements.get(item.id);
     const tenantActiveSeats = activeMembershipsForTenant(data, item.id).length || data.users.filter((user) => user.tenantId === item.id && user.status === 'active').length;
-    const tenantPendingInvites = pendingInvites.filter((invite) => invite.tenantId === item.id).length;
+    const tenantPendingInvites = (data.invites ?? []).filter((invite) => invite.tenantId === item.id && invite.status === 'pending').length;
     const tenantNotices = (data.lifecycleNotices ?? []).filter((notice) => notice.tenantId === item.id && notice.status === 'open');
     const tenantJobs = data.jobs.filter((job) => job.tenantId === item.id);
     const tenantPaymentEvents = data.paymentEvents.filter((event) => event.tenantId === item.id);
@@ -594,11 +729,36 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     const matchesPlan = tenantPlanFilter === 'all' || row.tenant.planId === tenantPlanFilter;
     return matchesSearch && matchesStatus && matchesPlan;
   });
-  const selectedTenantRow = tenantRows.find((row) => selectedTenantIds.includes(row.tenant.id)) ?? visibleTenantRows[0] ?? tenantRows[0] ?? null;
-  const lifecycleNotices = [...(data.lifecycleNotices ?? [])].filter((notice) => notice.tenantId === tenant.id);
+  const selectedTenantRow = tenantRows.find((row) => row.tenant.id === tenant.id) ?? tenantRows.find((row) => selectedTenantIds.includes(row.tenant.id)) ?? visibleTenantRows[0] ?? tenantRows[0] ?? null;
+  const lifecycleNotices = tenantLifecycleNoticesForContext;
   const openLifecycleNotices = lifecycleNotices.filter((notice) => notice.status === 'open');
   const paymentLifecycleNotices = lifecycleNotices.filter((notice) => notice.category === 'payment' || notice.category === 'access' || notice.category === 'onboarding');
   const sourceLifecycleNotices = lifecycleNotices.filter((notice) => ['source', 'provider', 'notification'].includes(notice.category));
+  const activePlatformSubRoute = activeRoute.sub;
+  const platformSubRoute: AdminSubRoute = activeTab === 'platform' && activePlatformSubRoute && platformSubRoutes.some((route) => route.id === activePlatformSubRoute)
+    ? activePlatformSubRoute
+    : 'governance';
+  const signalOwnerOptions = tenantActiveUsers.length ? tenantActiveUsers : tenantUsers;
+  const visibleOperatorSignals = tenantSignals.filter((signal) => {
+    const matchesStatus = signalStatusFilter === 'all' || signal.status === signalStatusFilter;
+    const matchesOwner = signalOwnerFilter === 'all' || signal.ownerUserId === signalOwnerFilter;
+    const matchesFlow = signalFlowFilter === 'all' || (signal.flowId ?? 'none') === signalFlowFilter;
+    return matchesStatus && matchesOwner && matchesFlow;
+  });
+  const selectedOperatorAccount = tenantAccountProfiles.find((account) => account.id === selectedOperatorAccountId) ?? tenantAccountProfiles[0] ?? null;
+  const selectedAccountActions = selectedOperatorAccount
+    ? [...tenantAccountActions].filter((action) => action.account === selectedOperatorAccount.name).sort((left, right) => Date.parse(right.createdAt ?? '') - Date.parse(left.createdAt ?? ''))
+    : [];
+  const selectedAccountRecommendations = selectedOperatorAccount
+    ? [...tenantAccountRecommendations].filter((recommendation) => recommendation.account === selectedOperatorAccount.name).sort((left, right) => prioritySortValue(right.priority) - prioritySortValue(left.priority))
+    : [];
+  const selectedAccountEvents = selectedOperatorAccount
+    ? [...tenantAccountEvents].filter((event) => event.account === selectedOperatorAccount.name).sort((left, right) => Date.parse(right.occurredAt ?? '') - Date.parse(left.occurredAt ?? ''))
+    : [];
+  const selectedAccountReviews = selectedOperatorAccount
+    ? [...tenantAccountReviews].filter((review) => review.account === selectedOperatorAccount.name).sort((left, right) => Date.parse(right.createdAt ?? '') - Date.parse(left.createdAt ?? ''))
+    : [];
+  const canUseAdminMutations = source === 'api' && !isMutating;
   const auditEvents = [...(data.auditEvents ?? [])].sort((left, right) => Date.parse(right.createdAt ?? '') - Date.parse(left.createdAt ?? ''));
   const auditActors = [...new Set(auditEvents.map((event) => event.actor).filter(Boolean))].sort();
   const auditActions = [...new Set(auditEvents.map((event) => event.action).filter(Boolean))].sort();
@@ -835,7 +995,20 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     <div className="product-shell admin-shell">
       <ProductHeader active="admin" />
       <main className="product-main">
-        <StateBanner actorUserId={actorUserId} data={data} error={error} isLoading={isLoading} isMutating={isMutating} lastMutation={lastMutation} onActorChange={setActorUserId} onRefresh={refresh} source={source} summary={summary} />
+        <StateBanner
+          actorUserId={actorUserId}
+          contextTenantId={tenant.id}
+          data={data}
+          error={error}
+          isLoading={isLoading}
+          isMutating={isMutating}
+          lastMutation={lastMutation}
+          onActorChange={setActorUserId}
+          onContextTenantChange={selectAdminContextTenant}
+          onRefresh={refresh}
+          source={source}
+          summary={summary}
+        />
         {source === 'seed' && <SeedReadOnlyCallout area="admin" />}
         <section className="admin-hero" data-reveal>
           <div>
@@ -894,6 +1067,21 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               role="tabpanel"
               tabIndex={0}
             >
+              {activeTab === 'platform' && (
+                <nav className="admin-subnav" aria-label="Platform admin views">
+                  {platformSubRoutes.map((route) => (
+                    <button
+                      aria-current={platformSubRoute === route.id ? 'page' : undefined}
+                      className="inline-action"
+                      key={route.id}
+                      type="button"
+                      onClick={() => selectAdminTab('platform', route.id)}
+                    >
+                      {route.label}
+                    </button>
+                  ))}
+                </nav>
+              )}
 
         {activeTab === 'organization' && (
           <section className="admin-two-column is-visible" data-reveal>
@@ -926,11 +1114,14 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                 {visibleTenantRows.map((row) => {
                   const checked = selectedTenantIds.includes(row.tenant.id);
                   return (
-                    <label className={`tenant-row-card ${checked ? 'is-selected' : ''}`} key={row.tenant.id}>
+                    <label className={`tenant-row-card ${checked ? 'is-selected' : ''} ${row.tenant.id === tenant.id ? 'is-context' : ''}`} key={row.tenant.id}>
                       <input
                         checked={checked}
                         type="checkbox"
                         onChange={(event) => {
+                          if (event.target.checked) {
+                            selectAdminContextTenant(row.tenant.id);
+                          }
                           setSelectedTenantIds((current) => event.target.checked
                             ? [...new Set([...current, row.tenant.id])]
                             : current.filter((id) => id !== row.tenant.id));
@@ -1100,15 +1291,15 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                 </div>
               </div>
             </article>
-            <MetricCard icon={Users} label="Users" value={String(data.users.length)} detail={`${summary.activeMemberships ?? activeTenantMemberships.length} active memberships · ${pendingInvites.length} pending invites`} accent="lime" />
+            <MetricCard icon={Users} label="Users" value={String(tenantUsers.length)} detail={`${activeTenantMemberships.length} active memberships · ${pendingInvites.length} pending invites`} accent="lime" />
             <MetricCard icon={Inbox} label="Reauth needed" value={String(reauthCount)} detail="Outlook source" accent="coral" />
-            <MetricCard icon={Workflow} label="Enabled flows" value={`${enabledFlows}/${data.emailFlows.length}`} detail={`${summary.activeRoutingRules ?? routingRules.filter((rule) => rule.status === 'active').length} active routes · ${summary.generatedSignals ?? generatedSignals.length} generated`} accent="cyan" />
-            <MetricCard icon={Gauge} label="Accounts" value={String(summary.accounts ?? data.accountProfiles.length)} detail={`${summary.openAccountActions ?? data.accountActions.filter((action) => action.status === 'open').length} open actions`} accent="lime" />
+            <MetricCard icon={Workflow} label="Enabled flows" value={`${enabledFlows}/${tenantEmailFlows.length}`} detail={`${routingRules.filter((rule) => rule.status === 'active').length} active routes · ${generatedSignals.length} generated`} accent="cyan" />
+            <MetricCard icon={Gauge} label="Accounts" value={String(tenantAccountProfiles.length)} detail={`${tenantAccountActions.filter((action) => action.status === 'open').length} open actions`} accent="lime" />
             <MetricCard icon={BellRing} label="Unread alerts" value={String(summary.unreadNotifications ?? unreadNotifications.length)} detail={`${summary.mutedNotifications ?? mutedNotifications.length} muted`} accent="cyan" />
             <MetricCard icon={CreditCard} label="Subscription" value={subscription?.status ? titleize(subscription.status) : 'Missing'} detail="Local state, provider webhook source" accent="gold" />
             <MetricCard icon={ShieldCheck} label="Tenant status" value={titleize(tenant.status)} detail={`${summary.suspendedTenants ?? data.tenants.filter((item) => item.status === 'suspended').length} suspended`} accent={tenantSuspended ? 'coral' : 'lime'} />
             <MetricCard icon={WalletCards} label="Overrides" value={String(summary.activeBillingOverrides ?? activeBillingOverrides.length)} detail={`${summary.billingOverrides ?? billingOverrides.length} billing overrides`} accent={activeBillingOverrides.length ? 'gold' : 'cyan'} />
-            <MetricCard icon={WalletCards} label="Open invoices" value={String(summary.openInvoices ?? recoverableInvoices.length)} detail={`${summary.pastDueInvoices ?? data.invoices?.filter((invoice) => invoice.status === 'past_due').length ?? 0} past due`} accent="coral" />
+            <MetricCard icon={WalletCards} label="Open invoices" value={String(recoverableInvoices.length)} detail={`${tenantInvoices.filter((invoice) => invoice.status === 'past_due').length} past due`} accent="coral" />
             <MetricCard icon={AlertTriangle} label="Lifecycle notices" value={String(summary.openLifecycleNotices ?? openLifecycleNotices.length)} detail={`${summary.criticalLifecycleNotices ?? openLifecycleNotices.filter((notice) => notice.severity === 'critical').length} critical`} accent="coral" />
             <MetricCard icon={Fingerprint} label="API sessions" value={String(summary.activeApiSessions ?? activeApiSessions.length)} detail={`${summary.revokedApiSessions ?? revokedApiSessions.length} revoked · digest-only`} accent="cyan" />
             <MetricCard icon={Plug} label="Provider readiness" value={`${providerReadiness.summary.readyProviders}/${providerReadiness.summary.totalProviders}`} detail={`${providerReadiness.summary.missingRequired} env vars missing`} accent="gold" />
@@ -1200,7 +1391,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               <PanelHead icon={UserCog} title="Users and memberships" action={`${activeSeats}/${seatLimit ?? 'unlimited'} active seats`} />
               <AdminTable
                 columns={['Name', 'Email', 'Role', 'Team', 'Membership', 'Status']}
-                rows={data.users.map((user) => {
+                rows={tenantUsers.map((user) => {
                   const membership = membershipForUser(data, user.id, user.tenantId);
                   return [
                     user.name,
@@ -1324,16 +1515,16 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                 <MutationButton
                   action="mailboxes.connect-url"
                   actionKey="admin-mailbox-connect-outlook"
-                  args={{ ownerUserId: 'usr_admin', provider: 'outlook', tenantId: tenant.id }}
+                  args={{ ownerUserId: tenantAdminUser?.id, provider: 'outlook', tenantId: tenant.id }}
                   busyText="Creating..."
-                  disabled={isMutating || source !== 'api'}
+                  disabled={isMutating || source !== 'api' || !tenantAdminUser}
                   feedback={mutationFeedback}
                 >
                   Connect Outlook
                 </MutationButton>
               </div>
               <InlineError message={mutationFeedback.errorFor('admin-mailbox-connect-gmail', 'admin-mailbox-connect-outlook')} />
-              {data.mailboxes.map((mailbox) => {
+              {tenantMailboxes.map((mailbox) => {
                 const latestSession = latestSessionForMailbox(mailbox.id);
                 const readySession = latestSession?.status === 'ready' ? latestSession : undefined;
                 const latestWatch = latestWatchForMailbox(mailbox.id);
@@ -1410,6 +1601,12 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   />
                 );
               })}
+              {tenantMailboxes.length === 0 && (
+                <div className="empty-state">
+                  <strong>No mailbox sources for this tenant.</strong>
+                  <small>Use the admin context tenant selector to switch back, or create a provider connection for {tenant.domain}.</small>
+                </div>
+              )}
               <AdminTable
                 columns={['Session', 'Provider', 'Status', 'OAuth', 'Credential']}
                 rows={latestMailboxSessions.map((session) => [session.id, session.provider, session.status, session.oauthStateStatus ?? 'legacy', session.credentialStatus ?? 'pending'])}
@@ -1456,7 +1653,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   Run enabled flows
                 </button>
               </div>
-              {data.emailFlows.map((flow) => (
+              {tenantEmailFlows.map((flow) => (
                 <FlowCard
                   key={flow.id}
                   flow={flow}
@@ -1475,7 +1672,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                       <button className="inline-action" disabled={isMutating || source !== 'api' || flow.status !== 'enabled'} type="button" onClick={() => mutate('email-flows.run', { flowId: flow.id })}>
                         Run
                       </button>
-                      <button className="inline-action" disabled={isMutating || source !== 'api'} type="button" onClick={() => mutate('email-flows.route', { flowId: flow.id, routeTo: 'founder', ownerUserId: 'usr_admin', note: 'Founder review route' })}>
+                      <button className="inline-action" disabled={isMutating || source !== 'api' || !tenantAdminUser} type="button" onClick={() => tenantAdminUser && mutate('email-flows.route', { flowId: flow.id, routeTo: 'founder', ownerUserId: tenantAdminUser.id, note: 'Founder review route' })}>
                         Founder
                       </button>
                       <button className="inline-action" disabled={isMutating || source !== 'api' || !salesDemoUser} type="button" onClick={() => salesDemoUser && mutate('email-flows.route', { flowId: flow.id, routeTo: 'crm', ownerUserId: salesDemoUser.id, note: 'CRM follow-up route' })}>
@@ -1485,6 +1682,12 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                   }
                 />
               ))}
+              {tenantEmailFlows.length === 0 && (
+                <div className="empty-state">
+                  <strong>No detector flows for this tenant.</strong>
+                  <small>Run the CLI bootstrap or create routing flows before operating {tenant.domain}.</small>
+                </div>
+              )}
               <AdminTable
                 columns={['Rule', 'Flow', 'Route', 'Owner', 'Status']}
                 rows={routingRules.length
@@ -1623,7 +1826,322 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
           </section>
         )}
 
-        {activeTab === 'platform' && (
+        {activeTab === 'platform' && platformSubRoute === 'signals' && (
+          <section className="admin-two-column is-visible" data-reveal>
+            <article className="ops-panel wide-panel">
+              <PanelHead icon={Radar} title="Signals operator" action={`${visibleOperatorSignals.length}/${tenantSignals.length} signals`} />
+              <div className="filter-row">
+                <label>
+                  <span>Status</span>
+                  <select value={signalStatusFilter} onChange={(event) => setSignalStatusFilter(event.target.value)}>
+                    <option value="all">All statuses</option>
+                    <option value="open">Open</option>
+                    <option value="routed">Routed</option>
+                    <option value="dismissed">Dismissed</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Owner</span>
+                  <select value={signalOwnerFilter} onChange={(event) => setSignalOwnerFilter(event.target.value)}>
+                    <option value="all">All owners</option>
+                    {signalOwnerOptions.map((user) => (
+                      <option key={user.id} value={user.id}>{user.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Flow</span>
+                  <select value={signalFlowFilter} onChange={(event) => setSignalFlowFilter(event.target.value)}>
+                    <option value="all">All flows</option>
+                    <option value="none">No flow</option>
+                    {tenantEmailFlows.map((flow) => (
+                      <option key={flow.id} value={flow.id}>{flow.name}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="operator-table" role="table" aria-label="Signals operator table">
+                <div className="operator-row operator-row-head" role="row">
+                  <span role="columnheader">Signal</span>
+                  <span role="columnheader">Account</span>
+                  <span role="columnheader">Status</span>
+                  <span role="columnheader">Owner</span>
+                  <span role="columnheader">Route / flow</span>
+                  <span role="columnheader">Actions</span>
+                </div>
+                {visibleOperatorSignals.map((signal) => {
+                  const signalFlow = tenantEmailFlows.find((flow) => flow.id === signal.flowId);
+                  const assignTarget = signalOwnerOptions.find((user) => user.id !== signal.ownerUserId) ?? signalOwnerOptions[0];
+                  const signalAssignKey = `admin-signal-assign-${signal.id}`;
+                  const signalStatusKey = `admin-signal-status-${signal.id}`;
+                  const signalFeedbackKey = `admin-signal-feedback-${signal.id}`;
+                  const signalHandoffKey = `admin-signal-handoff-${signal.id}`;
+                  const nextSignalStatus = signal.status === 'routed' ? 'open' : 'routed';
+                  return (
+                    <div className="operator-row" role="row" key={signal.id}>
+                      <span role="cell">
+                        <strong>{signal.id}</strong>
+                        <small>{titleize(signal.type)} · {titleize(signal.severity)} · {formatPercent(signal.confidence)}</small>
+                      </span>
+                      <span role="cell">{signal.account}</span>
+                      <span role="cell"><span className={`status-pill ${signal.status}`}>{titleize(signal.status)}</span></span>
+                      <span role="cell">{ownerName(data.users, signal.ownerUserId)}</span>
+                      <span role="cell">
+                        <strong>{titleize(signal.routeTo ?? signalFlow?.routeTo ?? 'unrouted')}</strong>
+                        <small>{signalFlow?.name ?? signal.flowId ?? 'No flow'}</small>
+                      </span>
+                      <span role="cell">
+                        <div className="button-row compact-actions">
+                          <MutationButton
+                            action="signals.assign"
+                            actionKey={signalAssignKey}
+                            args={{ signalId: signal.id, userId: assignTarget?.id }}
+                            busyText="Assigning..."
+                            disabled={!canUseAdminMutations || !assignTarget}
+                            feedback={mutationFeedback}
+                          >
+                            Assign
+                          </MutationButton>
+                          <MutationButton
+                            action="signals.status"
+                            actionKey={signalStatusKey}
+                            args={{ signalId: signal.id, status: nextSignalStatus }}
+                            busyText="Updating..."
+                            disabled={!canUseAdminMutations}
+                            feedback={mutationFeedback}
+                          >
+                            {nextSignalStatus === 'open' ? 'Reopen' : 'Mark routed'}
+                          </MutationButton>
+                          <MutationButton
+                            action="signals.feedback"
+                            actionKey={signalFeedbackKey}
+                            args={{ signalId: signal.id, label: 'useful', note: 'Admin operator feedback' }}
+                            busyText="Saving..."
+                            disabled={!canUseAdminMutations}
+                            feedback={mutationFeedback}
+                          >
+                            Useful
+                          </MutationButton>
+                          <MutationButton
+                            action="signals.handoff"
+                            actionKey={signalHandoffKey}
+                            args={{ signalId: signal.id, target: 'crm', note: 'Admin operator CRM handoff' }}
+                            busyText="Queueing..."
+                            disabled={!canUseAdminMutations}
+                            feedback={mutationFeedback}
+                          >
+                            Handoff
+                          </MutationButton>
+                        </div>
+                        <InlineError message={mutationFeedback.errorFor(signalAssignKey, signalStatusKey, signalFeedbackKey, signalHandoffKey)} />
+                      </span>
+                    </div>
+                  );
+                })}
+                {visibleOperatorSignals.length === 0 && (
+                  <div className="operator-row" role="row">
+                    <span role="cell">
+                      <strong>No signals match the current filters.</strong>
+                      <small>Adjust status, owner, or flow for {tenant.domain}.</small>
+                    </span>
+                  </div>
+                )}
+              </div>
+              <CommandStrip
+                commands={[
+                  'npm run admin -- signals --json',
+                  `npm run admin -- signals assign ${tenantSignals[0]?.id ?? '<signalId>'} ${signalOwnerOptions[0]?.id ?? '<userId>'}`,
+                  `npm run admin -- signals status ${tenantSignals[0]?.id ?? '<signalId>'} routed`,
+                  `npm run admin -- signals feedback ${tenantSignals[0]?.id ?? '<signalId>'} useful Admin_operator_feedback`,
+                  `npm run admin -- signals handoff ${tenantSignals[0]?.id ?? '<signalId>'} crm Admin_operator_CRM_handoff`,
+                ]}
+              />
+            </article>
+            <article className="ops-panel">
+              <PanelHead icon={Route} title="Signal handoffs" action={`${tenantSignalHandoffs.length} handoffs`} />
+              <AdminTable
+                columns={['Signal', 'Target', 'Status', 'Owner', 'Provider']}
+                rows={tenantSignalHandoffs.length
+                  ? tenantSignalHandoffs.map((handoff) => [
+                      handoff.signalId,
+                      titleize(handoff.target),
+                      titleize(handoff.status),
+                      ownerName(data.users, handoff.ownerUserId ?? ''),
+                      handoff.providerRef ?? handoff.provider,
+                    ])
+                  : [['No handoffs', '-', '-', '-', 'Queue CRM or task handoffs from the signal table']]}
+              />
+            </article>
+          </section>
+        )}
+
+        {activeTab === 'platform' && platformSubRoute === 'accounts' && (
+          <section className="admin-two-column is-visible" data-reveal>
+            <article className="ops-panel">
+              <PanelHead icon={Users} title="Accounts operator" action={`${tenantAccountProfiles.length} profiles`} />
+              <div className="account-list operator-account-list">
+                {tenantAccountProfiles.map((account) => {
+                  const openActions = tenantAccountActions.filter((action) => action.account === account.name && action.status === 'open').length;
+                  return (
+                    <button
+                      className="account-health-card"
+                      data-selected={selectedOperatorAccount?.id === account.id}
+                      key={account.id}
+                      type="button"
+                      onClick={() => setSelectedOperatorAccountId(account.id)}
+                    >
+                      <div>
+                        <span>{account.stage}</span>
+                        <strong>{account.name}</strong>
+                        <small>{ownerName(data.users, account.ownerUserId)} · {openActions} open action{openActions === 1 ? '' : 's'}</small>
+                      </div>
+                      <div className="account-health-score">
+                        <strong>{account.healthScore}</strong>
+                        <small>{titleize(account.healthTrend)}</small>
+                      </div>
+                    </button>
+                  );
+                })}
+                {tenantAccountProfiles.length === 0 && (
+                  <div className="empty-state">
+                    <strong>No account profiles for this tenant.</strong>
+                    <small>Run account enrichment or switch the admin context tenant.</small>
+                  </div>
+                )}
+              </div>
+              <CommandStrip
+                commands={[
+                  'npm run admin -- accounts --json',
+                  `npm run admin -- accounts timeline ${selectedOperatorAccount?.id ?? '<accountId>'}`,
+                  `npm run admin -- accounts review ${selectedOperatorAccount?.id ?? '<accountId>'} Admin_operator_review`,
+                  `npm run admin -- accounts action ${selectedAccountActions[0]?.id ?? '<actionId>'} done`,
+                ]}
+              />
+            </article>
+            <article className="ops-panel wide-panel">
+              <PanelHead icon={Gauge} title="Account review workspace" action={selectedOperatorAccount?.name ?? tenant.domain} />
+              {selectedOperatorAccount ? (
+                <>
+                  <div className="account-health-summary">
+                    <span>{selectedOperatorAccount.domain}</span>
+                    <strong>{selectedOperatorAccount.name}</strong>
+                    <small>
+                      {selectedOperatorAccount.stage} · {ownerName(data.users, selectedOperatorAccount.ownerUserId)} · Health {selectedOperatorAccount.healthScore} {titleize(selectedOperatorAccount.healthTrend)}
+                    </small>
+                  </div>
+                  <div className="filter-row account-review-input-row">
+                    <label>
+                      <span>Review note</span>
+                      <input value={accountReviewNote} onChange={(event) => setAccountReviewNote(event.target.value)} placeholder="Operator review note" />
+                    </label>
+                  </div>
+                  <div className="button-row compact-actions">
+                    <MutationButton
+                      action="accounts.review"
+                      actionKey={`admin-account-review-${selectedOperatorAccount.id}`}
+                      args={{ account: selectedOperatorAccount.name, note: accountReviewNote || 'Admin operator review' }}
+                      busyText="Recording..."
+                      disabled={!canUseAdminMutations}
+                      feedback={mutationFeedback}
+                    >
+                      Add review note
+                    </MutationButton>
+                  </div>
+                  <InlineError message={mutationFeedback.errorFor(`admin-account-review-${selectedOperatorAccount.id}`)} />
+                  <div className="operator-section-grid">
+                    <section>
+                      <h3>Recommendations</h3>
+                      <div className="account-detail-stack">
+                        {selectedAccountRecommendations.map((recommendation) => (
+                          <AccountRecommendationCard key={recommendation.id} owner={ownerName(data.users, recommendation.ownerUserId)} recommendation={recommendation} />
+                        ))}
+                        {selectedAccountRecommendations.length === 0 && (
+                          <div className="empty-state">
+                            <strong>No recommendations.</strong>
+                            <small>Recommendations appear after source-backed relationship analysis.</small>
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                    <section>
+                      <h3>Actions</h3>
+                      <div className="account-detail-stack">
+                        {selectedAccountActions.map((action) => {
+                          const actionDoneKey = `admin-account-action-done-${action.id}`;
+                          return (
+                            <div className="account-action-card" key={action.id}>
+                              <div>
+                                <span>{titleize(action.priority)} priority</span>
+                                <strong>{action.title}</strong>
+                                <small>{action.description}</small>
+                                <small>{ownerName(data.users, action.ownerUserId)} · Due {new Date(action.dueAt).toLocaleDateString()}</small>
+                              </div>
+                              <div className="card-actions">
+                                <span className={`status-pill ${action.status}`}>{titleize(action.status)}</span>
+                                <MutationButton
+                                  action="accounts.action-status"
+                                  actionKey={actionDoneKey}
+                                  args={{ actionId: action.id, status: 'done' }}
+                                  busyText="Marking..."
+                                  disabled={!canUseAdminMutations || action.status === 'done'}
+                                  feedback={mutationFeedback}
+                                >
+                                  Mark done
+                                </MutationButton>
+                                <InlineError message={mutationFeedback.errorFor(actionDoneKey)} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {selectedAccountActions.length === 0 && (
+                          <div className="empty-state">
+                            <strong>No account actions.</strong>
+                            <small>Open actions appear here when detectors or reviews create next steps.</small>
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                    <section>
+                      <h3>Timeline</h3>
+                      <div className="account-detail-stack">
+                        {selectedAccountEvents.map((event) => (
+                          <AccountEventRow event={event} key={event.id} />
+                        ))}
+                        {selectedAccountEvents.length === 0 && (
+                          <div className="empty-state">
+                            <strong>No timeline events.</strong>
+                            <small>Account reviews, signal handoffs, and next actions add events.</small>
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                    <section>
+                      <h3>Reviews</h3>
+                      <div className="account-detail-stack">
+                        {selectedAccountReviews.map((review) => (
+                          <AccountReviewCard key={review.id} review={review} reviewer={ownerName(data.users, review.createdByUserId)} />
+                        ))}
+                        {selectedAccountReviews.length === 0 && (
+                          <div className="empty-state">
+                            <strong>No review snapshots.</strong>
+                            <small>Add a review note to create the first operator snapshot.</small>
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                  </div>
+                </>
+              ) : (
+                <div className="empty-state">
+                  <strong>No account selected.</strong>
+                  <small>Choose an account profile to review recommendations, actions, and timeline events.</small>
+                </div>
+              )}
+            </article>
+          </section>
+        )}
+
+        {activeTab === 'platform' && platformSubRoute === 'governance' && (
           <section className="admin-two-column is-visible" data-reveal>
             <article className="ops-panel">
               <PanelHead icon={ShieldCheck} title="Retention and redaction" action={`${governancePolicy?.sourceRetentionDays ?? '-'} day source retention`} />
@@ -1644,7 +2162,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                 </button>
               </div>
               <div className="governance-stack">
-                {(data.redactionRules ?? []).map((rule) => (
+                {tenantRedactionRules.map((rule) => (
                   <RedactionRuleCard
                     canMutate={source === 'api' && !isMutating}
                     key={rule.id}
@@ -1898,9 +2416,9 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                 </small>
                 {entitlement && (
                   <div className="entitlement-grid">
-                    <span>{data.users.length}/{entitlement.seatLimit} seats</span>
-                    <span>{data.mailboxes.length}/{entitlement.mailboxLimit} sources</span>
-                    <span>{data.signals.length}/{entitlement.signalLimit.toLocaleString()} seeded signals</span>
+                    <span>{tenantUsers.length}/{entitlement.seatLimit} seats</span>
+                    <span>{tenantMailboxes.length}/{entitlement.mailboxLimit} sources</span>
+                    <span>{tenantSignals.length}/{entitlement.signalLimit.toLocaleString()} seeded signals</span>
                   </div>
                 )}
                 {entitlement?.overrideId && (
@@ -2164,7 +2682,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
           </section>
         )}
 
-        {(activeTab === 'platform' || activeTab === 'launch') && (
+        {(activeTab === 'launch' || (activeTab === 'platform' && platformSubRoute === 'governance')) && (
           <section className="admin-two-column is-visible" data-reveal>
             {activeTab === 'launch' && (
             <article className="ops-panel">
@@ -2587,8 +3105,8 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                 <CheckItem ok={queuedSignalHandoffJobs.length === 0} label={queuedSignalHandoffJobs.length === 0 ? 'No CRM/task handoff jobs are waiting.' : `${queuedSignalHandoffJobs.length} CRM/task handoff job needs local-agent delivery.`} />
                 <CheckItem ok={providerValidationJobs.length > 0} label="Provider validation schedules are attached to the shared worker queue and scheduler daemon." />
                 <CheckItem ok={(summary.activeEntitlements ?? 0) > 0} label="Billing entitlement is available to gate product access." />
-                <CheckItem ok={(data.billingSessions.length ?? 0) > 0} label="Local checkout or portal session is available for billing handoff." />
-                <CheckItem ok={(data.notificationPreferences?.length ?? 0) >= data.users.filter((user) => user.status === 'active').length} label="Notification digest preferences exist for every active user." />
+                <CheckItem ok={tenantBillingSessions.length > 0} label="Local checkout or portal session is available for billing handoff." />
+                <CheckItem ok={tenantNotificationPreferences.length >= tenantActiveUsers.length} label="Notification digest preferences exist for every active user." />
               </div>
               <AdminTable
                 columns={['Queue', 'Jobs', 'Failed']}
@@ -2692,7 +3210,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
               </div>
               <AdminTable
                 columns={['User', 'Cadence', 'Email', 'Muted']}
-                rows={(data.notificationPreferences ?? []).map((preference) => [
+                rows={tenantNotificationPreferences.map((preference) => [
                   ownerName(data.users, preference.userId),
                   titleize(preference.digestCadence),
                   titleize(preference.emailDeliveryStatus ?? 'subscribed'),

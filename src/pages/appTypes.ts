@@ -31,7 +31,7 @@ import type {
 export type Accent = 'lime' | 'coral' | 'cyan' | 'gold';
 export type AppMode = 'marketing' | 'register' | 'workspace' | 'admin';
 export type AdminTab = 'dashboard' | 'organization' | 'email' | 'billing' | 'integrations' | 'platform' | 'launch' | 'audit' | 'cli';
-export type AdminSubRoute = 'tenants' | 'users' | 'governance';
+export type AdminSubRoute = 'tenants' | 'users' | 'governance' | 'signals' | 'accounts';
 export type MutationOutcome = { ok: true } | { ok: false; error: string };
 export type RegistrationFormErrors = Partial<Record<'workspaceName' | 'workspaceDomain' | 'adminEmail' | 'adminName' | 'inviteTenantId' | 'inviteEmail' | 'claimCode' | 'claimEmail' | 'form', string>>;
 export type DataSource = 'api' | 'seed';

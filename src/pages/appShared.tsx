@@ -279,28 +279,37 @@ export function MetricCard({ icon: Icon, label, value, detail, accent }: { icon:
 
 export function StateBanner({
   actorUserId,
+  contextTenantId,
+  contextTenantLabel = 'Admin context tenant',
   data,
   error,
   isLoading,
   isMutating,
   lastMutation,
   onActorChange,
+  onContextTenantChange,
   onRefresh,
   source,
   summary,
 }: {
   actorUserId: string;
+  contextTenantId?: string;
+  contextTenantLabel?: string;
   data: SignalAppData;
   error: string | null;
   isLoading: boolean;
   isMutating: boolean;
   lastMutation: string | null;
   onActorChange: (userId: string) => Promise<void>;
+  onContextTenantChange?: (tenantId: string) => void;
   onRefresh: () => Promise<void>;
   source: DataSource;
   summary: StateSummary;
 }) {
   const actor = data.users.find((user) => user.id === actorUserId) ?? data.users[0];
+  const contextTenant = contextTenantId && data.tenants.some((tenant) => tenant.id === contextTenantId)
+    ? contextTenantId
+    : actor?.tenantId ?? data.tenants[0]?.id ?? '';
 
   return (
     <section className={`state-banner ${source}`} aria-live="polite">
@@ -319,6 +328,24 @@ export function StateBanner({
           ))}
         </select>
       </label>
+      {onContextTenantChange && (
+        <label className="actor-select context-tenant-select">
+          <span>{contextTenantLabel}</span>
+          <select
+            id="signal-admin-context-tenant-select"
+            name="signal-admin-context-tenant"
+            disabled={isMutating}
+            value={contextTenant}
+            onChange={(event) => onContextTenantChange(event.target.value)}
+          >
+            {data.tenants.map((tenant) => (
+              <option key={tenant.id} value={tenant.id}>
+                {tenant.name} ({tenant.domain})
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <button className="inline-action" disabled={isLoading} type="button" onClick={() => void onRefresh()}>
         <RefreshCw size={16} aria-hidden="true" />
         {isLoading ? 'Refreshing' : 'Refresh state'}
