@@ -29,6 +29,8 @@ function abortSignal(timeoutMs) {
   return undefined;
 }
 
+export const providerFetchRetryDelayCapMs = 5_000;
+
 function retryAfterMs(response) {
   const header = response.headers?.get?.('retry-after');
   if (!header) {
@@ -43,6 +45,14 @@ function retryAfterMs(response) {
     return Math.max(0, dateMs - Date.now());
   }
   return null;
+}
+
+function synchronousRetryDelayMs(response, attempt) {
+  const headerDelay = retryAfterMs(response);
+  if (headerDelay !== null) {
+    return Math.min(headerDelay, providerFetchRetryDelayCapMs);
+  }
+  return backoffDelayMs(attempt);
 }
 
 function backoffDelayMs(attempt, { baseMs = 500, capMs = 30_000 } = {}) {
@@ -94,7 +104,7 @@ export async function providerFetch(url, init = {}, {
         signal: init.signal ?? abortSignal(timeoutMs),
       });
       if (!response.ok && shouldRetryResponse(method, response.status, attempt, maxRetries)) {
-        const delayMs = retryAfterMs(response) ?? backoffDelayMs(attempt);
+        const delayMs = synchronousRetryDelayMs(response, attempt);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         attempt += 1;
         continue;

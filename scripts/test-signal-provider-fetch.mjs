@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   providerFetch,
+  providerFetchRetryDelayCapMs,
   providerRequestMaxRetries,
   providerRequestTimeoutMs,
 } from './signal-provider-fetch.mjs';
@@ -29,6 +30,24 @@ test('providerFetch retries retryable HTTP statuses', async () => {
   });
   assert.equal(response.status, 429);
   assert.equal(calls.length, 3);
+});
+
+test('providerFetch caps synchronous Retry-After delays during retries', async () => {
+  const startedAt = Date.now();
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return new Response('slow down', { status: 429, headers: { 'Retry-After': '120' } });
+  };
+
+  await providerFetch('https://provider.example/capped-retry', { method: 'POST' }, {
+    env: { SIGNAL_PROVIDER_REQUEST_MAX_RETRIES: '1' },
+    fetchImpl,
+    timeoutMs: 1000,
+  });
+  assert.equal(calls, 2);
+  assert(Date.now() - startedAt < 15_000, 'synchronous retries should not sleep for provider Retry-After headers');
+  assert(providerFetchRetryDelayCapMs <= 5_000);
 });
 
 test('providerFetch applies AbortSignal.timeout when caller does not pass a signal', async () => {
