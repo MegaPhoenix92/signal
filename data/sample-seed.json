@@ -93,7 +93,6 @@
       "role": "member",
       "team": "success",
       "status": "pending",
-      "claimCode": "local-rowan-success",
       "invitedByUserId": "usr_admin",
       "createdAt": "2026-06-03T00:00:00.000Z",
       "expiresAt": "2026-06-10T00:00:00.000Z"
@@ -105,7 +104,8 @@
       "role": "member",
       "team": "product",
       "status": "accepted",
-      "claimCode": "local-priya-product",
+      "claimCode": "claimed-ae86595c37b96c046855c25b",
+      "claimCodeDigest": "ae86595c37b96c046855c25b",
       "invitedByUserId": "usr_admin",
       "createdAt": "2026-05-30T15:30:00.000Z",
       "expiresAt": "2026-06-06T15:30:00.000Z",

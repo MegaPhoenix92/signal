@@ -1540,7 +1540,7 @@ function RegistrationOnboarding({ liveState }: { liveState: LiveState }) {
 
   useEffect(() => {
     if (selectedInvite) {
-      setClaimCode(selectedInvite.claimCode);
+      setClaimCode(selectedInvite.claimCode ?? '');
       setClaimEmail(selectedInvite.email);
       setClaimErrors({});
     } else if (pendingInvites.length === 0) {
@@ -1912,7 +1912,7 @@ function RegistrationOnboarding({ liveState }: { liveState: LiveState }) {
               <div className="invite-acceptance-summary">
                 <span>{selectedInviteTenant?.name ?? selectedInvite.tenantId}</span>
                 <strong>{selectedInvite.email}</strong>
-                <small>{selectedInvite.role} · {selectedInvite.team ?? 'general'} · Code {selectedInvite.claimCode}</small>
+                <small>{selectedInvite.role} · {selectedInvite.team ?? 'general'} · {inviteClaimCodeSummary(selectedInvite)}</small>
               </div>
             )}
             <CommandStrip commands={['npm run admin -- users claim <claimCode> teammate@acme.example New_Member success', 'curl -X POST http://127.0.0.1:8787/api/invites/claim -H "Content-Type: application/json" -d \'{\"claimCode\":\"<claimCode>\",\"email\":\"teammate@acme.example\"}\'', 'npm run admin -- users accept <inviteId> New_Member success']} />
@@ -5207,6 +5207,13 @@ function NotificationEventCard({
   );
 }
 
+function inviteClaimCodeSummary(invite: UserInvite) {
+  if (invite.status === 'pending') {
+    return invite.claimCode ? `Code ${invite.claimCode}` : 'Claim code delivered out of band';
+  }
+  return `Claim digest ${invite.claimCodeDigest ?? invite.claimCode ?? '—'}`;
+}
+
 function InviteCard({
   canMutate,
   invite,
@@ -5223,7 +5230,7 @@ function InviteCard({
       <div>
         <span>{invite.role} · {invite.team ?? 'general'}</span>
         <strong>{invite.email}</strong>
-        <small>{invite.status === 'pending' ? `Code ${invite.claimCode}` : `Claim digest ${invite.claimCodeDigest ?? invite.claimCode}`} · Expires {new Date(invite.expiresAt).toLocaleDateString()}</small>
+        <small>{inviteClaimCodeSummary(invite)} · Expires {new Date(invite.expiresAt).toLocaleDateString()}</small>
         {invite.acceptedUserId && <small>Accepted as {invite.acceptedUserId}</small>}
       </div>
       <div className="card-actions">

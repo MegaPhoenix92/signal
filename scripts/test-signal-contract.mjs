@@ -1259,6 +1259,11 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
       SIGNAL_ADMIN_ACTOR: 'usr_admin',
     });
     assert.equal(claimableInvite.action, 'users.invite');
+    assert.ok(claimableInvite.details.claimCode, 'invite mutation should return claim code once in details');
+
+    const stateBeforeClaim = await requestApi('/api/state', { token: adminToken });
+    assert.equal(stateBeforeClaim.status, 200);
+    assert(!JSON.stringify(stateBeforeClaim.payload.state).includes(claimableInvite.details.claimCode), 'pending invite claim code should not be exposed in API state');
 
     const claimWithoutAuth = await requestApi('/api/invites/claim', {
       body: {
