@@ -1106,6 +1106,7 @@ test('API rate limiter returns 429 with Retry-After and health is exempt', async
   const second = await fetch(`${api.apiBaseUrl}/api/registration`, {
     body,
     headers: {
+      'Authorization': 'Bearer rotated-session-token-shard',
       'Content-Type': 'application/json',
       'X-Signal-Actor': 'usr_rotated_actor',
     },

@@ -158,7 +158,7 @@ function rateLimitKind(pathname) {
 }
 
 function rateLimitIdentity(req, kind) {
-  const token = requestSessionToken(req, {});
+  const token = kind === 'authenticated' ? requestSessionToken(req, {}) : '';
   const actor = kind === 'authenticated' ? req.headers['x-signal-actor']?.toString() : '';
   return [
     kind,
