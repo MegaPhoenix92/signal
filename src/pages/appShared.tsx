@@ -1,10 +1,12 @@
-import { useEffect, useState, type CSSProperties, type DependencyList, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type DependencyList, type ReactNode } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  Menu,
   Radar,
   RefreshCw,
   TerminalSquare,
+  X,
   type LucideIcon,
 } from 'lucide-react';
 import {
@@ -152,7 +154,36 @@ export function membershipForUser(data: SignalAppData, userId?: string, tenantId
     (!tenantId || membership.tenantId === tenantId));
 }
 
+const productNavLinks: Array<{ href: string; label: string; mode?: AppMode }> = [
+  { href: '#register', label: 'Register', mode: 'register' },
+  { href: '#workspace', label: 'Workspace', mode: 'workspace' },
+  { href: '#admin', label: 'Admin', mode: 'admin' },
+  { href: '#top', label: 'Public', mode: 'marketing' },
+];
+
 export function ProductHeader({ active }: { active: AppMode }) {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!mobileNavOpen) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMobileNavOpen(false);
+        requestAnimationFrame(() => mobileMenuButtonRef.current?.focus());
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [mobileNavOpen]);
+
+  function closeMobileNav() {
+    setMobileNavOpen(false);
+  }
+
   return (
     <header className="product-header">
       <a className="brand" href="#top" aria-label="Signal public site">
@@ -162,16 +193,29 @@ export function ProductHeader({ active }: { active: AppMode }) {
         <span>Signal</span>
       </a>
       <nav className="product-nav" aria-label="Signal product areas">
-        <a className={active === 'register' ? 'is-active' : ''} href="#register">
-          Register
-        </a>
-        <a className={active === 'workspace' ? 'is-active' : ''} href="#workspace">
-          Workspace
-        </a>
-        <a className={active === 'admin' ? 'is-active' : ''} href="#admin">
-          Admin
-        </a>
-        <a href="#top">Public</a>
+        {productNavLinks.map((link) => (
+          <a key={link.href} className={active === link.mode ? 'is-active' : ''} href={link.href}>
+            {link.label}
+          </a>
+        ))}
+      </nav>
+      <button
+        ref={mobileMenuButtonRef}
+        aria-controls="product-mobile-nav-menu"
+        aria-expanded={mobileNavOpen}
+        aria-label={mobileNavOpen ? 'Close navigation' : 'Open navigation'}
+        className="mobile-nav-toggle"
+        type="button"
+        onClick={() => setMobileNavOpen((open) => !open)}
+      >
+        {mobileNavOpen ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
+      </button>
+      <nav id="product-mobile-nav-menu" className="mobile-nav-panel" aria-label="Mobile product navigation" hidden={!mobileNavOpen}>
+        {productNavLinks.map((link) => (
+          <a key={link.href} className={active === link.mode ? 'is-active' : ''} href={link.href} onClick={closeMobileNav}>
+            {link.label}
+          </a>
+        ))}
       </nav>
     </header>
   );

@@ -401,6 +401,89 @@ function assertTextIncludes(text, expected, message) {
   assert(String(text).toLowerCase().includes(String(expected).toLowerCase()), message ?? `Expected browser text to include ${expected}`);
 }
 
+async function assertMobileNav(client, { activationHash, activationLabel, expectedLinks, label, panelSelector, rootSelector }) {
+  const nav = await evaluate(client, `(async () => {
+    const root = document.querySelector(${JSON.stringify(rootSelector)});
+    if (!root) {
+      throw new Error(${JSON.stringify(`${label} root missing`)});
+    }
+    const button = root.querySelector('.mobile-nav-toggle');
+    const panel = document.querySelector(${JSON.stringify(panelSelector)});
+    if (!button) {
+      throw new Error(${JSON.stringify(`${label} mobile navigation toggle missing`)});
+    }
+    if (!panel) {
+      throw new Error(${JSON.stringify(`${label} mobile navigation panel missing`)});
+    }
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const initial = {
+      ariaExpanded: button.getAttribute('aria-expanded'),
+      hidden: panel.hidden,
+    };
+    button.click();
+    await frame();
+    const open = {
+      ariaExpanded: button.getAttribute('aria-expanded'),
+      buttonDisplay: getComputedStyle(button).display,
+      hidden: panel.hidden,
+      panelDisplay: getComputedStyle(panel).display,
+      text: panel.innerText,
+    };
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await frame();
+    return {
+      closedExpanded: button.getAttribute('aria-expanded'),
+      closedHidden: panel.hidden,
+      focusReturned: document.activeElement === button,
+      initial,
+      open,
+      scrollWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+      viewportWidth: document.documentElement.clientWidth,
+    };
+  })()`);
+  assert.equal(nav.initial.ariaExpanded, 'false', `${label} mobile navigation should start collapsed`);
+  assert.equal(nav.initial.hidden, true, `${label} mobile navigation panel should start hidden`);
+  assert.notEqual(nav.open.buttonDisplay, 'none', `${label} mobile navigation toggle should be visible at narrow widths`);
+  assert.equal(nav.open.panelDisplay, 'grid', `${label} mobile navigation panel should use the shared grid panel layout`);
+  assert.equal(nav.open.ariaExpanded, 'true', `${label} mobile navigation should report expanded after toggle`);
+  assert.equal(nav.open.hidden, false, `${label} mobile navigation panel should open from hamburger`);
+  for (const expectedLink of expectedLinks) {
+    assertTextIncludes(nav.open.text, expectedLink, `${label} mobile navigation should include ${expectedLink}`);
+  }
+  assert.equal(nav.closedExpanded, 'false', `${label} Escape should collapse the mobile navigation`);
+  assert.equal(nav.closedHidden, true, `${label} Escape should hide the mobile navigation panel`);
+  assert.equal(nav.focusReturned, true, `${label} Escape should return focus to the mobile navigation toggle`);
+  assert.ok(nav.scrollWidth <= nav.viewportWidth, `${label} should not horizontally overflow at 390px (${nav.scrollWidth}px > ${nav.viewportWidth}px)`);
+
+  if (!activationLabel || !activationHash) {
+    return;
+  }
+
+  const activation = await evaluate(client, `(async () => {
+    const root = document.querySelector(${JSON.stringify(rootSelector)});
+    const button = root?.querySelector('.mobile-nav-toggle');
+    const panel = document.querySelector(${JSON.stringify(panelSelector)});
+    if (!button || !panel) {
+      throw new Error(${JSON.stringify(`${label} mobile navigation unavailable before activation`)});
+    }
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    button.click();
+    await frame();
+    const link = [...panel.querySelectorAll('a')].find((candidate) => candidate.textContent.trim() === ${JSON.stringify(activationLabel)});
+    if (!link) {
+      throw new Error(${JSON.stringify(`${label} activation link missing`)});
+    }
+    link.click();
+    await frame();
+    return {
+      hash: window.location.hash,
+      text: document.body.innerText,
+    };
+  })()`);
+  assert.equal(activation.hash, activationHash, `${label} ${activationLabel} mobile navigation link should update the hash`);
+  assert.ok(activation.text.length > 0, `${label} mobile navigation activation should leave rendered app content`);
+}
+
 test('Signal browser routes render public, registration, workspace, and admin app areas', async (t) => {
   const chromeExecutable = await resolveChromeExecutable();
   if (!chromeExecutable) {
@@ -443,34 +526,47 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assertTextIncludes(publicRoute.text, 'Gmail + Outlook', 'public route should describe supported inbox sources');
 
   await client.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
-  const mobileNav = await evaluate(client, `(async () => {
-    const button = document.querySelector('.mobile-nav-toggle');
-    if (!button) {
-      throw new Error('Mobile navigation toggle missing');
-    }
-    button.click();
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    const panel = document.querySelector('#mobile-nav-menu');
-    const open = {
-      ariaExpanded: button.getAttribute('aria-expanded'),
-      buttonDisplay: getComputedStyle(button).display,
-      hidden: panel?.hidden,
-      text: panel?.innerText ?? '',
-    };
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    return {
-      open,
-      closedExpanded: button.getAttribute('aria-expanded'),
-      closedHidden: panel?.hidden,
-    };
-  })()`);
-  assert.notEqual(mobileNav.open.buttonDisplay, 'none', 'mobile navigation toggle should be visible at narrow widths');
-  assert.equal(mobileNav.open.ariaExpanded, 'true', 'mobile navigation should report expanded after toggle');
-  assert.equal(mobileNav.open.hidden, false, 'mobile navigation panel should open from hamburger');
-  assertTextIncludes(mobileNav.open.text, 'Admin', 'mobile navigation should include app area links');
-  assert.equal(mobileNav.closedExpanded, 'false', 'Escape should close the mobile navigation');
-  assert.equal(mobileNav.closedHidden, true, 'Escape should hide the mobile navigation panel');
+  await assertMobileNav(client, {
+    expectedLinks: ['Signals', 'Workflow', 'Security', 'Register', 'Workspace', 'Admin'],
+    label: 'public route',
+    panelSelector: '#mobile-nav-menu',
+    rootSelector: '.site-nav',
+  });
+
+  const productMobileRoutes = [
+    {
+      activationHash: '#workspace',
+      activationLabel: 'Workspace',
+      expectedText: 'Create the workspace before the dashboard.',
+      hash: '#register',
+      label: 'registration route',
+    },
+    {
+      activationHash: '#admin',
+      activationLabel: 'Admin',
+      expectedText: 'Revenue signals for Acme Revenue Lab.',
+      hash: '#workspace',
+      label: 'workspace route',
+    },
+    {
+      activationHash: '#register',
+      activationLabel: 'Register',
+      expectedText: 'Manage users, email flows, and payments locally.',
+      hash: '#admin',
+      label: 'admin route',
+    },
+  ];
+  for (const route of productMobileRoutes) {
+    await navigate(client, `${baseUrl}${route.hash}`, route.expectedText);
+    await assertMobileNav(client, {
+      activationHash: route.activationHash,
+      activationLabel: route.activationLabel,
+      expectedLinks: ['Register', 'Workspace', 'Admin', 'Public'],
+      label: route.label,
+      panelSelector: '#product-mobile-nav-menu',
+      rootSelector: '.product-header',
+    });
+  }
   await client.send('Emulation.clearDeviceMetricsOverride');
 
   const registerRoute = await navigate(client, `${baseUrl}#register`, 'Create the workspace before the dashboard.');
