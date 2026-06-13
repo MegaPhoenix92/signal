@@ -1,43 +1,31 @@
-# syntax=docker/dockerfile:1
+FROM node:22-bookworm-slim AS build
 
-FROM node:22-alpine AS deps
 WORKDIR /app
-COPY package*.json ./
+
+COPY package.json package-lock.json ./
 RUN npm ci
 
-FROM deps AS build
-ARG VITE_SIGNAL_API_URL=http://localhost:8787
-ENV VITE_SIGNAL_API_URL=${VITE_SIGNAL_API_URL}
 COPY . .
 RUN npm run build
 
-FROM node:22-alpine AS runtime
+FROM node:22-bookworm-slim AS runtime
+
 WORKDIR /app
-ENV NODE_ENV=production
-COPY --from=deps /app/node_modules ./node_modules
-COPY package*.json ./
-COPY scripts ./scripts
-COPY data/sample-seed.json ./data/sample-seed.json
-RUN mkdir -p /app/data && chown -R node:node /app
-USER node
-EXPOSE 8787 8791
-CMD ["node", "scripts/signal-api.mjs"]
 
-FROM runtime AS api
-CMD ["node", "scripts/signal-api.mjs"]
+ENV NODE_ENV=production \
+    SIGNAL_API_HOST=0.0.0.0 \
+    SIGNAL_API_PORT=8787 \
+    SIGNAL_ADMIN_STATE=/app/data/signal-local.json
 
-FROM runtime AS state-service
-CMD ["node", "scripts/signal-state-service.mjs"]
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
-FROM runtime AS scheduler
-CMD ["node", "scripts/signal-scheduler.mjs"]
-
-FROM node:22-alpine AS frontend
-WORKDIR /app
-ENV NODE_ENV=production
 COPY --from=build /app/dist ./dist
-COPY scripts/signal-frontend-server.mjs ./scripts/signal-frontend-server.mjs
-RUN chown -R node:node /app
-USER node
-EXPOSE 8080
-CMD ["node", "scripts/signal-frontend-server.mjs"]
+COPY --from=build /app/scripts ./scripts
+COPY --from=build /app/data ./data
+
+RUN mkdir -p /app/data
+
+EXPOSE 8787
+
+CMD ["node", "scripts/signal-api.mjs"]

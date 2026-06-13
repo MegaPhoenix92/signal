@@ -134,9 +134,16 @@ async function startVite({ apiPort, webPort }) {
   return { child, output };
 }
 
-async function chromeExecutable() {
+async function resolveChromeExecutable() {
+  if (process.env.SIGNAL_CHROME_BIN) {
+    try {
+      await fs.access(process.env.SIGNAL_CHROME_BIN, fs.constants.X_OK);
+      return process.env.SIGNAL_CHROME_BIN;
+    } catch {
+      throw new Error(`SIGNAL_CHROME_BIN is set but not executable: ${process.env.SIGNAL_CHROME_BIN}`);
+    }
+  }
   const candidates = [
-    process.env.SIGNAL_CHROME_BIN,
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/Applications/Chromium.app/Contents/MacOS/Chromium',
     '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
@@ -144,7 +151,7 @@ async function chromeExecutable() {
     '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
-  ].filter(Boolean);
+  ];
   for (const candidate of candidates) {
     try {
       await fs.access(candidate, fs.constants.X_OK);
@@ -153,11 +160,10 @@ async function chromeExecutable() {
       // Try the next common local browser path.
     }
   }
-  throw new Error('No Chrome-compatible browser executable found. Set SIGNAL_CHROME_BIN to enable browser route tests.');
+  return null;
 }
 
-async function startChrome({ cdpPort, profileDir }) {
-  const executable = await chromeExecutable();
+async function startChrome({ cdpPort, executable, profileDir }) {
   const args = [
     '--headless=new',
     '--disable-background-networking',
@@ -337,6 +343,12 @@ function assertTextIncludes(text, expected, message) {
 }
 
 test('Signal browser routes render public, registration, workspace, and admin app areas', async (t) => {
+  const chromeExecutable = await resolveChromeExecutable();
+  if (!chromeExecutable) {
+    t.skip('No Chrome-compatible browser found. Set SIGNAL_CHROME_BIN to run browser route tests.');
+    return;
+  }
+
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-browser-routes-'));
   const statePath = path.join(tempDir, 'signal-state.json');
   const profileDir = path.join(tempDir, 'chrome-profile');
@@ -359,7 +371,7 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   await bootstrapState({ force: true, statePath });
   api = await startApi({ apiPort, statePath });
   web = await startVite({ apiPort, webPort });
-  chrome = await startChrome({ cdpPort, profileDir });
+  chrome = await startChrome({ cdpPort, executable: chromeExecutable, profileDir });
   client = await openCdpPage({ cdpPort });
 
   const baseUrl = `http://127.0.0.1:${webPort}/`;

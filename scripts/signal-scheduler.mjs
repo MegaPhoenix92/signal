@@ -95,19 +95,7 @@ export function createSchedulerConfig({ argv = process.argv.slice(2), env = proc
   };
 }
 
-function jobIsDue(job, now = Date.now()) {
-  if (job.nextAttemptAt) {
-    const nextAttemptMs = Date.parse(job.nextAttemptAt);
-    if (Number.isFinite(nextAttemptMs) && nextAttemptMs > now) {
-      return false;
-    }
-  }
-  if (!job.nextRunAt) {
-    return true;
-  }
-  const nextRunMs = Date.parse(job.nextRunAt);
-  return !Number.isFinite(nextRunMs) || nextRunMs <= now;
-}
+
 
 function advisoryLockKey(config) {
   const hash = crypto.createHash('sha256')
