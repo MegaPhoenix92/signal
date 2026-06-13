@@ -134,6 +134,65 @@ async function startVite({ apiPort, webPort }) {
   return { child, output };
 }
 
+async function addContextTenantFixture(statePath) {
+  const state = JSON.parse(await fs.readFile(statePath, 'utf8'));
+  state.tenants.push({
+    id: 'tenant_context',
+    name: 'Beta Context Lab',
+    domain: 'beta.example',
+    status: 'active',
+    planId: 'plan_beta',
+    ownerUserId: 'usr_context_admin',
+    billingOwnerUserId: 'usr_context_admin',
+    registrationStatus: 'active',
+    createdAt: '2026-06-13T00:00:00.000Z',
+    createdByUserId: 'usr_admin',
+  });
+  state.users.push({
+    id: 'usr_context_admin',
+    tenantId: 'tenant_context',
+    name: 'Blake Rivers',
+    email: 'blake@beta.example',
+    role: 'admin',
+    status: 'active',
+  });
+  state.memberships.push({
+    id: 'mem_tenant_context_usr_context_admin',
+    tenantId: 'tenant_context',
+    userId: 'usr_context_admin',
+    role: 'admin',
+    team: 'ops',
+    status: 'active',
+    createdAt: '2026-06-13T00:00:00.000Z',
+    createdByUserId: 'usr_admin',
+  });
+  state.entitlements.push({
+    id: 'ent_tenant_context',
+    tenantId: 'tenant_context',
+    subscriptionId: 'sub_tenant_context',
+    source: 'manual_entitlement',
+    status: 'active',
+    seatLimit: 3,
+    mailboxLimit: 2,
+    signalLimit: 250,
+    retentionDays: 21,
+    adminControls: true,
+    updatedAt: '2026-06-13T00:00:00.000Z',
+  });
+  state.governancePolicies.push({
+    id: 'gov_tenant_context',
+    tenantId: 'tenant_context',
+    sourceRetentionDays: 21,
+    rawSnippetRetentionDays: 5,
+    exportWindowDays: 14,
+    deletionReview: 'manual',
+    redactionMode: 'strict',
+    updatedAt: '2026-06-13T00:00:00.000Z',
+    updatedByUserId: 'usr_admin',
+  });
+  await fs.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+}
+
 async function resolveChromeExecutable() {
   if (process.env.SIGNAL_CHROME_BIN) {
     try {
@@ -369,6 +428,7 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   });
 
   await bootstrapState({ force: true, statePath });
+  await addContextTenantFixture(statePath);
   api = await startApi({ apiPort, statePath });
   web = await startVite({ apiPort, webPort });
   chrome = await startChrome({ cdpPort, executable: chromeExecutable, profileDir });
@@ -463,6 +523,18 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assertTextIncludes(adminRoute.text, 'Launch gate go/no-go', 'admin dashboard should render launch gate go/no-go banner');
   assertTextIncludes(adminRoute.text, 'Dashboard calculation audit', 'admin dashboard should render dashboard audit summary');
   assertTextIncludes(adminRoute.text, 'Admin console', 'admin route should render the admin console heading');
+  const adminContextDefault = await evaluate(client, `(() => {
+    const selector = document.querySelector('#signal-admin-context-tenant-select');
+    if (!selector) {
+      throw new Error('Admin context tenant selector missing');
+    }
+    return {
+      optionText: [...selector.options].map((option) => option.textContent).join(' | '),
+      value: selector.value,
+    };
+  })()`);
+  assert.equal(adminContextDefault.value, 'tenant_demo', 'admin context tenant should default to the acting admin tenant');
+  assertTextIncludes(adminContextDefault.optionText, 'Beta Context Lab', 'admin context tenant selector should include all tenants');
 
   const adminOverviewRoute = await navigate(client, `${baseUrl}#admin/overview`, 'Dashboard calculation audit');
   assert.equal(adminOverviewRoute.snapshot.hash, '#admin/dashboard');
@@ -489,6 +561,18 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   const adminUsersRoute = await navigate(client, `${baseUrl}#admin/users`, 'Tenant workspace');
   assert.equal(adminUsersRoute.snapshot.hash, '#admin/organization/users');
   assertTextIncludes(adminUsersRoute.text, 'Tenant operator view', 'legacy admin users deep link should render organization tab content');
+
+  const adminSignalsRoute = await navigate(client, `${baseUrl}#admin/platform/signals`, 'Signals operator');
+  assert.equal(adminSignalsRoute.snapshot.hash, '#admin/platform/signals');
+  assertTextIncludes(adminSignalsRoute.text, 'Assign', 'admin signals operator should expose a signal assign affordance');
+  assertTextIncludes(adminSignalsRoute.text, 'signals assign', 'admin signals operator should expose CLI parity for signal assignment');
+  assertTextIncludes(adminSignalsRoute.text, 'signals feedback', 'admin signals operator should expose CLI parity for signal feedback');
+
+  const adminAccountsRoute = await navigate(client, `${baseUrl}#admin/platform/accounts`, 'Accounts operator');
+  assert.equal(adminAccountsRoute.snapshot.hash, '#admin/platform/accounts');
+  assertTextIncludes(adminAccountsRoute.text, 'Add review note', 'admin accounts operator should expose account review affordance');
+  assertTextIncludes(adminAccountsRoute.text, 'accounts review', 'admin accounts operator should expose CLI parity for account review');
+  assertTextIncludes(adminAccountsRoute.text, 'Mark done', 'admin accounts operator should expose account action completion affordance');
 
   await evaluate(client, `(() => {
     const button = [...document.querySelectorAll('button')].find((candidate) => candidate.innerText.includes('Organization'));
@@ -677,6 +761,34 @@ test('Signal browser routes render public, registration, workspace, and admin ap
   assertTextIncludes(adminBillingText, 'Multi-member org, RBAC, and member data privacy', 'admin billing should explain multi-member privacy handling');
   assertTextIncludes(adminBillingText, 'payments recover', 'admin billing should expose payment recovery command');
   assertTextIncludes(adminBillingText, 'payments override', 'admin billing should expose billing override CLI commands');
+
+  const switchedContext = await evaluate(client, `(async () => {
+    const selector = document.querySelector('#signal-admin-context-tenant-select');
+    if (!selector) {
+      throw new Error('Admin context tenant selector missing before switch');
+    }
+    selector.value = 'tenant_context';
+    selector.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return {
+      hash: window.location.hash,
+      storage: window.sessionStorage.getItem('signal.admin.contextTenantId'),
+      text: document.body.innerText,
+      value: selector.value,
+    };
+  })()`);
+  assert.equal(switchedContext.value, 'tenant_context');
+  assert.equal(switchedContext.storage, 'tenant_context', 'admin context tenant switch should persist in sessionStorage');
+  assert.match(switchedContext.hash, /[?&]tenant=tenant_context/, 'admin context tenant switch should update the hash query');
+  assertTextIncludes(switchedContext.text, 'beta.example', 'admin billing panel should update to the selected context tenant without switching actor');
+
+  const contextEmailRoute = await navigate(client, `${baseUrl}#admin/email?tenant=tenant_context`, 'No mailbox sources for this tenant.');
+  assert.equal(contextEmailRoute.snapshot.hash, '#admin/email?tenant=tenant_context');
+  assertTextIncludes(contextEmailRoute.text, 'No mailbox sources for this tenant.', 'admin email panel should scope mailbox rows to the context tenant');
+
+  const contextGovernanceRoute = await navigate(client, `${baseUrl}#admin/platform/governance?tenant=tenant_context`, '21 day source retention');
+  assert.equal(contextGovernanceRoute.snapshot.hash, '#admin/platform/governance?tenant=tenant_context');
+  assertTextIncludes(contextGovernanceRoute.text, '21 day source retention', 'admin governance panel should scope policy rows to the context tenant');
 
   const runtimeProblems = client.events
     .filter((event) =>

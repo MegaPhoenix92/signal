@@ -1645,6 +1645,10 @@ h3 {
   background: rgba(188, 238, 78, 0.1);
 }
 
+.tenant-row-card.is-context {
+  box-shadow: inset 3px 0 0 var(--lime);
+}
+
 .tenant-row-card strong,
 .tenant-row-card small,
 .job-select strong,
@@ -2520,6 +2524,18 @@ h3 {
   outline-offset: 2px;
 }
 
+.admin-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 18px;
+}
+
+.admin-subnav .inline-action[aria-current='page'] {
+  background: var(--lime);
+  color: var(--ink);
+}
+
 .admin-grid {
   align-items: stretch;
 }
@@ -2580,6 +2596,68 @@ h3 {
   display: grid;
   gap: 18px;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.operator-table {
+  border: 1px solid rgba(255, 253, 247, 0.14);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.operator-row {
+  align-items: start;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(190px, 1.3fr) minmax(130px, 0.8fr) minmax(92px, 0.5fr) minmax(130px, 0.7fr) minmax(160px, 0.9fr) minmax(320px, 1.4fr);
+  min-width: 1080px;
+  padding: 14px;
+}
+
+.operator-row + .operator-row {
+  border-top: 1px solid rgba(255, 253, 247, 0.12);
+}
+
+.operator-row-head {
+  background: rgba(255, 253, 247, 0.06);
+}
+
+.operator-row strong,
+.operator-row small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-row small {
+  color: rgba(255, 253, 247, 0.64);
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.operator-row-head span,
+.operator-section-grid h3 {
+  color: rgba(255, 253, 247, 0.68);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.operator-account-list,
+.account-detail-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.operator-section-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  margin-top: 18px;
+}
+
+.account-review-input-row {
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: 14px;
 }
 
 .admin-shell .route-item,
@@ -2838,6 +2916,10 @@ h3 {
 
   .admin-record-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .operator-section-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .large-panel,
