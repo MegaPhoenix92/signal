@@ -5408,7 +5408,7 @@ function productionEnvSectionCatalog() {
       owner: 'integrations',
       requiredEnv: [...provider['outbound-email'].requiredEnv, 'SIGNAL_SENDGRID_API_KEY'],
       optionalEnv: provider['outbound-email'].optionalEnv,
-      commands: ['npm run admin -- notifications digest tenant_demo --live-provider', 'npm run admin -- notifications sendgrid-webhook-signed ./sendgrid-event.json <timestamp> <signature>'],
+      commands: ['npm run admin -- notifications digest tenant_demo --live-provider', 'npm run admin -- notifications sendgrid-webhook-signed ./sendgrid-event.json <signature> <timestamp>'],
     },
     {
       id: 'stripe',

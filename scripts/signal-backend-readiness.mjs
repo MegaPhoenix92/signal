@@ -16,6 +16,14 @@ function missingEnv(env, keys) {
   return keys.filter((key) => !env[key]);
 }
 
+function oneOfEnvLabel(keys) {
+  return keys.join(' or ');
+}
+
+function missingOneOfEnv(env, keys) {
+  return configuredEnv(env, keys).length ? [] : [oneOfEnvLabel(keys)];
+}
+
 function configuredCorsOrigins(env) {
   return (env.SIGNAL_API_CORS_ORIGINS ?? env.SIGNAL_API_CORS_ORIGIN ?? '')
     .split(',')
@@ -131,7 +139,7 @@ export function backendReadiness({ env = process.env, statePath } = {}) {
         : 'Production state storage is not configured.',
       requiredEnv: durableStorageEnv,
       configured: durableStorageConfigured,
-      missing: missingEnv(env, durableStorageEnv),
+      missing: durableStorageConfigured.length ? [] : missingEnv(env, durableStorageEnv),
     }),
     check({
       id: 'state_service_storage',
@@ -154,7 +162,7 @@ export function backendReadiness({ env = process.env, statePath } = {}) {
       missing: externalStateService
         ? [
           ...(stateServiceBackend ? [] : ['SIGNAL_STATE_SERVICE_BACKEND']),
-          ...missingEnv(env, stateServiceDatabaseEnv),
+          ...missingOneOfEnv(env, stateServiceDatabaseEnv),
         ]
         : [],
       details: {
@@ -292,7 +300,7 @@ export function backendReadiness({ env = process.env, statePath } = {}) {
         ? [
           ...(stateServiceBackend === 'postgres' ? [] : ['SIGNAL_STATE_SERVICE_BACKEND']),
           ...(stateServiceRlsEnabled ? [] : ['SIGNAL_STATE_SERVICE_RLS']),
-          ...missingEnv(env, stateServiceDatabaseEnv),
+          ...missingOneOfEnv(env, stateServiceDatabaseEnv),
         ]
         : missingEnv(env, tenantIsolationEnv),
       details: {

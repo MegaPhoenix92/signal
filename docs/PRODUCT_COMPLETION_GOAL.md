@@ -1,0 +1,46 @@
+# Product Completion Goal
+
+Signal's local SaaS completion goal is audited through the admin CLI and the admin console command strips. The initial admin CLI namespace inventory is:
+
+- `readiness`
+- `completion-audit`
+- `agent-handoff`
+- `backend-handoff`
+- `backend-cutover`
+- `onboarding-readiness`
+- `tenant-isolation`
+- `dashboard-audit`
+- `digestion-pipeline`
+- `operations-health`
+- `production-env`
+- `production-drill`
+- `production-plan`
+- `provider-handoff`
+- `provider-launch`
+- `email-handoff`
+- `payment-lifecycle`
+- `payment-handoff`
+- `qa-answers`
+- `launch-gate`
+- `session list`
+- `tenants`
+- `users`
+- `mailboxes`
+- `email-flows`
+- `quality`
+- `models`
+- `governance`
+- `integrations`
+- `token-vault verify`
+- `token-vault rotate`
+- `accounts`
+- `notifications`
+- `signals`
+- `payments`
+- `lifecycle`
+- `lifecycle-playbook`
+- `jobs list`
+- `backend`
+- `scheduler-handoff`
+- `doctor`
+- `export`
