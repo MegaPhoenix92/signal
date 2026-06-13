@@ -22,6 +22,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "test:api-security": "node --test scripts/test-signal-api-security.mjs",
     "test:audit-parity": "node --test scripts/test-signal-audit-parity.mjs",
+    "test:replay-dedup": "node --test scripts/test-signal-replay-dedup.mjs",
     "test:client-security": "node --test scripts/test-signal-client-security.mjs",
     "test:browser-routes": "node --test --test-force-exit scripts/test-signal-browser-routes.mjs",
     "test:contract": "node --test scripts/test-signal-contract.mjs",
@@ -33,7 +34,7 @@
     "test:state-service": "node --test scripts/test-signal-state-service.mjs",
     "test:token-vault": "node --test scripts/test-signal-token-vault.mjs",
     "test:verify-local": "node --test scripts/test-signal-verify-local.mjs",
-    "test:local": "npm run test:verify-local && npm run test:client-security && npm run test:api-security && npm run test:audit-parity && npm run test:contract && npm run test:jwks-auth && npm run test:persistence && npm run test:state-service && npm run test:tenant-isolation && npm run test:critical-paths && npm run test:scheduler && npm run test:provider-fetch && npm run test:payment-provider && npm run test:token-vault && npm run test:browser-routes",
+    "test:local": "npm run test:verify-local && npm run test:client-security && npm run test:api-security && npm run test:audit-parity && npm run test:replay-dedup && npm run test:contract && npm run test:jwks-auth && npm run test:persistence && npm run test:state-service && npm run test:tenant-isolation && npm run test:critical-paths && npm run test:scheduler && npm run test:provider-fetch && npm run test:payment-provider && npm run test:token-vault && npm run test:browser-routes",
     "test:payment-provider": "node --test scripts/test-signal-payment-provider.mjs",
     "test:tenant-isolation": "node --test scripts/test-signal-tenant-isolation.mjs",
     "verify:local": "npm run test:verify-local"

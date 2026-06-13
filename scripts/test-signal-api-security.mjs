@@ -1594,8 +1594,141 @@ test('Outlook lifecycle webhook validates clientState and queues watch renewal',
   assert.equal(watch.providerLastErrorCode, 'OUTLOOK_LIFECYCLE_REAUTHORIZATION_REQUIRED');
   assert.equal(watch.clientStateDigest, digestClientState(clientState));
   assert(!JSON.stringify(watch).includes(clientState), 'raw Outlook clientState must not be stored on lifecycle intake');
-  assert(updated.jobs.some((job) => job.type === 'mailbox.watch.renew' && job.targetId === mailboxId && job.status === 'queued'));
+  const firstJob = updated.jobs.find((job) => job.type === 'mailbox.watch.renew' && job.targetId === mailboxId && job.status === 'queued');
+  assert(firstJob, 'first lifecycle notification should queue watch renewal');
+  assert.equal(firstJob.providerIdempotencyKey, 'outlook.lifecycle.outlook-sub-lifecycle-test.reauthorizationRequired');
+  assert.equal(watch.lifecycleNotificationCount, 1, 'first lifecycle notification should increment count once');
+  assert.equal(payload.details.duplicateCount ?? 0, 0);
   assert(updated.lifecycleNotices.some((notice) => notice.trigger === 'provider_watch_attention' && notice.sourceIds?.watchId === watch.id));
+
+  const replay = await fetch(`${api.apiBaseUrl}/api/webhooks/outlook/lifecycle`, {
+    body: JSON.stringify({
+      value: [
+        {
+          clientState,
+          lifecycleEvent: 'reauthorizationRequired',
+          subscriptionId: 'outlook-sub-lifecycle-test',
+        },
+      ],
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+  const replayPayload = await parseJsonResponse(replay);
+  assert.equal(replay.status, 200, JSON.stringify(replayPayload));
+  assert.equal(replayPayload.action, 'mailboxes.watch-lifecycle');
+  assert.equal(replayPayload.details.duplicateCount, 1);
+  assert.equal(replayPayload.details.duplicates.length, 1);
+
+  const replayed = await loadState({ statePath });
+  const replayedWatch = replayed.emailWatchSubscriptions.find((candidate) => candidate.id === 'watch_outlook_lifecycle_test');
+  const replayedJobs = replayed.jobs.filter((job) => job.type === 'mailbox.watch.renew' && job.targetId === mailboxId && job.status === 'queued');
+  assert.equal(replayedWatch.lifecycleNotificationCount, 1, 'outlook lifecycle replay should not increment lifecycle notification count');
+  assert.equal(replayedJobs.length, 1, 'outlook lifecycle replay should not append duplicate renewal jobs');
+});
+
+test('Outlook lifecycle webhook rejects oversized notification batches', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-outlook-lifecycle-batch-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const port = await freePort();
+  let api = null;
+
+  t.after(async () => {
+    await stopProcess(api?.child);
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  api = await startApiForSecurityTest({
+    port,
+    statePath,
+    env: { SIGNAL_WEBHOOK_ACTOR: 'usr_admin' },
+  });
+
+  const response = await fetch(`${api.apiBaseUrl}/api/webhooks/outlook/lifecycle`, {
+    body: JSON.stringify({
+      value: Array.from({ length: 51 }, (_, index) => ({
+        clientState: `state-${index}`,
+        lifecycleEvent: 'missed',
+      })),
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  });
+  const payload = await parseJsonResponse(response);
+  assert.equal(response.status, 400, JSON.stringify(payload));
+  assert.equal(payload.code, 'OUTLOOK_NOTIFICATION_BATCH_TOO_LARGE');
+});
+
+test('Outlook lifecycle webhook dedups missed and subscriptionRemoved replays', async (t) => {
+  for (const lifecycleEvent of ['missed', 'subscriptionRemoved']) {
+    await t.test(`dedups ${lifecycleEvent} lifecycle replay`, async (subtest) => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), `signal-outlook-lifecycle-${lifecycleEvent}-`));
+      const statePath = path.join(tempDir, 'signal-state.json');
+      const port = await freePort();
+      let api = null;
+
+      subtest.after(async () => {
+        await stopProcess(api?.child);
+        await fs.rm(tempDir, { force: true, recursive: true });
+      });
+
+      await bootstrapState({ force: true, statePath });
+      const mailboxId = 'mbx_outlook_success';
+      const clientState = createProviderWatchSecret('outlook', mailboxId, { local: true });
+      const watchId = `watch_outlook_${lifecycleEvent}_replay`;
+      const state = await loadState({ statePath });
+      state.emailWatchSubscriptions = state.emailWatchSubscriptions ?? [];
+      state.emailWatchSubscriptions.push({
+        clientStateDigest: digestClientState(clientState),
+        expirationAt: new Date(Date.now() + 86_400_000).toISOString(),
+        id: watchId,
+        mailboxId,
+        notificationUrl: `http://127.0.0.1:${port}/api/webhooks/outlook/lifecycle`,
+        provider: 'outlook',
+        providerWatchId: `outlook-sub-${lifecycleEvent}`,
+        status: 'active',
+      });
+      await saveState(state, { statePath });
+
+      api = await startApiForSecurityTest({
+        port,
+        statePath,
+        env: { SIGNAL_WEBHOOK_ACTOR: 'usr_admin' },
+      });
+
+      const body = {
+        value: [{
+          clientState,
+          lifecycleEvent,
+          subscriptionId: `outlook-sub-${lifecycleEvent}`,
+        }],
+      };
+      const expectedJobType = lifecycleEvent === 'missed' ? 'outlook.watch.notification' : 'mailbox.watch.renew';
+      const postLifecycle = () => fetch(`${api.apiBaseUrl}/api/webhooks/outlook/lifecycle`, {
+        body: JSON.stringify(body),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+      });
+
+      const first = await postLifecycle();
+      const firstPayload = await parseJsonResponse(first);
+      assert.equal(first.status, 200, JSON.stringify(firstPayload));
+      assert.equal(firstPayload.details.duplicateCount ?? 0, 0);
+
+      const replay = await postLifecycle();
+      const replayPayload = await parseJsonResponse(replay);
+      assert.equal(replay.status, 200, JSON.stringify(replayPayload));
+      assert.equal(replayPayload.details.duplicateCount, 1);
+
+      const updated = await loadState({ statePath });
+      const watch = updated.emailWatchSubscriptions.find((candidate) => candidate.id === watchId);
+      const jobs = updated.jobs.filter((job) => job.type === expectedJobType && job.targetId === mailboxId);
+      assert.equal(watch.lifecycleNotificationCount, 1);
+      assert.equal(jobs.length, 1);
+      assert.equal(jobs[0].providerIdempotencyKey, `outlook.lifecycle.outlook-sub-${lifecycleEvent}.${lifecycleEvent}`);
+    });
+  }
 });
 
 test('POST /api/invites/claim returns 429 after repeated attempts from the same IP', async (t) => {

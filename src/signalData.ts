@@ -1866,6 +1866,31 @@ export type ProductionEnvAuditRow = {
   evidence: string[];
 };
 
+export type ProductReadinessRequirement = {
+  evidence: string[];
+  gaps: string[];
+  id: string;
+  label: string;
+  localOk: boolean;
+  productionOk: boolean;
+  status: string;
+};
+
+export type ProductReadinessReport = {
+  generatedAt: string;
+  ok: boolean;
+  productionReady: boolean;
+  requirements: ProductReadinessRequirement[];
+  summary: {
+    localReady: number;
+    needsAttention: number;
+    needsLiveProvider: number;
+    needsProduction: number;
+    productionReady: number;
+    total: number;
+  };
+};
+
 export type ProductionEnvAuditReport = {
   generatedAt: string;
   ok: boolean;
@@ -6647,7 +6672,7 @@ const fallbackProductionEnvSections = [
     label: 'SendGrid / outbound email',
     owner: 'integrations',
     requiredEnv: ['SIGNAL_EMAIL_PROVIDER_URL', 'SIGNAL_EMAIL_PROVIDER_TOKEN', 'SIGNAL_EMAIL_FROM', 'SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET', 'SIGNAL_SENDGRID_API_KEY'],
-    optionalEnv: ['SIGNAL_EMAIL_PROVIDER', 'SIGNAL_EMAIL_PROVIDER_MODE', 'SIGNAL_EMAIL_PROVIDER_NAME', 'SIGNAL_EMAIL_UNSUBSCRIBE_BASE_URL', 'SIGNAL_SENDGRID_API_BASE_URL', 'SIGNAL_SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY', 'SIGNAL_SENDGRID_SANDBOX_MODE', 'SIGNAL_SENDGRID_ASM_GROUP_ID', 'SIGNAL_SENDGRID_ASM_GROUPS_TO_DISPLAY', 'SIGNAL_SENDGRID_CATEGORIES', 'SIGNAL_SENDGRID_CLICK_TRACKING', 'SIGNAL_SENDGRID_OPEN_TRACKING', 'SIGNAL_SENDGRID_IP_POOL_NAME', 'SIGNAL_SENDGRID_REPLY_TO'],
+    optionalEnv: ['SIGNAL_EMAIL_PROVIDER', 'SIGNAL_EMAIL_PROVIDER_MODE', 'SIGNAL_EMAIL_PROVIDER_NAME', 'SIGNAL_EMAIL_UNSUBSCRIBE_BASE_URL', 'SIGNAL_SENDGRID_API_BASE_URL', 'SIGNAL_SENDGRID_API_KEY', 'SIGNAL_SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY', 'SIGNAL_SENDGRID_SANDBOX_MODE', 'SIGNAL_SENDGRID_ASM_GROUP_ID', 'SIGNAL_SENDGRID_ASM_GROUPS_TO_DISPLAY', 'SIGNAL_SENDGRID_CATEGORIES', 'SIGNAL_SENDGRID_CLICK_TRACKING', 'SIGNAL_SENDGRID_OPEN_TRACKING', 'SIGNAL_SENDGRID_IP_POOL_NAME', 'SIGNAL_SENDGRID_REPLY_TO'],
     commands: ['npm run admin -- notifications digest tenant_demo --live-provider', 'npm run admin -- notifications sendgrid-webhook-signed ./sendgrid-event.json <signature> <timestamp>'],
   },
   {
@@ -6665,28 +6690,373 @@ const fallbackProductionEnvTemplateKeys = uniquePlanValues([
   'SIGNAL_APP_BASE_URL',
 ]).sort();
 
-function fallbackProductionEnvRow(section: typeof fallbackProductionEnvSections[number], templateKeys: string[]): ProductionEnvAuditRow {
-  const requiredEnv = uniquePlanValues(section.requiredEnv);
-  const optionalEnv = uniquePlanValues(section.optionalEnv);
-  const templateMissing = requiredEnv.filter((key) => !templateKeys.includes(key));
+function fallbackProductionEnvSourceKeys(envSource: { keys?: string[] } | null | undefined) {
+  return new Set(Array.isArray(envSource?.keys) ? envSource.keys : []);
+}
+
+function fallbackProductionEnvRow({
+  commands = [],
+  env,
+  envSource = null,
+  id,
+  label,
+  optionalEnv = [],
+  owner,
+  requiredEnv = [],
+  templateKeys,
+}: {
+  commands?: string[];
+  env: Record<string, string | undefined>;
+  envSource?: { keys?: string[] } | null;
+  id: string;
+  label: string;
+  optionalEnv?: string[];
+  owner: string;
+  requiredEnv?: string[];
+  templateKeys: string[];
+}): ProductionEnvAuditRow {
+  const required = uniquePlanValues(requiredEnv);
+  const optional = uniquePlanValues(optionalEnv);
+  const sourceKeys = fallbackProductionEnvSourceKeys(envSource);
+  const templateKeySet = new Set(templateKeys);
+  const missingRequired = required.filter((key) => !env[key]);
+  const configuredRequired = required.filter((key) => Boolean(env[key]));
+  const presentInSource = required.filter((key) => sourceKeys.has(key));
+  const templateMissing = required.filter((key) => !templateKeySet.has(key));
+  const configuredOptional = optional.filter((key) => Boolean(env[key]));
+  const status = templateMissing.length ? 'template_gap' : missingRequired.length ? 'missing_values' : 'ready';
   return {
-    id: section.id,
-    label: section.label,
-    owner: section.owner,
-    status: templateMissing.length ? 'template_gap' : 'missing_values',
-    requiredEnv,
-    optionalEnv,
-    configuredRequired: [],
-    missingRequired: requiredEnv,
-    presentInSource: [],
+    id,
+    label,
+    owner,
+    status,
+    requiredEnv: required,
+    optionalEnv: optional,
+    configuredRequired,
+    missingRequired,
+    presentInSource,
     templateMissing,
-    configuredOptional: [],
-    commands: section.commands,
+    configuredOptional,
+    commands,
     evidence: [
-      `0/${requiredEnv.length} required env name(s) configured`,
-      `0/${requiredEnv.length} required env name(s) present in selected env source`,
-      `${requiredEnv.length - templateMissing.length}/${requiredEnv.length} required env name(s) covered by template`,
+      `${configuredRequired.length}/${required.length} required env name(s) configured`,
+      `${presentInSource.length}/${required.length} required env name(s) present in selected env source`,
+      `${required.length - templateMissing.length}/${required.length} required env name(s) covered by template`,
     ],
+  };
+}
+
+const fallbackScheduledProviderIds = ['gmail', 'outlook', 'outbound-email', 'stripe'];
+const fallbackProviderValidationCadences = ['daily', 'weekly', 'manual'];
+const fallbackProviderValidationScheduleStatuses = ['active', 'paused'];
+
+function fallbackReadinessRequirement({
+  evidence = [],
+  gaps = [],
+  id,
+  label,
+  localOk,
+  productionOk = localOk,
+  status,
+}: {
+  evidence?: string[];
+  gaps?: string[];
+  id: string;
+  label: string;
+  localOk: boolean;
+  productionOk?: boolean;
+  status?: string;
+}): ProductReadinessRequirement {
+  const computedStatus = status ?? (
+    productionOk
+      ? 'ready'
+      : localOk
+        ? 'local_ready'
+        : 'needs_attention'
+  );
+  return {
+    evidence,
+    gaps,
+    id,
+    label,
+    localOk: Boolean(localOk),
+    productionOk: Boolean(productionOk),
+    status: computedStatus,
+  };
+}
+
+function fallbackApiSessionStatus(session: ApiSession, now = Date.now()) {
+  if (session.status === 'revoked' || session.revokedAt) {
+    return 'revoked';
+  }
+  const expiresMs = Date.parse(session.expiresAt ?? '');
+  if (Number.isFinite(expiresMs) && expiresMs <= now) {
+    return 'expired';
+  }
+  return session.status === 'expired' ? 'expired' : 'active';
+}
+
+function productionEnvUnsafePaths(value: unknown, prefix = ''): string[] {
+  if (typeof value === 'string') {
+    return localAgentHandoffStringLooksUnsafe(value) ? [prefix || '<root>'] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((child, index) => productionEnvUnsafePaths(child, `${prefix}[${index}]`));
+  }
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+  return Object.entries(value).flatMap(([key, child]) => {
+    const currentPath = prefix ? `${prefix}.${key}` : key;
+    return productionEnvUnsafePaths(child, currentPath);
+  });
+}
+
+function fallbackDoctorCheckMap(data: SignalAppData) {
+  const checks = new Map(doctorLocalState(data).checks.map((check) => [check.id, check]));
+  checks.set('tenant_owners', {
+    id: 'tenant_owners',
+    ok: data.tenants.every((tenant) =>
+      tenant.ownerUserId &&
+      tenant.billingOwnerUserId &&
+      data.users.some((user) => user.id === tenant.ownerUserId && user.tenantId === tenant.id) &&
+      data.users.some((user) => user.id === tenant.billingOwnerUserId && user.tenantId === tenant.id)),
+    message: 'Every tenant has a workspace owner and billing owner inside the tenant.',
+  });
+  checks.set('api_sessions_digest_only', {
+    id: 'api_sessions_digest_only',
+    ok: (data.apiSessions ?? []).every((session) =>
+      session.id &&
+      session.digest &&
+      !('value' in session) &&
+      !('secret' in session) &&
+      !('plaintext' in session) &&
+      ['active', 'revoked', 'expired'].includes(fallbackApiSessionStatus(session))),
+    message: 'Local API sessions store revocable digest metadata only.',
+  });
+  checks.set('provider_validation_runs_sanitized', {
+    id: 'provider_validation_runs_sanitized',
+    ok: (data.providerValidationRuns ?? []).every((run) => {
+      const record = run as ProviderValidationRun & Record<string, unknown>;
+      return run.id &&
+        run.recordedAt &&
+        run.reportDigest &&
+        ['passed', 'failed', 'blocked'].includes(run.status) &&
+        !record.report &&
+        !record.raw &&
+        !record.token &&
+        !record.secret &&
+        !record.apiKey &&
+        !record.plaintext;
+    }),
+    message: 'Provider sandbox validation evidence is recorded without raw secrets or raw reports.',
+  });
+  checks.set('provider_validation_schedules_audited', {
+    id: 'provider_validation_schedules_audited',
+    ok: fallbackScheduledProviderIds.every((providerId) =>
+      (data.providerValidationSchedules ?? []).some((schedule) => schedule.providerId === providerId)) &&
+      (data.providerValidationSchedules ?? []).every((schedule) => {
+        const record = schedule as ProviderValidationSchedule & Record<string, unknown>;
+        return schedule.id &&
+          fallbackScheduledProviderIds.includes(schedule.providerId) &&
+          fallbackProviderValidationCadences.includes(schedule.cadence) &&
+          fallbackProviderValidationScheduleStatuses.includes(schedule.status) &&
+          Array.isArray(schedule.requiredEnv) &&
+          !record.raw &&
+          !record.report &&
+          !record.token &&
+          !record.secret &&
+          !record.apiKey &&
+          !record.plaintext;
+      }),
+    message: 'Provider sandbox validation schedules are statused and contain metadata only.',
+  });
+  checks.set('lifecycle_notices_audited', {
+    id: 'lifecycle_notices_audited',
+    ok: (data.lifecycleNotices ?? []).every((notice) =>
+      notice.id &&
+      notice.tenantId &&
+      notice.title &&
+      notice.body &&
+      notice.createdAt &&
+      ['access', 'onboarding', 'payment', 'source', 'notification', 'provider'].includes(notice.category) &&
+      ['info', 'watch', 'critical'].includes(notice.severity) &&
+      ['open', 'monitoring', 'resolved'].includes(notice.status)) &&
+      (data.lifecycleNotices ?? []).some((notice) => notice.category === 'payment') &&
+      (data.lifecycleNotices ?? []).some((notice) => notice.category === 'source'),
+    message: 'Lifecycle notices are auditable records linked to billing, source, notification, and provider state.',
+  });
+  return checks;
+}
+
+function fallbackAllDoctorChecksOk(checksById: Map<string, { ok: boolean }>, ids: string[]) {
+  return ids.every((id) => checksById.get(id)?.ok === true);
+}
+
+function fallbackDefaultTenantId(data: SignalAppData) {
+  return data.tenants[0]?.id ?? 'tenant_demo';
+}
+
+export function fallbackProductReadiness(
+  data: SignalAppData,
+  backend = fallbackBackendReadiness(),
+  provider = fallbackProviderReadiness(),
+): ProductReadinessReport {
+  const summary = summarizeLocalState(data);
+  const checksById = fallbackDoctorCheckMap(data);
+  const latestProviderRun = [...(data.providerValidationRuns ?? [])].sort((left, right) => Date.parse(right.recordedAt ?? '') - Date.parse(left.recordedAt ?? ''))[0];
+  const providerValidationLocalOk = fallbackAllDoctorChecksOk(checksById, ['provider_validation_runs_sanitized', 'provider_validation_schedules_audited']);
+  const backendProductionReady = backend.productionReady === true;
+  const providerProductionReady = provider.ok === true && latestProviderRun?.status === 'passed';
+  const providerMissingEnv = provider.summary.missingRequired ?? 0;
+  const defaultTenantId = fallbackDefaultTenantId(data);
+  const requirements = [
+    fallbackReadinessRequirement({
+      id: 'workspace_onboarding',
+      label: 'Workspace registration, onboarding, invites, and seats',
+      localOk: fallbackAllDoctorChecksOk(checksById, ['tenant_owners', 'tenant_memberships', 'pending_invite_expiry', 'seat_capacity']) &&
+        data.subscriptions.some((subscription) => subscription.tenantId === defaultTenantId) &&
+        (data.entitlements ?? []).some((entitlement) => entitlement.tenantId === defaultTenantId),
+      evidence: [
+        `${summary.tenants} tenant(s)`,
+        `${summary.activeMemberships}/${summary.memberships} active memberships`,
+        `${summary.pendingInvites}/${summary.invites} pending invites`,
+        `${summary.activeSeats}+${summary.pendingInviteSeats}/${summary.seatLimit ?? 'unlimited'} seats`,
+      ],
+      gaps: [],
+    }),
+    fallbackReadinessRequirement({
+      id: 'multi_user_rbac_privacy',
+      label: 'Multi-user organization, RBAC, privacy, and tenant isolation',
+      localOk: fallbackAllDoctorChecksOk(checksById, ['tenant_memberships', 'active_session_user', 'api_sessions_digest_only', 'no_local_secrets']),
+      productionOk: backendProductionReady,
+      status: backendProductionReady ? 'ready' : 'needs_production',
+      evidence: [
+        `${summary.admins} active admin(s)`,
+        `${summary.activeMemberships} active membership(s)`,
+        `${summary.apiSessions} digest-only API session record(s)`,
+        `Backend tenant isolation: ${backend.checks.find((check) => check.id === 'tenant_isolation')?.ok ? 'configured' : 'not production configured'}`,
+      ],
+      gaps: backendProductionReady ? [] : ['Configure durable production tenant isolation mode and managed auth/storage before multi-customer production use.'],
+    }),
+    fallbackReadinessRequirement({
+      id: 'email_source_and_detection_flow',
+      label: 'Email source ingestion, detector runs, routing, and signal handoff',
+      localOk: fallbackAllDoctorChecksOk(checksById, ['connected_mailbox', 'sync_cursor_coverage', 'source_message_fixtures', 'enabled_email_flow', 'routing_rules_audited', 'signal_handoffs_audited']),
+      evidence: [
+        `${summary.connectedMailboxes}/${summary.mailboxes} connected mailbox source(s)`,
+        `${summary.sourceMessages} source message fixture(s)`,
+        `${summary.enabledEmailFlows}/${summary.emailFlows} enabled detector flow(s)`,
+        `${summary.generatedSignals} generated source-backed signal(s)`,
+        `${summary.queuedSignalHandoffs}/${summary.signalHandoffs} queued handoff(s)`,
+      ],
+      gaps: [],
+    }),
+    fallbackReadinessRequirement({
+      id: 'model_governance_and_tuning',
+      label: 'Data digestion model boundary and tenant-specific tuning',
+      localOk: fallbackAllDoctorChecksOk(checksById, ['model_governance_boundary', 'signal_quality_settings', 'suppression_rules_audited']),
+      evidence: [
+        `${summary.modelGovernancePolicies} model governance polic${summary.modelGovernancePolicies === 1 ? 'y' : 'ies'}`,
+        `${summary.perTenantModels} per-tenant trained model(s) enabled`,
+        `${summary.activeSuppressionRules}/${summary.suppressionRules} active suppression rule(s)`,
+        `${summary.signalFeedback} feedback label(s)`,
+      ],
+      gaps: (summary.perTenantModels ?? 0) === 0 ? [] : ['Disable per-tenant model records unless governed opt-in training is explicitly approved.'],
+    }),
+    fallbackReadinessRequirement({
+      id: 'relationship_dashboard_and_recommendations',
+      label: 'Relationship dashboard, indicators, priorities, and recommendations',
+      localOk: fallbackAllDoctorChecksOk(checksById, ['account_profile_coverage', 'account_actions_available', 'account_recommendations_available']),
+      evidence: [
+        `${summary.accounts} account profile(s)`,
+        `${summary.atRiskAccounts} at-risk account(s)`,
+        `${summary.openAccountActions} open next action(s)`,
+        `${summary.openAccountRecommendations}/${summary.accountRecommendations} open recommendation(s)`,
+      ],
+      gaps: [],
+    }),
+    fallbackReadinessRequirement({
+      id: 'notifications_and_admin_monitoring',
+      label: 'User notifications, digest email flow, and admin monitoring',
+      localOk: fallbackAllDoctorChecksOk(checksById, ['notification_preferences', 'notification_events_available', 'email_delivery_preferences', 'email_delivery_ledger']) &&
+        (summary.digestRuns ?? 0) >= 0,
+      evidence: [
+        `${summary.notificationPreferences} notification preference record(s)`,
+        `${summary.unreadNotifications}/${summary.notificationEvents} unread notification(s)`,
+        `${summary.digestRuns} digest run(s)`,
+        `${summary.failedEmailDeliveries}/${summary.emailDeliveries} failed email deliver${summary.emailDeliveries === 1 ? 'y' : 'ies'}`,
+      ],
+      gaps: [],
+    }),
+    fallbackReadinessRequirement({
+      id: 'payment_lifecycle_and_entitlements',
+      label: 'Payment lifecycle, entitlement gates, recovery, cancellation, and resubscription',
+      localOk: fallbackAllDoctorChecksOk(checksById, ['subscription_state', 'active_entitlement', 'billing_overrides_audited', 'invoice_recovery_known', 'billing_jobs_settled', 'lifecycle_notices_audited']),
+      evidence: [
+        `${summary.subscriptions} subscription record(s)`,
+        `${summary.activeEntitlements} active entitlement(s)`,
+        `${summary.openInvoices}/${summary.invoices} open invoice(s)`,
+        `${summary.billingSessions} billing session(s)`,
+        `${summary.paymentEvents} payment event(s)`,
+      ],
+      gaps: [],
+    }),
+    fallbackReadinessRequirement({
+      id: 'provider_integrations',
+      label: 'Gmail, Outlook, SendGrid, and Stripe provider readiness',
+      localOk: providerValidationLocalOk,
+      productionOk: providerProductionReady,
+      status: providerProductionReady ? 'ready' : 'needs_live_provider',
+      evidence: [
+        `${provider.summary.readyProviders}/${provider.summary.totalProviders} provider config group(s) ready`,
+        `${providerMissingEnv} required env var(s) missing`,
+        latestProviderRun ? `Latest sandbox evidence ${latestProviderRun.status} at ${latestProviderRun.recordedAt}` : 'No sandbox evidence recorded',
+      ],
+      gaps: providerProductionReady ? [] : ['Run provider sandbox validation with real sandbox credentials and save sanitized evidence.'],
+    }),
+    fallbackReadinessRequirement({
+      id: 'local_admin_agent_operations',
+      label: 'Local admin CLI, API, jobs, audit, and agent operations',
+      localOk: fallbackAllDoctorChecksOk(checksById, ['api_sessions_digest_only', 'provider_validation_schedules_audited']) &&
+        (data.jobs ?? []).some((job) => ['email_sync', 'provider_validation', 'notification_digest', 'outbound_email', 'billing_webhook', 'signal_handoff'].includes(job.queue)) &&
+        Array.isArray(data.auditEvents),
+      evidence: [
+        `${summary.jobs} job record(s)`,
+        `${summary.failedJobs} failed job(s)`,
+        `${summary.auditEvents} audit event(s)`,
+        `${summary.activeApiSessions}/${summary.apiSessions} active API session(s)`,
+      ],
+      gaps: [],
+    }),
+    fallbackReadinessRequirement({
+      id: 'production_backend_and_scheduler',
+      label: 'Production backend, storage, auth, CORS, tenant isolation, and scheduler',
+      localOk: Boolean(backend),
+      productionOk: backendProductionReady,
+      status: backendProductionReady ? 'ready' : 'needs_production',
+      evidence: [
+        `Backend mode: ${backend.mode}`,
+        `${backend.summary.readyChecks}/${backend.summary.totalChecks} production backend check(s) ready`,
+        `${backend.summary.missingRequiredEnv.length} backend env var name(s) missing`,
+      ],
+      gaps: backendProductionReady ? [] : ['Configure production backend mode, durable storage, managed auth/JWKS, CORS origins, tenant isolation, and scheduler environment.'],
+    }),
+  ];
+
+  return {
+    ok: requirements.every((requirement) => requirement.localOk),
+    productionReady: requirements.every((requirement) => requirement.productionOk),
+    generatedAt: new Date().toISOString(),
+    requirements,
+    summary: {
+      localReady: requirements.filter((requirement) => requirement.localOk).length,
+      needsAttention: requirements.filter((requirement) => !requirement.localOk).length,
+      needsLiveProvider: requirements.filter((requirement) => requirement.status === 'needs_live_provider').length,
+      needsProduction: requirements.filter((requirement) => requirement.status === 'needs_production').length,
+      productionReady: requirements.filter((requirement) => requirement.productionOk).length,
+      total: requirements.length,
+    },
   };
 }
 
@@ -6694,32 +7064,74 @@ export function fallbackProductionEnvAudit(
   data: SignalAppData,
   backend = fallbackBackendReadiness(),
   provider = fallbackProviderReadiness(),
+  env: Record<string, string | undefined> = {},
+  {
+    envSource = null,
+    template = null,
+  }: {
+    envSource?: {
+      configuredKeys?: number;
+      keys?: string[];
+      path?: string | null;
+      type?: string;
+    } | null;
+    template?: {
+      invalid?: number[];
+      keys?: string[];
+      path?: string | null;
+    } | null;
+  } = {},
 ): ProductionEnvAuditReport {
   const plan = fallbackProductionPlan(data, backend, provider);
-  const requiredEnv = uniquePlanValues([
+  const templateKeys = template?.keys ?? [];
+  const allRequiredEnv = uniquePlanValues([
     ...fallbackProductionEnvSections.flatMap((section) => section.requiredEnv),
     ...plan.rows.flatMap((row) => row.requiredEnv),
     ...backend.checks.flatMap((check) => check.requiredEnv),
     ...provider.providers.flatMap((item) => item.requiredEnv),
   ]).sort();
-  const optionalEnv = uniquePlanValues(fallbackProductionEnvSections.flatMap((section) => section.optionalEnv)).sort();
-  const templateKeys = uniquePlanValues([...fallbackProductionEnvTemplateKeys, ...requiredEnv]).sort();
+  const allOptionalEnv = uniquePlanValues(fallbackProductionEnvSections.flatMap((section) => section.optionalEnv)).sort();
   const rows = [
-    ...fallbackProductionEnvSections.map((section) => fallbackProductionEnvRow(section, templateKeys)),
+    ...fallbackProductionEnvSections.map((section) => fallbackProductionEnvRow({
+      commands: section.commands,
+      env,
+      envSource,
+      id: section.id,
+      label: section.label,
+      optionalEnv: section.optionalEnv,
+      owner: section.owner,
+      requiredEnv: section.requiredEnv,
+      templateKeys,
+    })),
     fallbackProductionEnvRow({
+      commands: ['npm run admin -- production-plan --env-file ./.env.production --json', 'npm run admin -- launch-gate --env-file ./.env.production --json'],
+      env,
+      envSource,
       id: 'production_plan_union',
       label: 'Production setup plan required names',
+      optionalEnv: allOptionalEnv,
       owner: 'operations',
-      requiredEnv,
-      optionalEnv,
-      commands: ['npm run admin -- production-plan --env-file ./.env.production --json', 'npm run admin -- launch-gate --env-file ./.env.production --json'],
-    }, templateKeys),
+      requiredEnv: allRequiredEnv,
+      templateKeys,
+    }),
   ];
-  return {
+  const missingRequired = uniquePlanValues(rows.flatMap((row) => row.missingRequired)).sort();
+  const configuredRequired = allRequiredEnv.filter((key) => Boolean(env[key]));
+  const sourceKeys = fallbackProductionEnvSourceKeys(envSource);
+  const presentInSource = allRequiredEnv.filter((key) => sourceKeys.has(key));
+  const templateMissingRequired = allRequiredEnv.filter((key) => !templateKeys.includes(key));
+  const unsafePaths = productionEnvUnsafePaths({
+    rows,
+    summary: {
+      missingRequired,
+      templateMissingRequired,
+    },
+  });
+  const report: ProductionEnvAuditReport = {
     generatedAt: new Date().toISOString(),
     ok: true,
-    envReady: false,
-    templateReady: true,
+    envReady: missingRequired.length === 0 && templateMissingRequired.length === 0,
+    templateReady: templateMissingRequired.length === 0 && (template?.invalid?.length ?? 0) === 0,
     rows,
     recommendation: {
       summary: 'Use production-env before production-plan or launch-gate to verify that the selected env source and committed template cover every required production setup name without printing values.',
@@ -6727,30 +7139,33 @@ export function fallbackProductionEnvAudit(
       localAgentCommand: 'npm run admin -- production-env --env-file ./.env.production --json',
     },
     source: {
-      configuredKeys: 0,
-      keys: [],
-      path: null,
-      type: 'seed',
+      configuredKeys: envSource?.configuredKeys ?? 0,
+      keys: envSource?.keys ?? [],
+      path: envSource?.path ?? null,
+      type: envSource?.type ?? 'process',
     },
     template: {
-      invalid: [],
+      invalid: template?.invalid ?? [],
       keys: templateKeys,
-      path: '.env.production.example',
+      path: template?.path ?? null,
     },
     summary: {
-      configuredRequired: 0,
-      envReady: false,
-      missingRequired: requiredEnv.length,
-      optionalEnv: optionalEnv.length,
-      presentInSource: 0,
-      requiredEnv: requiredEnv.length,
-      rowsReady: 0,
-      secretSafe: true,
-      templateMissingRequired: 0,
-      templateReady: true,
+      configuredRequired: configuredRequired.length,
+      envReady: missingRequired.length === 0,
+      missingRequired: missingRequired.length,
+      optionalEnv: allOptionalEnv.length,
+      presentInSource: presentInSource.length,
+      requiredEnv: allRequiredEnv.length,
+      rowsReady: rows.filter((row) => row.status === 'ready').length,
+      secretSafe: false,
+      templateMissingRequired: templateMissingRequired.length,
+      templateReady: templateMissingRequired.length === 0 && (template?.invalid?.length ?? 0) === 0,
       totalRows: rows.length,
     },
   };
+  report.summary.secretSafe = unsafePaths.length === 0;
+  report.ok = report.summary.secretSafe && report.template.invalid.length === 0 && rows.length === 9;
+  return report;
 }
 
 function localAgentHandoffStringLooksUnsafe(text: string) {
@@ -8181,7 +8596,10 @@ export function fallbackStateResponse(): SignalStateResponse {
     paymentLifecycle: fallbackPaymentLifecycleAudit(fallbackSignalData, backend),
     providerHandoff: fallbackProviderHandoff(fallbackSignalData, backend),
     providerLaunch: fallbackProviderLaunchMatrix(fallbackSignalData, backend),
-    productionEnv: fallbackProductionEnvAudit(fallbackSignalData, backend),
+    productionEnv: fallbackProductionEnvAudit(fallbackSignalData, backend, fallbackProviderReadiness(), {}, {
+      envSource: { configuredKeys: 0, keys: [], path: null, type: 'seed' },
+      template: { invalid: [], keys: fallbackProductionEnvTemplateKeys, path: '.env.production.example' },
+    }),
     productionPlan: fallbackProductionPlan(fallbackSignalData, backend),
     productionDrill,
     qaAnswers: fallbackQaAnswers(fallbackSignalData, backend),
