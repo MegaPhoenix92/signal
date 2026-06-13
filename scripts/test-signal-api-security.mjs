@@ -9,6 +9,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  ApiAuthError,
   assertApiSecurityConfig,
   isLoopbackApiHost,
   localActorAllowed,
@@ -134,7 +135,7 @@ test('requestAuth rejects unauthenticated local actor impersonation unless expli
 test('assertApiSecurityConfig blocks non-loopback hosts without verified auth', () => {
   assert.throws(
     () => assertApiSecurityConfig({ SIGNAL_API_HOST: '0.0.0.0' }),
-    /not loopback/i,
+    (error) => error instanceof ApiAuthError && error.code === 'API_AUTH_NOT_CONFIGURED',
   );
   assert.doesNotThrow(() => assertApiSecurityConfig({
     SIGNAL_API_HOST: '0.0.0.0',
@@ -284,7 +285,7 @@ test('assertApiSecurityConfig requires Gmail webhook audience when Gmail intake 
 test('assertApiSecurityConfig rejects short SIGNAL_SESSION_SECRET values', () => {
   assert.throws(
     () => assertApiSecurityConfig({ SIGNAL_SESSION_SECRET: 'too-short' }),
-    /at least 32 characters/i,
+    (error) => error instanceof ApiAuthError && error.code === 'SESSION_SECRET_TOO_SHORT',
   );
 });
 

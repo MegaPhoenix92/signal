@@ -2708,6 +2708,45 @@ function localActorHeaders(extra: Record<string, string> = {}) {
   };
 }
 
+async function readJsonPayload(response: Response) {
+  return response.json().catch(() => null);
+}
+
+async function getJson<T>(
+  path: string,
+  {
+    body,
+    errorLabel = 'Signal API',
+    headers = {},
+    includeActorHeader = true,
+    method,
+    signal,
+  }: {
+    body?: unknown;
+    errorLabel?: string;
+    headers?: Record<string, string>;
+    includeActorHeader?: boolean;
+    method?: string;
+    signal?: AbortSignal;
+  } = {},
+): Promise<T> {
+  const response = await fetch(`${localApiUrl}${path}`, {
+    body: body === undefined ? undefined : JSON.stringify(body),
+    credentials: localApiCredentials,
+    headers: {
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(includeActorHeader ? localActorHeaders(headers) : headers),
+    },
+    method: method ?? (body === undefined ? 'GET' : 'POST'),
+    signal,
+  });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    throw new Error((payload as { error?: string } | null)?.error ?? `${errorLabel} returned ${response.status}`);
+  }
+  return payload as T;
+}
+
 const fallbackProviderRequirements = [
   {
     id: 'session',
@@ -7578,283 +7617,133 @@ export function fallbackStateResponse(): SignalStateResponse {
 }
 
 export async function fetchSignalState(signal?: AbortSignal): Promise<SignalStateResponse> {
-  const response = await fetch(`${localApiUrl}/api/state`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal API returned ${response.status}`);
-  }
-  return response.json() as Promise<SignalStateResponse>;
+  return getJson<SignalStateResponse>('/api/state', { errorLabel: 'Signal API', signal });
 }
 
 export async function fetchProviderReadiness(signal?: AbortSignal): Promise<ProviderReadinessResponse> {
-  const response = await fetch(`${localApiUrl}/api/integrations`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal integrations API returned ${response.status}`);
-  }
-  return response.json() as Promise<ProviderReadinessResponse>;
+  return getJson<ProviderReadinessResponse>('/api/integrations', { errorLabel: 'Signal integrations API', signal });
 }
 
 export async function fetchDashboardAudit(signal?: AbortSignal): Promise<DashboardAuditResponse> {
-  const response = await fetch(`${localApiUrl}/api/dashboard-audit`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal dashboard audit API returned ${response.status}`);
-  }
-  return response.json() as Promise<DashboardAuditResponse>;
+  return getJson<DashboardAuditResponse>('/api/dashboard-audit', { errorLabel: 'Signal dashboard audit API', signal });
 }
 
 export async function fetchSignalDigestionPipeline(signal?: AbortSignal): Promise<SignalDigestionPipelineResponse> {
-  const response = await fetch(`${localApiUrl}/api/digestion-pipeline`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal digestion pipeline API returned ${response.status}`);
-  }
-  return response.json() as Promise<SignalDigestionPipelineResponse>;
+  return getJson<SignalDigestionPipelineResponse>('/api/digestion-pipeline', { errorLabel: 'Signal digestion pipeline API', signal });
 }
 
 export async function fetchOnboardingReadiness(signal?: AbortSignal): Promise<OnboardingReadinessResponse> {
-  const response = await fetch(`${localApiUrl}/api/onboarding-readiness`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal onboarding readiness API returned ${response.status}`);
-  }
-  return response.json() as Promise<OnboardingReadinessResponse>;
+  return getJson<OnboardingReadinessResponse>('/api/onboarding-readiness', { errorLabel: 'Signal onboarding readiness API', signal });
 }
 
 export async function fetchTenantIsolation(signal?: AbortSignal): Promise<TenantIsolationAuditResponse> {
-  const response = await fetch(`${localApiUrl}/api/tenant-isolation`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal tenant isolation API returned ${response.status}`);
-  }
-  return response.json() as Promise<TenantIsolationAuditResponse>;
+  return getJson<TenantIsolationAuditResponse>('/api/tenant-isolation', { errorLabel: 'Signal tenant isolation API', signal });
 }
 
 export async function fetchOperationsHealth(signal?: AbortSignal): Promise<OperationsHealthResponse> {
-  const response = await fetch(`${localApiUrl}/api/operations-health`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal operations health API returned ${response.status}`);
-  }
-  return response.json() as Promise<OperationsHealthResponse>;
+  return getJson<OperationsHealthResponse>('/api/operations-health', { errorLabel: 'Signal operations health API', signal });
 }
 
 export async function fetchProductionDrill(signal?: AbortSignal): Promise<ProductionDrillResponse> {
-  const response = await fetch(`${localApiUrl}/api/production-drill`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal production drill API returned ${response.status}`);
-  }
-  return response.json() as Promise<ProductionDrillResponse>;
+  return getJson<ProductionDrillResponse>('/api/production-drill', { errorLabel: 'Signal production drill API', signal });
 }
 
 export async function fetchProviderLaunch(signal?: AbortSignal): Promise<ProviderLaunchResponse> {
-  const response = await fetch(`${localApiUrl}/api/provider-launch`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal provider launch API returned ${response.status}`);
-  }
-  return response.json() as Promise<ProviderLaunchResponse>;
+  return getJson<ProviderLaunchResponse>('/api/provider-launch', { errorLabel: 'Signal provider launch API', signal });
 }
 
 export async function fetchProviderHandoff(signal?: AbortSignal): Promise<ProviderHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/provider-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal provider handoff API returned ${response.status}`);
-  }
-  return response.json() as Promise<ProviderHandoffResponse>;
+  return getJson<ProviderHandoffResponse>('/api/provider-handoff', { errorLabel: 'Signal provider handoff API', signal });
 }
 
 export async function fetchBackendCutover(signal?: AbortSignal): Promise<BackendCutoverResponse> {
-  const response = await fetch(`${localApiUrl}/api/backend-cutover`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal backend cutover API returned ${response.status}`);
-  }
-  return response.json() as Promise<BackendCutoverResponse>;
+  return getJson<BackendCutoverResponse>('/api/backend-cutover', { errorLabel: 'Signal backend cutover API', signal });
 }
 
 export async function fetchSchedulerHandoff(signal?: AbortSignal): Promise<SchedulerHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/scheduler-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal scheduler handoff API returned ${response.status}`);
-  }
-  return response.json() as Promise<SchedulerHandoffResponse>;
+  return getJson<SchedulerHandoffResponse>('/api/scheduler-handoff', { errorLabel: 'Signal scheduler handoff API', signal });
 }
 
 export async function fetchProductionPlan(signal?: AbortSignal): Promise<ProductionPlanResponse> {
-  const response = await fetch(`${localApiUrl}/api/production-plan`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal production plan API returned ${response.status}`);
-  }
-  return response.json() as Promise<ProductionPlanResponse>;
+  return getJson<ProductionPlanResponse>('/api/production-plan', { errorLabel: 'Signal production plan API', signal });
 }
 
 export async function fetchProductionEnv(signal?: AbortSignal): Promise<ProductionEnvResponse> {
-  const response = await fetch(`${localApiUrl}/api/production-env`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal production env API returned ${response.status}`);
-  }
-  return response.json() as Promise<ProductionEnvResponse>;
+  return getJson<ProductionEnvResponse>('/api/production-env', { errorLabel: 'Signal production env API', signal });
 }
 
 export async function fetchLifecyclePlaybook(signal?: AbortSignal): Promise<LifecyclePlaybookResponse> {
-  const response = await fetch(`${localApiUrl}/api/lifecycle-playbook`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal lifecycle playbook API returned ${response.status}`);
-  }
-  return response.json() as Promise<LifecyclePlaybookResponse>;
+  return getJson<LifecyclePlaybookResponse>('/api/lifecycle-playbook', { errorLabel: 'Signal lifecycle playbook API', signal });
 }
 
 export async function fetchPaymentLifecycle(signal?: AbortSignal): Promise<PaymentLifecycleAuditResponse> {
-  const response = await fetch(`${localApiUrl}/api/payment-lifecycle`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal payment lifecycle API returned ${response.status}`);
-  }
-  return response.json() as Promise<PaymentLifecycleAuditResponse>;
+  return getJson<PaymentLifecycleAuditResponse>('/api/payment-lifecycle', { errorLabel: 'Signal payment lifecycle API', signal });
 }
 
 export async function fetchPaymentHandoff(signal?: AbortSignal): Promise<PaymentHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/payment-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal payment handoff API returned ${response.status}`);
-  }
-  return response.json() as Promise<PaymentHandoffResponse>;
+  return getJson<PaymentHandoffResponse>('/api/payment-handoff', { errorLabel: 'Signal payment handoff API', signal });
 }
 
 export async function fetchEmailHandoff(signal?: AbortSignal): Promise<EmailHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/email-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal email handoff API returned ${response.status}`);
-  }
-  return response.json() as Promise<EmailHandoffResponse>;
+  return getJson<EmailHandoffResponse>('/api/email-handoff', { errorLabel: 'Signal email handoff API', signal });
 }
 
 export async function fetchQaAnswers(signal?: AbortSignal): Promise<QaAnswersResponse> {
-  const response = await fetch(`${localApiUrl}/api/qa-answers`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal QA answers API returned ${response.status}`);
-  }
-  return response.json() as Promise<QaAnswersResponse>;
+  return getJson<QaAnswersResponse>('/api/qa-answers', { errorLabel: 'Signal QA answers API', signal });
 }
 
 export async function fetchCompletionAudit(signal?: AbortSignal): Promise<CompletionAuditResponse> {
-  const response = await fetch(`${localApiUrl}/api/completion-audit`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal completion audit API returned ${response.status}`);
-  }
-  return response.json() as Promise<CompletionAuditResponse>;
+  return getJson<CompletionAuditResponse>('/api/completion-audit', { errorLabel: 'Signal completion audit API', signal });
 }
 
 export async function fetchAgentHandoff(signal?: AbortSignal): Promise<LocalAgentHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/agent-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal agent handoff API returned ${response.status}`);
-  }
-  return response.json() as Promise<LocalAgentHandoffResponse>;
+  return getJson<LocalAgentHandoffResponse>('/api/agent-handoff', { errorLabel: 'Signal agent handoff API', signal });
 }
 
 export async function fetchBackendHandoff(signal?: AbortSignal): Promise<BackendHandoffResponse> {
-  const response = await fetch(`${localApiUrl}/api/backend-handoff`, { credentials: localApiCredentials, headers: localActorHeaders(), signal });
-  if (!response.ok) {
-    throw new Error(`Signal backend handoff API returned ${response.status}`);
-  }
-  return response.json() as Promise<BackendHandoffResponse>;
+  return getJson<BackendHandoffResponse>('/api/backend-handoff', { errorLabel: 'Signal backend handoff API', signal });
 }
 
 export async function fetchProviderSandbox(signal?: AbortSignal): Promise<ProviderSandboxResponse> {
-  const response = await fetch(`${localApiUrl}/api/integrations/sandbox`, { credentials: localApiCredentials, headers: localActorHeaders(), method: 'POST', signal });
-  if (!response.ok) {
-    throw new Error(`Signal sandbox validation API returned ${response.status}`);
-  }
-  return response.json() as Promise<ProviderSandboxResponse>;
-}
-
-async function readJsonPayload(response: Response) {
-  return response.json().catch(() => null);
+  return getJson<ProviderSandboxResponse>('/api/integrations/sandbox', { errorLabel: 'Signal sandbox validation API', method: 'POST', signal });
 }
 
 export async function runProviderScheduledValidation(force = false, signal?: AbortSignal): Promise<ProviderScheduledValidationResponse> {
-  const response = await fetch(`${localApiUrl}/api/integrations/scheduled`, {
-    body: JSON.stringify({ force }),
-    credentials: localApiCredentials,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    method: 'POST',
+  return getJson<ProviderScheduledValidationResponse>('/api/integrations/scheduled', {
+    body: { force },
+    errorLabel: 'Signal scheduled validation API',
     signal,
   });
-  const payload = await readJsonPayload(response);
-  if (!response.ok) {
-    throw new Error((payload as { error?: string } | null)?.error ?? `Signal scheduled validation API returned ${response.status}`);
-  }
-  return payload as ProviderScheduledValidationResponse;
 }
 
 export async function mutateSignalState(action: SignalMutationAction, args: Record<string, unknown>, actorUserId?: string): Promise<SignalMutationResult> {
-  const response = await fetch(`${localApiUrl}/api/mutations`, {
-    body: JSON.stringify({ action, actorUserId, args }),
-    credentials: localApiCredentials,
-    headers: {
-      'X-Signal-Actor': actorUserId ?? localApiActorUserId,
-      'Content-Type': 'application/json',
-    },
-    method: 'POST',
+  return getJson<SignalMutationResult>('/api/mutations', {
+    body: { action, actorUserId, args },
+    errorLabel: 'Signal mutation',
+    headers: { 'X-Signal-Actor': actorUserId ?? localApiActorUserId },
   });
-
-  const payload = await readJsonPayload(response);
-  if (!response.ok) {
-    throw new Error((payload as { error?: string } | null)?.error ?? `Signal mutation failed with ${response.status}`);
-  }
-
-  return payload as SignalMutationResult;
 }
 
 export async function registerSignalWorkspace(args: Record<string, unknown>): Promise<SignalMutationResult> {
-  const response = await fetch(`${localApiUrl}/api/registration`, {
-    body: JSON.stringify(args),
-    credentials: localApiCredentials,
-    headers: {
-      ...localActorHeaders(),
-      'Content-Type': 'application/json',
-    },
-    method: 'POST',
+  return getJson<SignalMutationResult>('/api/registration', {
+    body: args,
+    errorLabel: 'Signal registration',
   });
-
-  const payload = await readJsonPayload(response);
-  if (!response.ok) {
-    throw new Error((payload as { error?: string } | null)?.error ?? `Signal registration failed with ${response.status}`);
-  }
-
-  return payload as SignalMutationResult;
 }
 
 export async function claimSignalInvite(args: Record<string, unknown>): Promise<SignalMutationResult> {
-  const response = await fetch(`${localApiUrl}/api/invites/claim`, {
-    body: JSON.stringify(args),
-    credentials: localApiCredentials,
-    headers: {
-      ...localActorHeaders(),
-      'Content-Type': 'application/json',
-    },
-    method: 'POST',
+  return getJson<SignalMutationResult>('/api/invites/claim', {
+    body: args,
+    errorLabel: 'Signal invite claim',
   });
-
-  const payload = await readJsonPayload(response);
-  if (!response.ok) {
-    throw new Error((payload as { error?: string } | null)?.error ?? `Signal invite claim failed with ${response.status}`);
-  }
-
-  return payload as SignalMutationResult;
 }
 
 export async function switchSignalSession(userId: string): Promise<SignalSessionResult> {
-  const response = await fetch(`${localApiUrl}/api/session`, {
-    body: JSON.stringify({ userId }),
-    credentials: localApiCredentials,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    method: 'POST',
+  return getJson<SignalSessionResult>('/api/session', {
+    body: { userId },
+    errorLabel: 'Signal session switch',
+    includeActorHeader: false,
   });
-
-  const payload = await readJsonPayload(response);
-  if (!response.ok) {
-    throw new Error((payload as { error?: string } | null)?.error ?? `Signal session switch failed with ${response.status}`);
-  }
-
-  return payload as SignalSessionResult;
 }
 
 export function formatCurrency(cents: number) {
