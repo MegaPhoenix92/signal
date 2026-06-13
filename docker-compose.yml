@@ -31,10 +31,13 @@ services:
 
   scheduler:
     build: .
-    command: ["node", "scripts/signal-scheduler.mjs", "--once"]
+    command: ["npm", "run", "scheduler"]
     environment:
-      SIGNAL_ADMIN_STATE: /app/data/signal-local.json
-      SIGNAL_SCHEDULER_ONCE: "true"
+      SIGNAL_BACKEND_MODE: external-service
+      SIGNAL_JOB_SCHEDULER: signal-scheduler
+      SIGNAL_OPERATIONS_ALERT_CHANNEL: compose-ops
+      SIGNAL_PROVIDER_VALIDATION_SCHEDULER: signal-scheduler
+      SIGNAL_SCHEDULER_LOCK_POLICY: file-lock
       SIGNAL_STATE_SERVICE_URL: http://state-service:8791/state
       SIGNAL_STATE_SERVICE_TOKEN: local-compose-state-token
     volumes:

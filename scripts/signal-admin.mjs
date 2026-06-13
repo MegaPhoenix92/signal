@@ -1381,7 +1381,7 @@ async function listSchedulerHandoff() {
   const backend = backendReadiness({ env, statePath });
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
-  const launchGate = launchGateReport(state, { backend, provider, readiness });
+  const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
   const operations = operationsHealthReport(state, { backend, statePath });
   const productionDrill = productionOperationsDrillReport(state, {
     backend,
@@ -1467,7 +1467,7 @@ async function listCompletionAudit() {
   const operations = operationsHealthReport(state, { backend, statePath });
   const lifecyclePlaybook = lifecyclePlaybookReport(state, { backend, statePath });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
-  const launchGate = launchGateReport(state, { backend, provider, readiness });
+  const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
   const paymentLifecycle = paymentLifecycleAuditReport(state, { backend, provider, providerLaunch, statePath });
   const emailHandoff = emailHandoffReport(state, {
     backend,
@@ -1576,7 +1576,7 @@ async function listAgentHandoff() {
   const backend = backendReadiness({ env, statePath });
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
-  const launchGate = launchGateReport(state, { backend, provider, readiness });
+  const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
   const operations = operationsHealthReport(state, { backend, statePath });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
   const productionPlan = productionSetupPlanReport(state, {
@@ -1783,7 +1783,7 @@ async function listEmailHandoff() {
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
-  const launchGate = launchGateReport(state, { backend, provider, readiness });
+  const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
   const operations = operationsHealthReport(state, { backend, statePath });
   const lifecyclePlaybook = lifecyclePlaybookReport(state, { backend, statePath });
   const handoff = emailHandoffReport(state, {
@@ -1861,7 +1861,7 @@ async function listPaymentHandoff() {
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
-  const launchGate = launchGateReport(state, { backend, provider, readiness });
+  const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
   const payment = paymentLifecycleAuditReport(state, { backend, provider, providerLaunch, statePath });
   const handoff = paymentHandoffReport(state, {
     backend,
@@ -1903,7 +1903,7 @@ async function listProductionDrill() {
   const backend = backendReadiness({ env, statePath: resolveStatePath() });
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
-  const launchGate = launchGateReport(state, { backend, provider, readiness });
+  const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
   const operations = operationsHealthReport(state, { backend, statePath: resolveStatePath() });
   const drill = productionOperationsDrillReport(state, { backend, env, launchGate, operations, provider, readiness });
   const rows = drill.rows.map((row) => ({
@@ -1934,7 +1934,7 @@ async function listProductionEnv() {
   const backend = backendReadiness({ env, statePath: resolveStatePath() });
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
-  const launchGate = launchGateReport(state, { backend, provider, readiness });
+  const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
   const operations = operationsHealthReport(state, { backend, statePath: resolveStatePath() });
   const drill = productionOperationsDrillReport(state, { backend, env, launchGate, operations, provider, readiness });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
@@ -1985,7 +1985,7 @@ async function listProductionPlan() {
   const backend = backendReadiness({ env, statePath: resolveStatePath() });
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
-  const launchGate = launchGateReport(state, { backend, provider, readiness });
+  const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
   const operations = operationsHealthReport(state, { backend, statePath: resolveStatePath() });
   const drill = productionOperationsDrillReport(state, { backend, env, launchGate, operations, provider, readiness });
   const providerLaunch = providerLaunchMatrixReport(state, { backend, env, provider });
@@ -2136,7 +2136,7 @@ async function listLaunchGate() {
   const backend = backendReadiness({ env, statePath: resolveStatePath() });
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
-  const launchGate = launchGateReport(state, { backend, provider, readiness });
+  const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
   const rows = launchGate.gates.map((gate) => ({
     id: gate.id,
     status: gate.status,
@@ -2213,6 +2213,11 @@ function launchEvidencePackage({ backend, envSource, launchGate, provider, readi
     sourceCommand: 'signal-admin launch-gate package',
     envSource,
     launchGate: safeLaunchGate,
+    freshness: launchGate.freshness ?? {
+      applies: false,
+      blockers: [],
+      policy: null,
+    },
     productReadiness: {
       generatedAt: readiness.generatedAt,
       productionReady: readiness.productionReady,
@@ -2274,6 +2279,7 @@ function launchEvidencePackage({ backend, envSource, launchGate, provider, readi
       paymentEvents: summary.paymentEvents,
       providerValidationRuns,
       providerValidationSchedules,
+      schedulerHeartbeat: state.schedulerHeartbeat ?? null,
       subscriptions: summary.subscriptions,
       tenants: summary.tenants,
       users: summary.users,
@@ -2306,7 +2312,7 @@ async function writeLaunchGatePackage() {
   const backend = backendReadiness({ env, statePath: resolveStatePath() });
   const provider = providerReadiness(env);
   const readiness = productReadinessReport(state, { backend, provider });
-  const launchGate = launchGateReport(state, { backend, provider, readiness });
+  const launchGate = launchGateReport(state, { backend, env, provider, readiness, statePath: resolveStatePath() });
   const artifact = launchEvidencePackage({ backend, envSource, launchGate, provider, readiness, state });
   const resolvedOutputPath = await writeJsonFile(outputPath, artifact, 'launch-gate package <output.json>');
   emit(
@@ -2422,6 +2428,26 @@ function validateLaunchEvidencePackage(artifact = {}) {
   if (!artifact.provider?.summary || !Array.isArray(artifact.provider?.providers)) {
     issues.push('provider summary and providers are required');
   }
+  if (!artifact.freshness?.policy || !Array.isArray(artifact.freshness?.blockers)) {
+    issues.push('freshness policy and blockers are required');
+  }
+  if (artifact.freshness?.blockers?.length) {
+    issues.push(`freshness blockers present: ${artifact.freshness.blockers.map((blocker) => blocker.id ?? blocker.message).slice(0, 6).join(', ')}`);
+  }
+  const timestampFields = [
+    ['generatedAt', artifact.generatedAt],
+    ...((artifact.stateEvidence?.providerValidationRuns ?? []).map((run, index) => [`stateEvidence.providerValidationRuns[${index}].recordedAt`, run.recordedAt])),
+    ...((artifact.stateEvidence?.providerValidationSchedules ?? [])
+      .filter((schedule) => schedule.nextRunAt)
+      .map((schedule, index) => [`stateEvidence.providerValidationSchedules[${index}].nextRunAt`, schedule.nextRunAt])),
+    ['freshness.sandboxEvidence.recordedAt', artifact.freshness?.sandboxEvidence?.recordedAt],
+    ['stateEvidence.schedulerHeartbeat.recordedAt', artifact.stateEvidence?.schedulerHeartbeat?.recordedAt],
+  ].filter(([, value]) => value !== null && value !== undefined);
+  timestampFields.forEach(([field, value]) => {
+    if (!Number.isFinite(Date.parse(value))) {
+      issues.push(`${field} must be an ISO timestamp`);
+    }
+  });
   const secretPaths = secretValuePaths(artifact);
   if (secretPaths.length) {
     issues.push(`credential-looking values found at ${secretPaths.slice(0, 8).join(', ')}`);
