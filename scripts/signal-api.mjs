@@ -1554,6 +1554,52 @@ const server = http.createServer((req, res) => {
   });
 });
 
+function closeServer(instance) {
+  return new Promise((resolve, reject) => {
+    instance.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+const drainTimeoutMs = positiveInteger(process.env.SIGNAL_API_DRAIN_TIMEOUT_MS, 10_000);
+let shuttingDown = false;
+
+async function shutdown(signal) {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  logger.info('shutdown', { drainTimeoutMs, signal });
+  const forceExitTimer = setTimeout(() => {
+    logger.warn('shutdown_forced', { drainTimeoutMs, signal });
+    process.exit(1);
+  }, drainTimeoutMs);
+  try {
+    await closeServer(server);
+    clearTimeout(forceExitTimer);
+    process.exit(0);
+  } catch (error) {
+    logger.error('shutdown_error', {
+      error: error instanceof Error ? error.message : String(error),
+      signal,
+    });
+    clearTimeout(forceExitTimer);
+    process.exit(1);
+  }
+}
+
+process.on('SIGTERM', () => {
+  shutdown('SIGTERM');
+});
+process.on('SIGINT', () => {
+  shutdown('SIGINT');
+});
+
 server.listen(port, host, async () => {
   logger.info('listening', { host, port, statePath });
   try {

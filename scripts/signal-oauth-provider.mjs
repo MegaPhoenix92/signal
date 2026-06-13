@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import {
+  providerFetch,
+} from './signal-provider-fetch.mjs';
 
 export class OAuthProviderError extends Error {
   constructor(message, { code = 'OAUTH_PROVIDER_ERROR', status = 400, details = {} } = {}) {
@@ -218,13 +221,13 @@ export async function exchangeOAuthCodeForTokens({
     grant_type: 'authorization_code',
     redirect_uri: callbackUri,
   });
-  const response = await fetchImpl(providerTokenEndpoint(sourceProvider, env), {
+  const response = await providerFetch(providerTokenEndpoint(sourceProvider, env), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body,
-  });
+  }, { env, fetchImpl });
   const text = await response.text();
   const parsed = parseJsonResponse(text, sourceProvider);
 
@@ -284,13 +287,13 @@ export async function refreshOAuthTokens({
     grant_type: 'refresh_token',
     refresh_token: token,
   });
-  const response = await fetchImpl(providerTokenEndpoint(sourceProvider, env), {
+  const response = await providerFetch(providerTokenEndpoint(sourceProvider, env), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body,
-  });
+  }, { env, fetchImpl });
   const text = await response.text();
   const parsed = parseJsonResponse(text, sourceProvider);
 

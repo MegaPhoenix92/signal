@@ -10,17 +10,21 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   bootstrapState,
+  enforceStateRetention,
+  jobClaimable,
   loadState,
   providerValidationSchedulesDue,
   requeueDeadLetterJob,
   requeueDeadLetterJobs,
   runJobs,
   saveState,
+  stateCollectionLimits,
 } from './signal-state.mjs';
 import {
   acquirePostgresSchedulerLock,
   acquireSchedulerLock,
   createSchedulerConfig,
+  refreshSchedulerLock,
   runSchedulerOnce,
   schedulerDueSummary,
 } from './signal-scheduler.mjs';
@@ -173,24 +177,29 @@ test('Signal scheduler CLI emits JSON dry-run output', async (t) => {
   assert.equal(result.queues[0].queue, 'provider_validation');
 });
 
-test('Signal scheduler due summary reports waiting jobs', () => {
+test('Signal scheduler due summary reports waiting jobs and excludes active leases', () => {
   const now = Date.parse('2026-06-04T12:00:00.000Z');
+  const leaseMs = 300_000;
   const state = {
     jobs: [
       { id: 'job_due', queue: 'email_sync', status: 'queued', nextRunAt: null },
       { id: 'job_waiting', queue: 'email_sync', status: 'queued', nextRunAt: '2026-06-04T12:05:00.000Z' },
       { id: 'job_backoff', queue: 'email_sync', status: 'queued', nextAttemptAt: '2026-06-04T12:10:00.000Z' },
       { id: 'job_failed', queue: 'email_sync', status: 'failed', nextRunAt: null },
+      { id: 'job_running', queue: 'email_sync', status: 'running', leaseExpiresAt: '2026-06-04T12:30:00.000Z' },
+      { id: 'job_stale', queue: 'email_sync', status: 'running', leaseExpiresAt: '2026-06-04T11:00:00.000Z' },
     ],
   };
-  const summary = schedulerDueSummary(state, { limit: 5, now, queues: ['email_sync'] });
+  const summary = schedulerDueSummary(state, { leaseMs, limit: 5, now, queues: ['email_sync'] });
   assert.deepEqual(summary, [{
-    due: 1,
+    due: 2,
     nextRunAt: '2026-06-04T12:05:00.000Z',
     queue: 'email_sync',
-    sampledJobIds: ['job_due'],
-    waiting: 2,
+    sampledJobIds: ['job_due', 'job_stale'],
+    waiting: 4,
   }]);
+  assert.equal(jobClaimable(state.jobs[4], now, leaseMs), false);
+  assert.equal(jobClaimable(state.jobs[5], now, leaseMs), true);
 });
 
 test('Signal scheduler applies backoff, dead-letters exhausted jobs, and requeues DLQ entries', async (t) => {
@@ -260,6 +269,49 @@ test('Signal scheduler applies backoff, dead-letters exhausted jobs, and requeue
   const bulkState = await loadState({ statePath });
   assert.equal(bulkState.deadLetter.length, 0);
   assert.equal(bulkState.jobs.find((job) => job.id === 'job_bulk_dlq')?.status, 'queued');
+});
+
+test('Signal scheduler lock refresh keeps a live daemon lock fresh', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-refresh-'));
+  const lockFile = path.join(tempDir, 'scheduler.lock');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  const config = createSchedulerConfig({
+    argv: ['--once', '--lock-file', lockFile],
+    env: { SIGNAL_ADMIN_STATE: '/tmp/signal-state.json', SIGNAL_SCHEDULER_LOCK_STALE_MS: '1000' },
+  });
+  const lock = await acquireSchedulerLock(config);
+  assert.equal(lock.acquired, true);
+  const before = await fs.stat(lockFile);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await refreshSchedulerLock(lock, config);
+  const after = await fs.stat(lockFile);
+  assert(after.mtimeMs > before.mtimeMs, 'refreshSchedulerLock should update lock mtime');
+  await lock.release();
+});
+
+test('Signal state retention trims bounded audit and payment collections', () => {
+  const state = {
+    auditEvents: [{ id: 'a1' }, { id: 'a2' }, { id: 'a3' }],
+    paymentEvents: [{ id: 'p1' }, { id: 'p2' }],
+    jobs: [
+      { id: 'job_active', status: 'queued' },
+      { id: 'job_old_1', status: 'succeeded' },
+      { id: 'job_old_2', status: 'succeeded' },
+      { id: 'job_old_3', status: 'succeeded' },
+    ],
+  };
+  enforceStateRetention(state, {
+    SIGNAL_STATE_AUDIT_EVENT_MAX: '2',
+    SIGNAL_STATE_PAYMENT_EVENT_MAX: '1',
+    SIGNAL_STATE_JOB_MAX: '2',
+  });
+  assert.deepEqual(state.auditEvents.map((event) => event.id), ['a2', 'a3']);
+  assert.deepEqual(state.paymentEvents.map((event) => event.id), ['p2']);
+  assert.deepEqual(state.jobs.map((job) => job.id), ['job_active', 'job_old_3']);
+  assert.equal(stateCollectionLimits({ SIGNAL_STATE_AUDIT_EVENT_MAX: '10' }).auditEvents, 10);
 });
 
 test('Signal scheduler can coordinate with a Postgres advisory lock', async () => {

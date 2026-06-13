@@ -285,6 +285,9 @@ class FakePgPool {
       });
       return { rowCount: 1, rows: [] };
     }
+    if (normalized.startsWith('DELETE FROM') && normalized.includes('_backups')) {
+      return { rowCount: 0, rows: [] };
+    }
     if (normalized.startsWith('INSERT INTO "signal_schema_migrations"')) {
       this.migrations.push({
         applied_at: new Date('2026-06-04T12:00:00.000Z'),
@@ -837,4 +840,35 @@ test('Signal API preserves concurrent mutations through external state service',
     && (event.targetId === tenantARecord.id || event.targetId === tenantBRecord.id));
   assert.equal(createAudits.length, 2, 'both concurrent tenant creates should append audit events');
   assert.equal(createAudits.every((event) => event.actor === 'usr_admin'), true);
+});
+
+test('Signal state service prunes file backups older than retention days', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-state-service-backup-retention-'));
+  const stateFile = path.join(tempDir, 'state.json');
+  const backupDir = path.join(tempDir, 'backups');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await fs.mkdir(backupDir, { recursive: true });
+  await fs.writeFile(stateFile, '{"meta":{"version":1}}\n');
+  const staleBackup = path.join(backupDir, 'state-stale.json');
+  await fs.writeFile(staleBackup, '{"meta":{"version":0}}\n');
+  const staleDate = new Date(Date.now() - (40 * 24 * 60 * 60 * 1000));
+  await fs.utimes(staleBackup, staleDate, staleDate);
+
+  const config = createStateServiceConfig({
+    SIGNAL_STATE_SERVICE_ALLOW_UNAUTHENTICATED: 'true',
+    SIGNAL_STATE_SERVICE_BACKUP_DIR: backupDir,
+    SIGNAL_STATE_SERVICE_FILE: stateFile,
+    SIGNAL_STATE_BACKUP_RETENTION_DAYS: '30',
+  });
+  const store = await createStateStore(config);
+  await store.init();
+  const meta = await store.meta();
+  await store.write('{"meta":{"version":2}}\n', { ifMatch: `"${meta.digest}"` });
+
+  const backups = await fs.readdir(backupDir);
+  assert.equal(backups.includes('state-stale.json'), false);
+  assert(backups.some((entry) => entry.endsWith('.json')), 'state service should retain a recent backup snapshot');
 });

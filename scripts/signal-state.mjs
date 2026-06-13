@@ -470,6 +470,7 @@ export function normalizeState(state) {
   ensureDefaultBillingSessions(state);
   ensureDefaultJobs(state);
   state.lifecycleNotices = deriveLifecycleNotices(state);
+  enforceStateRetention(state);
   return state;
 }
 
@@ -7031,6 +7032,60 @@ function expiresInIso(milliseconds) {
   return new Date(Date.now() + milliseconds).toISOString();
 }
 
+function positiveCollectionLimit(value, fallback) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric < 1) {
+    return fallback;
+  }
+  return numeric;
+}
+
+export function stateCollectionLimits(env = process.env) {
+  return {
+    auditEvents: positiveCollectionLimit(env.SIGNAL_STATE_AUDIT_EVENT_MAX, 5000),
+    jobs: positiveCollectionLimit(env.SIGNAL_STATE_JOB_MAX, 1000),
+    paymentEvents: positiveCollectionLimit(env.SIGNAL_STATE_PAYMENT_EVENT_MAX, 2000),
+  };
+}
+
+function trimAuditEvents(state, max, env = process.env) {
+  const limit = max ?? stateCollectionLimits(env).auditEvents;
+  if ((state.auditEvents?.length ?? 0) <= limit) {
+    return;
+  }
+  state.auditEvents = state.auditEvents.slice(-limit);
+}
+
+function trimPaymentEvents(state, max, env = process.env) {
+  const limit = max ?? stateCollectionLimits(env).paymentEvents;
+  if ((state.paymentEvents?.length ?? 0) <= limit) {
+    return;
+  }
+  state.paymentEvents = state.paymentEvents.slice(-limit);
+}
+
+function trimJobs(state, max, env = process.env) {
+  const limit = max ?? stateCollectionLimits(env).jobs;
+  const jobs = state.jobs ?? [];
+  if (jobs.length <= limit) {
+    return;
+  }
+  const active = jobs.filter((job) => ['queued', 'running'].includes(job.status));
+  const terminal = jobs.filter((job) => !['queued', 'running'].includes(job.status));
+  const terminalBudget = Math.max(0, limit - active.length);
+  state.jobs = [...active, ...terminal.slice(-terminalBudget)];
+}
+
+export function enforceStateRetention(state, env = process.env) {
+  trimAuditEvents(state, undefined, env);
+  trimPaymentEvents(state, undefined, env);
+  trimJobs(state, undefined, env);
+  return state;
+}
+
 function appendPaymentEvent(state, {
   tenantId,
   provider = 'local_test',
@@ -7079,6 +7134,7 @@ function appendPaymentEvent(state, {
     createdAt: nowIso(),
   };
   state.paymentEvents.push(event);
+  trimPaymentEvents(state);
   return event;
 }
 
@@ -7382,6 +7438,7 @@ function appendJob(state, {
     job.sourceMessagesUpserted = sourceMessagesUpserted;
   }
   state.jobs.push(job);
+  trimJobs(state);
   return job;
 }
 
@@ -9934,6 +9991,7 @@ function appendAudit(state, action, targetId, message, actor) {
     actor: actor.id,
     actorRole: actor.role,
   });
+  trimAuditEvents(state);
 }
 
 export async function recordWebhookIngestOutcome({
@@ -14654,6 +14712,47 @@ function jobRunLimit(limit) {
   return numericLimit;
 }
 
+export function jobLeaseMs(env = process.env) {
+  const value = env.SIGNAL_JOB_LEASE_MS;
+  if (value === undefined || value === null || value === '') {
+    return 300_000;
+  }
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric < 1) {
+    return 300_000;
+  }
+  return numeric;
+}
+
+export function jobClaimable(job, now = Date.now(), leaseMs = jobLeaseMs()) {
+  if (job.status === 'queued') {
+    return jobIsDue(job, now);
+  }
+  if (job.status === 'running') {
+    const leaseExpiresMs = Date.parse(job.leaseExpiresAt ?? '');
+    if (Number.isFinite(leaseExpiresMs) && leaseExpiresMs <= now) {
+      return jobIsDue(job, now);
+    }
+  }
+  return false;
+}
+
+function claimJob(job, { leaseMs, now = Date.now(), workerId } = {}) {
+  job.status = 'running';
+  job.claimedBy = workerId;
+  job.runningSince = new Date(now).toISOString();
+  job.leaseExpiresAt = new Date(now + leaseMs).toISOString();
+  job.attempts = (job.attempts ?? 0) + 1;
+  job.lastRunAt = nowIso();
+  job.nextAttemptAt = null;
+}
+
+function clearJobLease(job) {
+  delete job.claimedBy;
+  delete job.runningSince;
+  delete job.leaseExpiresAt;
+}
+
 function jobIsDue(job, now = Date.now()) {
   if (job.nextAttemptAt) {
     const nextAttemptMs = Date.parse(job.nextAttemptAt);
@@ -14710,32 +14809,35 @@ export async function runJobs({ jobId, queue, limit } = {}, options = {}) {
     async (state, actor) => {
       requirePlatformOperator(actor, 'jobs.run');
       const maxJobs = jobRunLimit(limit);
-      const runnableStatuses = ['queued', 'running'];
+      const leaseMs = options.jobLeaseMs ?? jobLeaseMs(options.env);
+      const workerId = options.workerId ?? `worker_${process.pid}`;
+      const now = Date.now();
       let jobs;
       if (jobId) {
         const job = findById(state.jobs ?? [], jobId, 'Job');
-        if (!runnableStatuses.includes(job.status)) {
+        if (!['queued', 'running'].includes(job.status)) {
           throw new SignalStateError(`Job is not runnable: ${job.id}`, {
             code: 'JOB_NOT_RUNNABLE',
             status: 409,
-            details: { jobId: job.id, status: job.status },
+            details: {
+              claimedBy: job.claimedBy ?? null,
+              jobId: job.id,
+              leaseExpiresAt: job.leaseExpiresAt ?? null,
+              status: job.status,
+            },
           });
         }
-        jobs = jobIsDue(job) ? [job] : [];
+        jobs = jobClaimable(job, now, leaseMs) ? [job] : [];
       } else {
         jobs = (state.jobs ?? [])
-          .filter((job) => runnableStatuses.includes(job.status) && (!queue || job.queue === queue))
-          .filter((job) => jobIsDue(job))
+          .filter((job) => (!queue || job.queue === queue) && jobClaimable(job, now, leaseMs))
           .slice(0, maxJobs);
       }
 
       const outcomes = [];
       for (const job of jobs) {
         const previousStatus = job.status;
-        job.status = 'running';
-        job.attempts = (job.attempts ?? 0) + 1;
-        job.lastRunAt = nowIso();
-        job.nextAttemptAt = null;
+        claimJob(job, { leaseMs, now, workerId });
         try {
           const result = await runLocalJobInState(state, actor, job, options);
           job.status = result.status ?? 'succeeded';
@@ -14783,6 +14885,7 @@ export async function runJobs({ jobId, queue, limit } = {}, options = {}) {
           if (result.sourceMessagesUpserted !== undefined) {
             job.sourceMessagesUpserted = result.sourceMessagesUpserted;
           }
+          clearJobLease(job);
           outcomes.push({
             jobId: job.id,
             previousStatus,
@@ -14809,6 +14912,7 @@ export async function runJobs({ jobId, queue, limit } = {}, options = {}) {
             job.nextAttemptAt = nextAttemptAt;
             job.nextRunAt = nextAttemptAt;
           }
+          clearJobLease(job);
           outcomes.push({
             code: signalError.code,
             deadLetterId: deadLetterJob?.deadLetterId ?? null,

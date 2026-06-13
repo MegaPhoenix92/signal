@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import {
+  providerFetch,
+} from './signal-provider-fetch.mjs';
 
 export class ProviderWatchError extends Error {
   constructor(message, { code = 'PROVIDER_WATCH_ERROR', status = 400, details = {} } = {}) {
@@ -200,14 +203,14 @@ export async function createProviderWatch({ mailbox, env = process.env, fetchImp
     });
   }
 
-  const response = await fetchImpl(request.endpoint, {
+  const response = await providerFetch(request.endpoint, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(request.body),
-  });
+  }, { env, fetchImpl });
   const text = await response.text();
   let parsed;
   try {

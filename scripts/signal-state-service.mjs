@@ -60,11 +60,16 @@ export function createStateServiceConfig(env = process.env) {
   if (backend === 'postgres' && !databaseUrl) {
     throw new Error('DATABASE_URL or SIGNAL_STATE_SERVICE_DATABASE_URL is required when SIGNAL_STATE_SERVICE_BACKEND=postgres.');
   }
+  const backupRetentionDays = Number(env.SIGNAL_STATE_BACKUP_RETENTION_DAYS ?? 30);
+  if (!Number.isInteger(backupRetentionDays) || backupRetentionDays < 0) {
+    throw new Error('SIGNAL_STATE_BACKUP_RETENTION_DAYS must be a non-negative integer.');
+  }
 
   return {
     allowUnauthenticated,
     backend,
     backupDir,
+    backupRetentionDays,
     backupTable: `${tablePrefix}_backups`,
     databaseUrl,
     host,
@@ -369,6 +374,30 @@ function timestamp(value) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
+async function pruneFileBackups(backupDir, retentionDays) {
+  if (!retentionDays || retentionDays <= 0) {
+    return;
+  }
+  const cutoffMs = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
+  let entries = [];
+  try {
+    entries = await fs.readdir(backupDir);
+  } catch {
+    return;
+  }
+  await Promise.all(entries.filter((entry) => entry.endsWith('.json')).map(async (entry) => {
+    const filePath = path.join(backupDir, entry);
+    try {
+      const stat = await fs.stat(filePath);
+      if (stat.mtimeMs < cutoffMs) {
+        await fs.unlink(filePath);
+      }
+    } catch {
+      // Best-effort retention cleanup.
+    }
+  }));
+}
+
 function assertIfMatchForWrite(currentMeta, ifMatch) {
   if (!currentMeta.exists) {
     return;
@@ -440,6 +469,7 @@ export class FileStateStore {
       if (currentMeta.exists) {
         const backupStamp = new Date().toISOString().replace(/[:.]/g, '-');
         await fs.copyFile(this.config.stateFile, path.join(this.config.backupDir, `state-${backupStamp}.json`));
+        await pruneFileBackups(this.config.backupDir, this.config.backupRetentionDays);
       }
       const tempPath = `${this.config.stateFile}.${process.pid}.${Date.now()}.tmp`;
       try {
@@ -591,6 +621,14 @@ export class PostgresStateStore {
             previous.rows[0].body_digest,
           ],
         );
+        if (this.config.backupRetentionDays > 0) {
+          await client.query(
+            `DELETE FROM ${this.backupTable}
+             WHERE state_id = $1
+               AND backed_up_at < now() - ($2::text || ' days')::interval`,
+            [this.config.stateId, String(this.config.backupRetentionDays)],
+          );
+        }
       }
       await client.query(
         `INSERT INTO ${this.stateTable} (id, body, revision, body_digest, updated_at)

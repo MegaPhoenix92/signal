@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import {
+  providerFetch,
+} from './signal-provider-fetch.mjs';
 
 export const SENDGRID_MAIL_SEND_URL = 'https://api.sendgrid.com/v3/mail/send';
 export const SENDGRID_WEBHOOK_TOLERANCE_SECONDS = 300;
@@ -347,7 +350,7 @@ export async function deliverEmailMessage(message, {
     ? sendGridDeliveryPayload(message, env)
     : deliveryPayload(message, env);
   const rawBody = JSON.stringify(payload);
-  const response = await fetchImpl(endpoint, {
+  const response = await providerFetch(endpoint, {
     body: rawBody,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -355,7 +358,7 @@ export async function deliverEmailMessage(message, {
       'Idempotency-Key': `signal-email-${message.id}`,
     },
     method: 'POST',
-  });
+  }, { env, fetchImpl });
   const responseText = await response.text();
   let responsePayload = null;
   if (responseText) {
