@@ -15,7 +15,12 @@ import {
   issueSessionToken,
   loadState,
   registerTenantWorkspace,
+  saveState,
+  scopeStateForActor,
+  syncAccountState,
+  syncEmailState,
   syncPaymentState,
+  syncSignalState,
 } from './signal-state.mjs';
 import { parseSignedEmailWebhook, signEmailWebhookPayload, signSendGridWebhookPayload, verifySendGridWebhookSignature } from './signal-email-provider.mjs';
 import { signStripeWebhookPayload } from './signal-payment-provider.mjs';
@@ -340,6 +345,115 @@ test('live-provider payment sync records provider/local drift as event and lifec
   const state = await loadState({ statePath });
   assert(state.paymentEvents.some((event) => event.type === 'billing.drift.detected' && event.providerStatus === 'past_due'), 'live-provider payment sync should record drift event');
   assert(state.lifecycleNotices.some((notice) => notice.trigger === 'billing_drift_detected' && notice.status === 'open'), 'live-provider payment sync drift should create an open lifecycle notice');
+});
+
+test('email, signal, and account provider parity syncs record proof jobs, reconcile drift, and remain tenant scoped', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-critical-domain-drift-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const tenantB = await registerTenantWorkspace({
+    adminEmail: 'owner@drift-beta.example',
+    adminName: 'Drift Beta Owner',
+    domain: 'drift-beta.example',
+    name: 'Drift Beta Labs',
+    planId: 'plan_team',
+  }, { statePath });
+
+  const localEmailSync = await syncEmailState({ tenantId: 'tenant_demo' }, {
+    actorUserId: 'usr_admin',
+    statePath,
+  });
+  assert.equal(localEmailSync.details.liveProviderSync, false);
+  assert.deepEqual(localEmailSync.details.driftEventIds, []);
+
+  let state = await loadState({ statePath });
+  assert(state.jobs.some((job) => job.type === 'email.provider_sync' && job.providerValidationStatus === 'local_only'), 'local email parity sync should record a proof-only job');
+  assert.equal((state.driftEvents ?? []).length, 0, 'proof-only parity sync must not create drift events');
+
+  const mailbox = state.mailboxes.find((item) => item.id === 'mbx_gmail_sales');
+  const signal = state.signals.find((item) => item.id === 'sig_risk_001');
+  const account = state.accountProfiles.find((item) => item.name === 'Acme Health');
+  assert(mailbox, 'seed mailbox should exist');
+  assert(signal, 'seed signal should exist');
+  assert(account, 'seed account profile should exist');
+  mailbox.providerStatus = 'needs_reauth';
+  signal.providerStatus = signal.status === 'dismissed' ? 'open' : 'dismissed';
+  account.providerHealthScore = Math.max(0, account.healthScore - 11);
+  state.mailboxes.push({
+    id: 'mbx_drift_beta',
+    tenantId: tenantB.details.tenantId,
+    ownerUserId: tenantB.actor.id,
+    provider: 'gmail',
+    status: 'connected',
+    providerStatus: 'needs_reauth',
+    selectedScopes: ['gmail.readonly'],
+    syncPolicy: {
+      labels: ['INBOX'],
+      lookbackDays: 30,
+      rawRetentionDays: 7,
+    },
+  });
+  await saveState(state, { statePath });
+
+  const emailSync = await syncEmailState({ tenantId: 'tenant_demo' }, {
+    actorUserId: 'usr_admin',
+    liveProviderSync: true,
+    statePath,
+  });
+  const signalSync = await syncSignalState({ tenantId: 'tenant_demo' }, {
+    actorUserId: 'usr_admin',
+    liveProviderSync: true,
+    statePath,
+  });
+  const accountSync = await syncAccountState({ tenantId: 'tenant_demo' }, {
+    actorUserId: 'usr_admin',
+    liveProviderSync: true,
+    statePath,
+  });
+  assert.equal(emailSync.details.driftEventIds.length, 1);
+  assert.equal(signalSync.details.driftEventIds.length, 1);
+  assert.equal(accountSync.details.driftEventIds.length, 1);
+
+  const tenantBEmailSync = await syncEmailState({ tenantId: tenantB.details.tenantId }, {
+    actorUserId: tenantB.actor.id,
+    liveProviderSync: true,
+    statePath,
+  });
+  assert.equal(tenantBEmailSync.details.driftEventIds.length, 1);
+
+  state = await loadState({ statePath });
+  const openDemoDriftEvents = (state.driftEvents ?? []).filter((event) => event.tenantId === 'tenant_demo' && event.status === 'open');
+  assert.deepEqual([...new Set(openDemoDriftEvents.map((event) => event.domain))].sort(), ['account', 'email', 'signal']);
+  assert(state.lifecycleNotices.some((notice) => notice.trigger === 'email_drift_detected' && notice.status === 'open'), 'email drift should open a lifecycle notice');
+  assert(state.lifecycleNotices.some((notice) => notice.trigger === 'signal_drift_detected' && notice.status === 'open'), 'signal drift should open a lifecycle notice');
+  assert(state.lifecycleNotices.some((notice) => notice.trigger === 'account_drift_detected' && notice.status === 'open'), 'account drift should open a lifecycle notice');
+
+  const demoScoped = scopeStateForActor(state, 'usr_product');
+  const tenantBScoped = scopeStateForActor(state, tenantB.actor.id);
+  assert(!demoScoped.driftEvents.some((event) => event.tenantId === tenantB.details.tenantId), 'tenant A member must not see tenant B drift events');
+  assert(tenantBScoped.driftEvents.some((event) => event.tenantId === tenantB.details.tenantId), 'tenant B admin should see tenant B drift events');
+
+  state = await loadState({ statePath });
+  state.mailboxes.find((item) => item.id === 'mbx_gmail_sales').providerStatus = 'connected';
+  state.signals.find((item) => item.id === 'sig_risk_001').providerStatus = state.signals.find((item) => item.id === 'sig_risk_001').status;
+  state.accountProfiles.find((item) => item.name === 'Acme Health').providerHealthScore = state.accountProfiles.find((item) => item.name === 'Acme Health').healthScore;
+  state.mailboxes.find((item) => item.id === 'mbx_drift_beta').providerStatus = 'connected';
+  await saveState(state, { statePath });
+
+  await syncEmailState({ tenantId: 'tenant_demo' }, { actorUserId: 'usr_admin', liveProviderSync: true, statePath });
+  await syncSignalState({ tenantId: 'tenant_demo' }, { actorUserId: 'usr_admin', liveProviderSync: true, statePath });
+  await syncAccountState({ tenantId: 'tenant_demo' }, { actorUserId: 'usr_admin', liveProviderSync: true, statePath });
+  await syncEmailState({ tenantId: tenantB.details.tenantId }, { actorUserId: tenantB.actor.id, liveProviderSync: true, statePath });
+
+  state = await loadState({ statePath });
+  assert.equal((state.driftEvents ?? []).filter((event) => event.status === 'open').length, 0, 'clean live sync should resolve open drift events');
+  assert((state.driftEvents ?? []).filter((event) => event.status === 'resolved').length >= 4, 'resolved drift events should remain as audit history');
+  assert(!state.lifecycleNotices.some((notice) => ['email_drift_detected', 'signal_drift_detected', 'account_drift_detected'].includes(notice.trigger) && notice.status === 'open'), 'resolved drift should clear open lifecycle drift notices');
 });
 
 test('signed webhook verifiers reject tampered Stripe, email, and SendGrid signatures at the HTTP boundary', async (t) => {
