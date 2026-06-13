@@ -149,6 +149,8 @@ test('frontend source guards empty live state and non-JSON POST failures', async
   const appSource = await fs.readFile(path.join(rootDir, 'src', 'pages', 'AppSurface.tsx'), 'utf8');
   const adminSource = await fs.readFile(path.join(rootDir, 'src', 'pages', 'AdminConsole.tsx'), 'utf8');
   const dataSource = await fs.readFile(path.join(rootDir, 'src', 'signalData.ts'), 'utf8');
+  const stateSource = await fs.readFile(path.join(rootDir, 'scripts', 'signal-state.mjs'), 'utf8');
+  const billingDomainSource = await fs.readFile(path.join(rootDir, 'scripts', 'domains', 'billing-read-model.mjs'), 'utf8');
 
   assert.match(appEntrySource, /lazy\(\(\) => import\('\.\/pages\/AppSurface'\)\)/);
   assert.match(appSource, /if \(!currentUser \|\| !tenant\)/);
@@ -159,6 +161,8 @@ test('frontend source guards empty live state and non-JSON POST failures', async
   assert.match(dataSource, /async function readJsonPayload\(response: Response\)/);
   assert.equal((dataSource.match(/return getJson</g) ?? []).length, 28);
   assert.equal((dataSource.match(/response\.json\(\)\.catch\(\(\) => null\)/g) ?? []).length, 1);
+  assert.match(stateSource, /from '\.\/domains\/billing-read-model\.mjs'/);
+  assert.match(billingDomainSource, /export function billingReadModel/);
 
   const verifyCoreSource = await fs.readFile(path.join(rootDir, 'scripts', 'verify-signal-local-core.mjs'), 'utf8');
   const verifyTestSource = await fs.readFile(path.join(rootDir, 'scripts', 'test-signal-verify-local.mjs'), 'utf8');
