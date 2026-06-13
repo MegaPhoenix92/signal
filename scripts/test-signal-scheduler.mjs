@@ -12,7 +12,10 @@ import {
   bootstrapState,
   enforceStateRetention,
   jobClaimable,
+  launchGateReport,
   loadState,
+  providerLaunchMatrixReport,
+  providerReadiness,
   providerValidationSchedulesDue,
   requeueDeadLetterJob,
   requeueDeadLetterJobs,
@@ -20,6 +23,9 @@ import {
   saveState,
   stateCollectionLimits,
 } from './signal-state.mjs';
+import {
+  backendReadiness,
+} from './signal-backend-readiness.mjs';
 import {
   acquirePostgresSchedulerLock,
   acquireSchedulerLock,
@@ -31,6 +37,98 @@ import {
 
 const execFileAsync = promisify(execFile);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+function productionEnv(overrides = {}) {
+  return {
+    DATABASE_URL: 'postgres://signal:<redacted>@db.example/signal',
+    NODE_ENV: 'production',
+    SIGNAL_API_CORS_ORIGINS: 'https://app.signal.example',
+    SIGNAL_AUTH_JWKS_URL: 'https://auth.signal.example/.well-known/jwks.json',
+    SIGNAL_AUTH_PROVIDER: 'jwks',
+    SIGNAL_BACKEND_MODE: 'external-service',
+    SIGNAL_COOKIE_SECURE: 'true',
+    SIGNAL_EMAIL_FROM: 'alerts@signal.example',
+    SIGNAL_EMAIL_PROVIDER_TOKEN: 'email-token',
+    SIGNAL_EMAIL_PROVIDER_URL: 'https://email.signal.example/send',
+    SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET: 'email-webhook-secret',
+    SIGNAL_GMAIL_CLIENT_ID: 'gmail-client',
+    SIGNAL_GMAIL_CLIENT_SECRET: 'gmail-secret',
+    SIGNAL_GMAIL_REDIRECT_URI: 'https://api.signal.example/api/oauth/gmail/callback',
+    SIGNAL_JOB_SCHEDULER: 'signal-scheduler',
+    SIGNAL_LAUNCH_BACKUP_REHEARSAL_MAX_AGE_DAYS: '30',
+    SIGNAL_LAUNCH_SANDBOX_EVIDENCE_MAX_AGE_DAYS: '7',
+    SIGNAL_LAUNCH_SCHEDULE_OVERDUE_GRACE_HOURS: '24',
+    SIGNAL_LAUNCH_SCHEDULER_HEARTBEAT_MAX_AGE_HOURS: '1',
+    SIGNAL_OPERATIONS_ALERT_CHANNEL: 'ops-oncall',
+    SIGNAL_OUTLOOK_CLIENT_ID: 'outlook-client',
+    SIGNAL_OUTLOOK_CLIENT_SECRET: 'outlook-secret',
+    SIGNAL_OUTLOOK_REDIRECT_URI: 'https://api.signal.example/api/oauth/outlook/callback',
+    SIGNAL_OUTLOOK_TENANT_ID: 'tenant',
+    SIGNAL_PROVIDER_VALIDATION_SCHEDULER: 'signal-scheduler',
+    SIGNAL_REQUIRE_SIGNED_SESSION: 'true',
+    SIGNAL_SENDGRID_API_KEY: 'sendgrid-key',
+    SIGNAL_SESSION_SECRET: 'session-secret-32chars',
+    SIGNAL_STATE_RESTORE_REHEARSAL_AT: new Date().toISOString(),
+    SIGNAL_STATE_SERVICE_BACKEND: 'postgres',
+    SIGNAL_STATE_SERVICE_RLS: 'true',
+    SIGNAL_STATE_SERVICE_TOKEN: 'state-service-token',
+    SIGNAL_STATE_SERVICE_URL: 'https://state.signal.example/state',
+    SIGNAL_STRIPE_PRICE_TEAM: 'price_team',
+    SIGNAL_TENANT_ISOLATION_MODE: 'rls',
+    SIGNAL_TOKEN_ENCRYPTION_KEY: 'token-encryption-key-32chars',
+    STRIPE_SECRET_KEY: 'sk_test_placeholder',
+    STRIPE_WEBHOOK_SECRET: 'whsec_placeholder',
+    ...overrides,
+  };
+}
+
+function passedProviderValidationRun({ recordedAt = new Date().toISOString(), id = 'pvr_fresh' } = {}) {
+  const providers = [
+    { id: 'gmail', label: 'Gmail', category: 'email', status: 'passed', missingRequired: [], checks: [] },
+    { id: 'outlook', label: 'Outlook', category: 'email', status: 'passed', missingRequired: [], checks: [] },
+    { id: 'sendgrid', label: 'SendGrid', category: 'email', status: 'passed', missingRequired: [], checks: [] },
+    { id: 'stripe', label: 'Stripe', category: 'payment', status: 'passed', missingRequired: [], checks: [] },
+  ];
+  return {
+    id,
+    generatedAt: recordedAt,
+    ok: true,
+    providers,
+    recordedAt,
+    recordedByUserId: 'usr_admin',
+    reportDigest: `digest_${id}`,
+    status: 'passed',
+    summary: { blocked: 0, failed: 0, passed: providers.length, total: providers.length },
+  };
+}
+
+async function makeProductionEvidenceState(statePath, {
+  providerRunAt = new Date().toISOString(),
+  scheduleNextRunAt = '2099-01-01T00:00:00.000Z',
+} = {}) {
+  await bootstrapState({ force: true, statePath });
+  const state = await loadState({ statePath });
+  state.providerValidationRuns = [passedProviderValidationRun({ recordedAt: providerRunAt })];
+  (state.providerValidationSchedules ?? []).forEach((schedule) => {
+    schedule.status = 'active';
+    schedule.lastRunAt = providerRunAt;
+    schedule.lastRunId = state.providerValidationRuns[0].id;
+    schedule.lastRunStatus = 'passed';
+    schedule.nextRunAt = scheduleNextRunAt;
+  });
+  state.schedulerHeartbeat = {
+    failed: 0,
+    finishedAt: new Date().toISOString(),
+    ok: true,
+    queues: ['provider_validation'],
+    ran: 1,
+    recordedAt: new Date().toISOString(),
+    statePath,
+    workerId: 'test-scheduler',
+  };
+  await saveState(state, { statePath });
+  return loadState({ statePath });
+}
 
 async function forceProviderValidationDue(statePath) {
   const state = await loadState({ statePath });
@@ -105,6 +203,183 @@ test('Signal scheduler runs due provider validation through the audited job boun
   const providerValidationJob = after.jobs.find((job) => job.queue === 'provider_validation');
   assert.equal(providerValidationJob?.status, 'queued');
   assert(providerValidationJob?.nextRunAt, 'recurring provider validation job should advance nextRunAt after running');
+});
+
+test('Signal scheduler drains due provider validation, governance, and email sync queues on once', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-drain-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const lockFile = path.join(tempDir, 'scheduler.lock');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const state = await forceProviderValidationDue(statePath);
+  const connectedMailbox = state.mailboxes.find((mailbox) => mailbox.status === 'connected');
+  assert(connectedMailbox, 'bootstrap state should include a connected mailbox');
+  state.jobs = state.jobs.filter((job) => job.queue !== 'email_sync');
+  state.jobs.push(
+    {
+      id: 'job_governance_due',
+      tenantId: connectedMailbox.tenantId,
+      queue: 'governance',
+      type: 'data_request.export.review',
+      targetId: 'dsr_scheduler_drain',
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      nextRunAt: null,
+      message: 'drain governance work',
+    },
+    {
+      id: 'job_email_due_1',
+      tenantId: connectedMailbox.tenantId,
+      queue: 'email_sync',
+      type: 'mailbox.sync',
+      targetId: connectedMailbox.id,
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      nextRunAt: null,
+      message: 'drain first email sync',
+    },
+    {
+      id: 'job_email_due_2',
+      tenantId: connectedMailbox.tenantId,
+      queue: 'email_sync',
+      type: 'mailbox.sync',
+      targetId: connectedMailbox.id,
+      status: 'queued',
+      attempts: 0,
+      maxAttempts: 3,
+      nextRunAt: null,
+      message: 'drain second email sync',
+    },
+  );
+  await saveState(state, { statePath });
+
+  const config = createSchedulerConfig({
+    argv: ['--once', '--queues', 'provider_validation,governance,email_sync', '--limit', '1', '--lock-file', lockFile],
+    env: {
+      SIGNAL_ADMIN_STATE: statePath,
+      SIGNAL_PROVIDER_SANDBOX_TIMEOUT_MS: '1000',
+    },
+  });
+
+  const result = await runSchedulerOnce(config);
+  assert.equal(result.ok, true);
+  assert.equal(result.ran, 4);
+  assert.equal(result.outcomes.find((outcome) => outcome.queue === 'provider_validation')?.count, 1);
+  assert.equal(result.outcomes.find((outcome) => outcome.queue === 'governance')?.count, 1);
+  assert.equal(result.outcomes.find((outcome) => outcome.queue === 'email_sync')?.count, 2);
+
+  const after = await loadState({ statePath });
+  const due = schedulerDueSummary(after, {
+    leaseMs: config.jobLeaseMs,
+    limit: 10,
+    queues: ['provider_validation', 'governance', 'email_sync'],
+  });
+  assert.deepEqual(due.map((queue) => queue.due), [0, 0, 0]);
+});
+
+test('Signal scheduler auto-renews provider watches expiring within 24h', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-watch-renew-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const lockFile = path.join(tempDir, 'scheduler.lock');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const state = await loadState({ statePath });
+  const mailbox = state.mailboxes.find((candidate) => candidate.provider === 'gmail' && candidate.status === 'connected');
+  assert(mailbox, 'bootstrap state should include a connected Gmail mailbox');
+  state.emailWatchSubscriptions = [{
+    id: 'watch_gmail_expiring',
+    tenantId: mailbox.tenantId,
+    mailboxId: mailbox.id,
+    provider: mailbox.provider,
+    status: 'active',
+    expirationAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    notificationUrl: 'https://api.signal.example/api/webhooks/gmail',
+    providerWatchId: 'gmail-watch-old',
+    createdAt: new Date().toISOString(),
+    renewalCount: 0,
+  }];
+  await saveState(state, { statePath });
+
+  const config = createSchedulerConfig({
+    argv: ['--once', '--queue', 'governance', '--lock-file', lockFile],
+    env: { SIGNAL_ADMIN_STATE: statePath },
+  });
+  const result = await runSchedulerOnce(config);
+  assert.equal(result.ok, true);
+  assert.equal(result.watchRenewals.count, 1);
+  assert.equal(result.watchRenewals.succeeded, 1);
+
+  const after = await loadState({ statePath });
+  const renewed = after.emailWatchSubscriptions.find((watch) => watch.id === 'watch_gmail_expiring');
+  assert.equal(renewed.status, 'active');
+  assert(Date.parse(renewed.expirationAt) > Date.now() + 24 * 60 * 60 * 1000, 'renewed watch should no longer expire within 24h');
+  assert.equal(renewed.renewalCount, 1);
+  assert(after.auditEvents.some((event) => event.action === 'mailboxes.watch-renew' && event.targetId === mailbox.id));
+});
+
+test('Signal scheduler failed watch renewal records lifecycle notice, audit event, and operations alert', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-watch-fail-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const lockFile = path.join(tempDir, 'scheduler.lock');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const state = await loadState({ statePath });
+  const mailbox = state.mailboxes.find((candidate) => candidate.provider === 'gmail' && candidate.status === 'connected');
+  assert(mailbox, 'bootstrap state should include a connected Gmail mailbox');
+  state.emailWatchSubscriptions = [{
+    id: 'watch_gmail_failure',
+    tenantId: mailbox.tenantId,
+    mailboxId: mailbox.id,
+    provider: mailbox.provider,
+    status: 'active',
+    expirationAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    notificationUrl: 'https://api.signal.example/api/webhooks/gmail',
+    providerWatchId: 'gmail-watch-old',
+    createdAt: new Date().toISOString(),
+    renewalCount: 0,
+  }];
+  await saveState(state, { statePath });
+
+  const fetchImpl = async () => ({
+    headers: { get: () => null },
+    ok: false,
+    status: 403,
+    text: async () => JSON.stringify({ error: { code: 'forbidden', message: 'denied', status: 'PERMISSION_DENIED' } }),
+  });
+  const config = createSchedulerConfig({
+    argv: ['--once', '--queue', 'governance', '--lock-file', lockFile, '--live-provider'],
+    env: {
+      SIGNAL_ADMIN_STATE: statePath,
+      SIGNAL_GMAIL_ACCESS_TOKEN: 'fake-gmail-token',
+      SIGNAL_OPERATIONS_ALERT_CHANNEL: 'ops-oncall',
+      SIGNAL_PROVIDER_WATCH_MODE: 'live',
+    },
+  });
+
+  const result = await runSchedulerOnce(config, { fetchImpl });
+  assert.equal(result.ok, false);
+  assert.equal(result.watchRenewals.failed, 1);
+
+  const after = await loadState({ statePath });
+  const failedWatch = after.emailWatchSubscriptions.find((watch) => watch.id === 'watch_gmail_failure');
+  assert.equal(failedWatch.status, 'failed');
+  assert.equal(failedWatch.providerResponseStatus, 403);
+  assert(after.lifecycleNotices.some((notice) => notice.sourceIds?.watchId === failedWatch.id && notice.trigger === 'provider_watch_attention'));
+  assert(after.auditEvents.some((event) => event.action === 'mailboxes.watch-renew' && event.targetId === mailbox.id));
+  assert(after.auditEvents.some((event) => event.action === 'scheduler.alert'));
+  assert(after.notificationEvents.some((event) => event.channel === 'ops-oncall' && event.type === 'operations.scheduler.watch_renew_failed'));
+  assert(!JSON.stringify(after).includes('fake-gmail-token'), 'provider access token must not be stored in state');
 });
 
 test('Signal scheduler config parses interval, queues, actor, and limits', () => {
@@ -356,4 +631,111 @@ test('Signal scheduler can coordinate with a Postgres advisory lock', async () =
   await third.release();
   assert(calls.some((call) => call.sql.includes('pg_try_advisory_lock')));
   assert(calls.some((call) => call.sql.includes('pg_advisory_unlock')));
+});
+
+test('Launch freshness blocks stale sandbox evidence only in production context', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-freshness-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  const staleRunAt = '2000-01-01T00:00:00.000Z';
+  const state = await makeProductionEvidenceState(statePath, { providerRunAt: staleRunAt });
+  const localGate = launchGateReport(state, {
+    backend: backendReadiness({ env: {}, statePath }),
+    env: {},
+    provider: providerReadiness({}),
+    statePath,
+  });
+  assert.equal(localGate.freshness.applies, false);
+  assert.equal(localGate.freshnessBlockers.length, 0);
+
+  const env = productionEnv();
+  const productionGate = launchGateReport(state, {
+    backend: backendReadiness({ env, statePath }),
+    env,
+    provider: providerReadiness(env),
+    statePath,
+  });
+  assert.equal(productionGate.goLiveReady, false);
+  assert(productionGate.freshnessBlockers.some((blocker) => blocker.id === 'sandbox_evidence_stale'));
+  const sandboxGate = productionGate.gates.find((gate) => gate.id === 'provider_sandbox_evidence');
+  assert.equal(sandboxGate.status, 'blocked');
+  assert(sandboxGate.freshnessBlockers.some((blocker) => blocker.includes('sandbox evidence')));
+});
+
+test('Provider launch rejects overdue provider validation schedules beyond grace', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-overdue-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  const env = productionEnv();
+  const state = await makeProductionEvidenceState(statePath);
+  const gmailSchedule = state.providerValidationSchedules.find((schedule) => schedule.providerId === 'gmail');
+  gmailSchedule.nextRunAt = '2000-01-01T00:00:00.000Z';
+  await saveState(state, { statePath });
+  const report = providerLaunchMatrixReport(await loadState({ statePath }), {
+    backend: backendReadiness({ env, statePath }),
+    env,
+    provider: providerReadiness(env),
+    statePath,
+  });
+  const gmail = report.rows.find((row) => row.id === 'gmail');
+  assert.equal(report.productionReady, false);
+  assert.equal(gmail.scheduleReady, true);
+  assert.equal(gmail.launchReady, false);
+  assert.equal(gmail.status, 'needs_freshness');
+  assert(gmail.freshnessBlockers.some((blocker) => blocker.includes('overdue')));
+});
+
+test('Launch gate verify-package rejects stale freshness evidence', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-scheduler-package-freshness-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const envPath = path.join(tempDir, 'production.env');
+  const packagePath = path.join(tempDir, 'launch-evidence.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  const env = productionEnv();
+  await makeProductionEvidenceState(statePath, { providerRunAt: '2000-01-01T00:00:00.000Z' });
+  await fs.writeFile(envPath, `${Object.entries(env).map(([key, value]) => `${key}=${value}`).join('\n')}\n`);
+
+  await execFileAsync(process.execPath, [
+    path.join(rootDir, 'scripts', 'signal-admin.mjs'),
+    'launch-gate',
+    'package',
+    packagePath,
+    '--env-file',
+    envPath,
+    '--json',
+  ], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      SIGNAL_ADMIN_STATE: statePath,
+    },
+    maxBuffer: 1024 * 1024,
+  });
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      path.join(rootDir, 'scripts', 'signal-admin.mjs'),
+      'launch-gate',
+      'verify-package',
+      packagePath,
+      '--json',
+    ], {
+      cwd: rootDir,
+      env: {
+        ...process.env,
+        SIGNAL_ADMIN_STATE: statePath,
+      },
+      maxBuffer: 1024 * 1024,
+    }),
+    /Launch evidence package verification failed/,
+  );
 });

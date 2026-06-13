@@ -10,12 +10,98 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { bootstrapState } from './signal-state.mjs';
+import { bootstrapState, recordSchedulerHeartbeat } from './signal-state.mjs';
 import { signEmailWebhookPayload, signSendGridWebhookPayload } from './signal-email-provider.mjs';
 import { signStripeWebhookPayload } from './signal-payment-provider.mjs';
 
 const execFileAsync = promisify(execFile);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const bareAdminCommands = new Set(['bootstrap', 'doctor', 'export', 'status']);
+const valueOptions = new Set([
+  '--actor',
+  '--env-file',
+  '--input',
+  '--limit',
+  '--output',
+  '--save-evidence',
+  '--stripe-customer',
+  '--template',
+  '--ttl-seconds',
+]);
+
+function collectStrings(value, strings = []) {
+  if (typeof value === 'string') {
+    strings.push(value);
+    return strings;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectStrings(item, strings));
+    return strings;
+  }
+  if (value && typeof value === 'object') {
+    Object.values(value).forEach((item) => collectStrings(item, strings));
+  }
+  return strings;
+}
+
+function adminReferenceKey(reference) {
+  return reference.subcommand ? `${reference.command} ${reference.subcommand}` : reference.command;
+}
+
+function parseAdminReferenceTail(tail, source) {
+  const tokens = tail.trim().split(/\s+/).filter(Boolean);
+  const command = tokens[0];
+  if (!command) {
+    return null;
+  }
+  const next = tokens[1];
+  const subcommand = next && !next.startsWith('-') && !next.startsWith('<') && !valueOptions.has(next)
+    ? next
+    : null;
+  return { command, source, subcommand };
+}
+
+function collectAdminReferences(...values) {
+  const references = new Map();
+  values.flatMap((value) => collectStrings(value)).forEach((text) => {
+    for (const match of text.matchAll(/npm run admin -- ([^\n]+)/g)) {
+      const reference = parseAdminReferenceTail(match[1], text);
+      if (reference) {
+        references.set(adminReferenceKey(reference), reference);
+      }
+    }
+  });
+  return [...references.values()].sort((left, right) => adminReferenceKey(left).localeCompare(adminReferenceKey(right)));
+}
+
+function collectDocumentedAdminReferences(markdown) {
+  return [...markdown.matchAll(/^- `([^`]+)`/gm)]
+    .map((match) => parseAdminReferenceTail(match[1], 'docs/PRODUCT_COMPLETION_GOAL.md'))
+    .filter(Boolean);
+}
+
+function adminCommandBlock(adminSource, commandName) {
+  const marker = `    case '${commandName}':`;
+  const start = adminSource.indexOf(marker);
+  if (start < 0) {
+    return null;
+  }
+  const nextCase = adminSource.indexOf('\n    case ', start + marker.length);
+  const defaultCase = adminSource.indexOf('\n    default:', start + marker.length);
+  const end = nextCase >= 0 ? nextCase : (defaultCase >= 0 ? defaultCase : adminSource.length);
+  return adminSource.slice(start, end);
+}
+
+function adminSourceSupportsReference(adminSource, reference) {
+  const block = adminCommandBlock(adminSource, reference.command);
+  if (!block) {
+    return false;
+  }
+  if (!reference.subcommand) {
+    return bareAdminCommands.has(reference.command) || /if \(!subcommand/.test(block);
+  }
+  return block.includes(`subcommand === '${reference.subcommand}'`);
+}
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -129,6 +215,33 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     });
     return JSON.parse(stdout);
   }
+
+  await t.test('completion and QA report admin command references are implemented', async () => {
+    const [adminSource, docsSource, completionAudit, qaAnswers, tenantIsolation] = await Promise.all([
+      fs.readFile(path.join(rootDir, 'scripts', 'signal-admin.mjs'), 'utf8'),
+      fs.readFile(path.join(rootDir, 'docs', 'PRODUCT_COMPLETION_GOAL.md'), 'utf8'),
+      runCli(['completion-audit', '--json'], blankSandboxProviderEnv),
+      runCli(['qa-answers', '--json'], blankSandboxProviderEnv),
+      runCli(['tenant-isolation', '--json'], blankSandboxProviderEnv),
+    ]);
+    const referencesByKey = new Map([
+      ...collectAdminReferences(completionAudit, qaAnswers, tenantIsolation),
+      ...collectDocumentedAdminReferences(docsSource),
+    ].map((reference) => [adminReferenceKey(reference), reference]));
+    const unsupported = [...referencesByKey.values()]
+      .filter((reference) => !adminSourceSupportsReference(adminSource, reference))
+      .map(adminReferenceKey);
+
+    assert.deepEqual(unsupported, []);
+
+    const jobsList = await runCli(['jobs', 'list', '--json']);
+    assert.equal(jobsList.ok, true);
+    assert.ok(Array.isArray(jobsList.jobs));
+
+    const sessionList = await runCli(['session', 'list', '--json']);
+    assert.equal(sessionList.ok, true);
+    assert.ok(Array.isArray(sessionList.availableUsers));
+  });
 
   async function requestApi(pathname, { body, headers = {}, method = 'GET', token } = {}) {
     const response = await fetch(`${apiBaseUrl}${pathname}`, {
@@ -1174,6 +1287,17 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert(!emailHandoffPreflightJson.includes('sendgrid_api_key_value'), 'email handoff preflight must not serialize SendGrid API keys');
     assert(!emailHandoffPreflightJson.includes('sendgrid_public_key_value'), 'email handoff preflight must not serialize SendGrid webhook public-key values');
 
+    await recordSchedulerHeartbeat({
+      failed: 0,
+      finishedAt: new Date().toISOString(),
+      ok: true,
+      queues: ['provider_validation', 'governance', 'email_sync'],
+      ran: 0,
+      recordedAt: new Date().toISOString(),
+      statePath,
+      workerId: 'contract-preflight-scheduler',
+    }, { actorUserId: 'usr_admin', statePath });
+
     const launchPackagePath = path.join(tempDir, 'signal-launch-evidence.json');
     const launchPackageResult = await runCli(['launch-gate', 'package', launchPackagePath, '--env-file', envFilePath, '--json'], blankSandboxProviderEnv);
     assert.equal(launchPackageResult.ok, false);
@@ -1223,7 +1347,10 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     ].join('\n'), 'utf8');
     const placeholderBackend = await runCli(['backend', '--env-file', placeholderEnvFilePath, '--json'], blankSandboxProviderEnv);
     assert.equal(placeholderBackend.envSource.type, 'env-file');
-    assert(placeholderBackend.backend.summary.missingRequiredEnv.includes('DATABASE_URL'));
+    assert(placeholderBackend.backend.summary.missingRequiredEnv.includes('DATABASE_URL or SIGNAL_STATE_SERVICE_DATABASE_URL'));
+    const placeholderStateStorage = placeholderBackend.backend.checks.find((check) => check.id === 'state_service_storage');
+    assert.equal(placeholderStateStorage.missingEnv.includes('DATABASE_URL'), false);
+    assert(placeholderStateStorage.missingEnv.includes('DATABASE_URL or SIGNAL_STATE_SERVICE_DATABASE_URL'));
     assert(!JSON.stringify(placeholderBackend).includes('<password>'), 'placeholder env values must not be serialized');
 
     const sandbox = await requestApi('/api/integrations/sandbox', { token: adminToken });

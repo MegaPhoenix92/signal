@@ -1,9 +1,12 @@
-import { useEffect, type CSSProperties, type DependencyList, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type DependencyList, type ReactNode } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  Menu,
   Radar,
   RefreshCw,
+  TerminalSquare,
+  X,
   type LucideIcon,
 } from 'lucide-react';
 import {
@@ -37,6 +40,7 @@ import {
   type RedactionRule,
   type Signal,
   type SignalAppData,
+  type SignalMutationAction,
   type SignalHandoff,
   type SourceMessage,
   type SuppressionRule,
@@ -45,7 +49,7 @@ import {
   type StateSummary,
   type UserInvite,
 } from '../signalData';
-import type { Accent, AppMode, DataSource } from './appTypes';
+import type { Accent, AppMode, DataSource, MutationOutcome } from './appTypes';
 
 export type { Accent } from './appTypes';
 
@@ -150,7 +154,36 @@ export function membershipForUser(data: SignalAppData, userId?: string, tenantId
     (!tenantId || membership.tenantId === tenantId));
 }
 
+const productNavLinks: Array<{ href: string; label: string; mode?: AppMode }> = [
+  { href: '#register', label: 'Register', mode: 'register' },
+  { href: '#workspace', label: 'Workspace', mode: 'workspace' },
+  { href: '#admin', label: 'Admin', mode: 'admin' },
+  { href: '#top', label: 'Public', mode: 'marketing' },
+];
+
 export function ProductHeader({ active }: { active: AppMode }) {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!mobileNavOpen) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMobileNavOpen(false);
+        requestAnimationFrame(() => mobileMenuButtonRef.current?.focus());
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [mobileNavOpen]);
+
+  function closeMobileNav() {
+    setMobileNavOpen(false);
+  }
+
   return (
     <header className="product-header">
       <a className="brand" href="#top" aria-label="Signal public site">
@@ -160,18 +193,120 @@ export function ProductHeader({ active }: { active: AppMode }) {
         <span>Signal</span>
       </a>
       <nav className="product-nav" aria-label="Signal product areas">
-        <a className={active === 'register' ? 'is-active' : ''} href="#register">
-          Register
-        </a>
-        <a className={active === 'workspace' ? 'is-active' : ''} href="#workspace">
-          Workspace
-        </a>
-        <a className={active === 'admin' ? 'is-active' : ''} href="#admin">
-          Admin
-        </a>
-        <a href="#top">Public</a>
+        {productNavLinks.map((link) => (
+          <a key={link.href} className={active === link.mode ? 'is-active' : ''} href={link.href}>
+            {link.label}
+          </a>
+        ))}
+      </nav>
+      <button
+        ref={mobileMenuButtonRef}
+        aria-controls="product-mobile-nav-menu"
+        aria-expanded={mobileNavOpen}
+        aria-label={mobileNavOpen ? 'Close navigation' : 'Open navigation'}
+        className="mobile-nav-toggle"
+        type="button"
+        onClick={() => setMobileNavOpen((open) => !open)}
+      >
+        {mobileNavOpen ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
+      </button>
+      <nav id="product-mobile-nav-menu" className="mobile-nav-panel" aria-label="Mobile product navigation" hidden={!mobileNavOpen}>
+        {productNavLinks.map((link) => (
+          <a key={link.href} className={active === link.mode ? 'is-active' : ''} href={link.href} onClick={closeMobileNav}>
+            {link.label}
+          </a>
+        ))}
       </nav>
     </header>
+  );
+}
+
+export function BusyLabel({ busy, busyText, children }: { busy: boolean; busyText: string; children: ReactNode }) {
+  return (
+    <>
+      {busy && <RefreshCw className="busy-spinner" size={15} aria-hidden="true" />}
+      <span className="button-label">{busy ? busyText : children}</span>
+    </>
+  );
+}
+
+export function InlineError({ message }: { message?: string | null }) {
+  if (!message) {
+    return null;
+  }
+
+  return (
+    <p className="form-message is-error inline-mutation-error" role="alert">
+      {message}
+    </p>
+  );
+}
+
+type MutationHandler = (action: SignalMutationAction, args: Record<string, unknown>) => Promise<MutationOutcome>;
+
+export type MutationFeedback = {
+  errorFor: (...keys: string[]) => string | null;
+  isPending: (key: string) => boolean;
+  pendingKey: string | null;
+  run: (key: string, action: SignalMutationAction, args: Record<string, unknown>) => Promise<MutationOutcome>;
+};
+
+export function useMutationFeedback(mutate: MutationHandler): MutationFeedback {
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  async function run(key: string, action: SignalMutationAction, args: Record<string, unknown>) {
+    setPendingKey(key);
+    // Clear prior errors on each new mutation. Actions are globally serialized
+    // (isMutating disables all controls during a mutation), so only the most
+    // recent failure should surface — this avoids a stale sibling error lingering
+    // in a shared InlineError region after a later action succeeds.
+    setErrors({});
+
+    try {
+      const outcome = await mutate(action, args);
+      if (!outcome.ok) {
+        setErrors((current) => ({ ...current, [key]: outcome.error }));
+      }
+      return outcome;
+    } finally {
+      setPendingKey((current) => current === key ? null : current);
+    }
+  }
+
+  return {
+    errorFor: (...keys: string[]) => keys.map((key) => errors[key]).find(Boolean) ?? null,
+    isPending: (key: string) => pendingKey === key,
+    pendingKey,
+    run,
+  };
+}
+
+export function MutationButton({
+  action,
+  actionKey,
+  args,
+  busyText,
+  children,
+  className = 'inline-action',
+  disabled = false,
+  feedback,
+}: {
+  action: SignalMutationAction;
+  actionKey: string;
+  args: Record<string, unknown>;
+  busyText: string;
+  children: ReactNode;
+  className?: string;
+  disabled?: boolean;
+  feedback: MutationFeedback;
+}) {
+  const busy = feedback.isPending(actionKey);
+
+  return (
+    <button className={className} disabled={disabled || busy} type="button" onClick={() => void feedback.run(actionKey, action, args)}>
+      <BusyLabel busy={busy} busyText={busyText}>{children}</BusyLabel>
+    </button>
   );
 }
 
@@ -188,28 +323,37 @@ export function MetricCard({ icon: Icon, label, value, detail, accent }: { icon:
 
 export function StateBanner({
   actorUserId,
+  contextTenantId,
+  contextTenantLabel = 'Admin context tenant',
   data,
   error,
   isLoading,
   isMutating,
   lastMutation,
   onActorChange,
+  onContextTenantChange,
   onRefresh,
   source,
   summary,
 }: {
   actorUserId: string;
+  contextTenantId?: string;
+  contextTenantLabel?: string;
   data: SignalAppData;
   error: string | null;
   isLoading: boolean;
   isMutating: boolean;
   lastMutation: string | null;
   onActorChange: (userId: string) => Promise<void>;
+  onContextTenantChange?: (tenantId: string) => void;
   onRefresh: () => Promise<void>;
   source: DataSource;
   summary: StateSummary;
 }) {
   const actor = data.users.find((user) => user.id === actorUserId) ?? data.users[0];
+  const contextTenant = contextTenantId && data.tenants.some((tenant) => tenant.id === contextTenantId)
+    ? contextTenantId
+    : actor?.tenantId ?? data.tenants[0]?.id ?? '';
 
   return (
     <section className={`state-banner ${source}`} aria-live="polite">
@@ -228,10 +372,47 @@ export function StateBanner({
           ))}
         </select>
       </label>
+      {onContextTenantChange && (
+        <label className="actor-select context-tenant-select">
+          <span>{contextTenantLabel}</span>
+          <select
+            id="signal-admin-context-tenant-select"
+            name="signal-admin-context-tenant"
+            disabled={isMutating}
+            value={contextTenant}
+            onChange={(event) => onContextTenantChange(event.target.value)}
+          >
+            {data.tenants.map((tenant) => (
+              <option key={tenant.id} value={tenant.id}>
+                {tenant.name} ({tenant.domain})
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <button className="inline-action" disabled={isLoading} type="button" onClick={() => void onRefresh()}>
         <RefreshCw size={16} aria-hidden="true" />
         {isLoading ? 'Refreshing' : 'Refresh state'}
       </button>
+    </section>
+  );
+}
+
+export function SeedReadOnlyCallout({ area }: { area: 'workspace' | 'admin' }) {
+  return (
+    <section className="ops-panel seed-mode-callout" role="note" aria-label="Read-only seed mode" data-reveal>
+      <div className="seed-mode-copy">
+        <TerminalSquare size={20} aria-hidden="true" />
+        <div>
+          <span>Read-only seed mode</span>
+          <strong>{area === 'admin' ? 'Admin writes are disabled until the live API is running.' : 'Workspace actions are disabled until the live API is running.'}</strong>
+          <small>Start the full local stack or the API-only server before using write actions. Seed data stays available for review without persisting changes.</small>
+        </div>
+      </div>
+      <div className="seed-mode-command-row" aria-label="Live API commands">
+        <code>npm run dev:local</code>
+        <code>npm run api</code>
+      </div>
     </section>
   );
 }

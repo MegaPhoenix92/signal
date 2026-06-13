@@ -6093,7 +6093,7 @@ const fallbackProductionEnvSections = [
     owner: 'integrations',
     requiredEnv: ['SIGNAL_EMAIL_PROVIDER_URL', 'SIGNAL_EMAIL_PROVIDER_TOKEN', 'SIGNAL_EMAIL_FROM', 'SIGNAL_EMAIL_STATUS_WEBHOOK_SECRET', 'SIGNAL_SENDGRID_API_KEY'],
     optionalEnv: ['SIGNAL_EMAIL_PROVIDER', 'SIGNAL_EMAIL_PROVIDER_MODE', 'SIGNAL_EMAIL_PROVIDER_NAME', 'SIGNAL_EMAIL_UNSUBSCRIBE_BASE_URL', 'SIGNAL_SENDGRID_API_BASE_URL', 'SIGNAL_SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY', 'SIGNAL_SENDGRID_SANDBOX_MODE', 'SIGNAL_SENDGRID_ASM_GROUP_ID', 'SIGNAL_SENDGRID_ASM_GROUPS_TO_DISPLAY', 'SIGNAL_SENDGRID_CATEGORIES', 'SIGNAL_SENDGRID_CLICK_TRACKING', 'SIGNAL_SENDGRID_OPEN_TRACKING', 'SIGNAL_SENDGRID_IP_POOL_NAME', 'SIGNAL_SENDGRID_REPLY_TO'],
-    commands: ['npm run admin -- notifications digest tenant_demo --live-provider', 'npm run admin -- notifications sendgrid-webhook-signed ./sendgrid-event.json <timestamp> <signature>'],
+    commands: ['npm run admin -- notifications digest tenant_demo --live-provider', 'npm run admin -- notifications sendgrid-webhook-signed ./sendgrid-event.json <signature> <timestamp>'],
   },
   {
     id: 'stripe',
