@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  jobClaimable,
   loadState,
   resolveStatePath,
   runJobs,
@@ -87,8 +88,10 @@ export function createSchedulerConfig({ argv = process.argv.slice(2), env = proc
     pgPool: overrides.pgPool,
     heartbeatFile: path.resolve(env.SIGNAL_SCHEDULER_HEARTBEAT_FILE ?? path.join(rootDir, 'data', 'signal-scheduler-heartbeat.json')),
     providerSandboxTimeoutMs: positiveInteger(env.SIGNAL_PROVIDER_SANDBOX_TIMEOUT_MS, 10_000, 'Provider sandbox timeout'),
+    jobLeaseMs: positiveInteger(env.SIGNAL_JOB_LEASE_MS, Math.max(intervalMs * 3, 300_000), 'Job lease window'),
     queues,
     statePath: flagValue(argv, '--state') ?? env.SIGNAL_ADMIN_STATE,
+    workerId: env.SIGNAL_SCHEDULER_WORKER_ID ?? `scheduler_${process.pid}`,
   };
 }
 
@@ -160,16 +163,16 @@ export async function acquirePostgresSchedulerLock(config, { pgPool } = {}) {
   };
 }
 
-function runnableJobsForQueue(state, queue, limit, now = Date.now()) {
+function runnableJobsForQueue(state, queue, limit, { leaseMs, now = Date.now() } = {}) {
   return (state.jobs ?? [])
-    .filter((job) => ['queued', 'running'].includes(job.status) && job.queue === queue && jobIsDue(job, now))
+    .filter((job) => job.queue === queue && jobClaimable(job, now, leaseMs))
     .slice(0, limit);
 }
 
-export function schedulerDueSummary(state, { queues = defaultSchedulerQueues, limit = 5, now = Date.now() } = {}) {
+export function schedulerDueSummary(state, { leaseMs, queues = defaultSchedulerQueues, limit = 5, now = Date.now() } = {}) {
   return queues.map((queue) => {
-    const dueJobs = runnableJobsForQueue(state, queue, limit, now);
-    const waitingJobs = (state.jobs ?? []).filter((job) => ['queued', 'running'].includes(job.status) && job.queue === queue && !jobIsDue(job, now));
+    const dueJobs = runnableJobsForQueue(state, queue, limit, { leaseMs, now });
+    const waitingJobs = (state.jobs ?? []).filter((job) => job.queue === queue && !jobClaimable(job, now, leaseMs));
     return {
       due: dueJobs.length,
       nextRunAt: waitingJobs
@@ -182,6 +185,35 @@ export function schedulerDueSummary(state, { queues = defaultSchedulerQueues, li
       waiting: waitingJobs.length,
     };
   });
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+async function readLockPayload(lockFile) {
+  try {
+    const content = await fs.readFile(lockFile, 'utf8');
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+export async function refreshSchedulerLock(lock, config) {
+  if (!lock?.acquired || lock.disabled || lock.lockBackend === 'postgres' || !config.lockFile) {
+    return;
+  }
+  const now = new Date();
+  await fs.utimes(config.lockFile, now, now);
 }
 
 export async function acquireSchedulerLock(config) {
@@ -222,7 +254,11 @@ export async function acquireSchedulerLock(config) {
     }
     const stat = await fs.stat(config.lockFile);
     const ageMs = Date.now() - stat.mtimeMs;
-    if (config.lockStaleMs && ageMs > config.lockStaleMs) {
+    const existing = await readLockPayload(config.lockFile);
+    const holderAlive = existing?.pid ? processAlive(existing.pid) : false;
+    const staleByAge = config.lockStaleMs && ageMs > config.lockStaleMs;
+    const staleByPid = existing?.pid && !holderAlive;
+    if (staleByAge || staleByPid) {
       await fs.rm(config.lockFile, { force: true });
       await writeLock();
     } else {
@@ -255,7 +291,7 @@ export async function runSchedulerTick(config, { loadStateImpl = loadState, runJ
       ok: true,
       actorUserId: config.actorUserId,
       dryRun: true,
-      queues: schedulerDueSummary(state, { limit: config.limit, queues: config.queues }),
+      queues: schedulerDueSummary(state, { leaseMs: config.jobLeaseMs, limit: config.limit, queues: config.queues }),
       startedAt,
       statePath,
       summary: summarizeState(state, statePath),
@@ -267,8 +303,10 @@ export async function runSchedulerTick(config, { loadStateImpl = loadState, runJ
     const result = await runJobsImpl({ queue, limit: config.limit }, {
       actorUserId: config.actorUserId,
       env: config.env,
+      jobLeaseMs: config.jobLeaseMs,
       providerSandboxTimeoutMs: config.providerSandboxTimeoutMs,
       statePath,
+      workerId: config.workerId,
     });
     outcomes.push({
       action: result.action,
@@ -341,6 +379,7 @@ export async function startSchedulerDaemon(config, { log } = {}) {
 
   async function runLoop() {
     while (!stopped) {
+      await refreshSchedulerLock(lock, config);
       const result = await runSchedulerTick({ ...config, lock: false });
       await fs.mkdir(path.dirname(config.heartbeatFile), { recursive: true });
       await fs.writeFile(config.heartbeatFile, `${JSON.stringify({

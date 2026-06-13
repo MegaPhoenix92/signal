@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import {
+  providerFetch,
+} from './signal-provider-fetch.mjs';
 
 export const STRIPE_WEBHOOK_TOLERANCE_SECONDS = 300;
 export const STRIPE_API_VERSION = '2026-02-25.clover';
@@ -178,7 +181,7 @@ async function postStripeForm(endpoint, params, { env = process.env, fetchImpl =
   }
 
   const body = encodeStripeForm(params);
-  const response = await fetchImpl(endpoint, {
+  const response = await providerFetch(endpoint, {
     body,
     headers: {
       Authorization: `Bearer ${secretKey}`,
@@ -187,7 +190,7 @@ async function postStripeForm(endpoint, params, { env = process.env, fetchImpl =
       ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
     },
     method: 'POST',
-  });
+  }, { env, fetchImpl });
   const payload = await parseStripeResponse(response);
   if (!response.ok) {
     throw new PaymentProviderError(payload.error?.message ?? 'Stripe API request failed.', {

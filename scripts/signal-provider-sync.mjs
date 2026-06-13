@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import {
+  providerFetch,
+} from './signal-provider-fetch.mjs';
 
 export class ProviderSyncError extends Error {
   constructor(message, { code = 'PROVIDER_SYNC_ERROR', status = 400, details = {} } = {}) {
@@ -259,14 +262,14 @@ function providerErrorMessage(parsed) {
   return parsed?.error?.message ?? parsed?.message ?? null;
 }
 
-async function fetchJson(request, { accessToken, fetchImpl, mailbox }) {
-  const response = await fetchImpl(request.url, {
+async function fetchJson(request, { accessToken, env = process.env, fetchImpl, mailbox }) {
+  const response = await providerFetch(request.url, {
     method: request.method,
     headers: {
       Authorization: `Bearer ${accessToken}`,
       Accept: 'application/json',
     },
-  });
+  }, { env, fetchImpl });
   const parsed = await parseJsonResponse(response, { mailbox, request });
   if (!response.ok) {
     const retryAfterHeader = responseHeader(response, 'retry-after');
@@ -312,7 +315,7 @@ function gmailMessageIds(response = {}) {
   return [...ids];
 }
 
-async function fetchGmailMessageDetails(response, { accessToken, fetchImpl, mailbox }) {
+async function fetchGmailMessageDetails(response, { accessToken, env = process.env, fetchImpl, mailbox }) {
   if (Array.isArray(response.messageDetails)) {
     return response;
   }
@@ -330,7 +333,7 @@ async function fetchGmailMessageDetails(response, { accessToken, fetchImpl, mail
     };
     request.url = appendQuery(request.endpoint, request.query);
     request.requestDigest = requestDigest(request);
-    details.push(await fetchJson(request, { accessToken, fetchImpl, mailbox }));
+    details.push(await fetchJson(request, { accessToken, env, fetchImpl, mailbox }));
   }
   return {
     ...response,
@@ -369,12 +372,12 @@ export async function fetchProviderSync({ accessToken, cursor = {}, env = proces
       },
     });
   }
-  const response = await fetchJson(request, { accessToken, fetchImpl, mailbox });
+  const response = await fetchJson(request, { accessToken, env, fetchImpl, mailbox });
   return {
     live: true,
     request,
     response: mailbox.provider === 'gmail'
-      ? await fetchGmailMessageDetails(response, { accessToken, fetchImpl, mailbox })
+      ? await fetchGmailMessageDetails(response, { accessToken, env, fetchImpl, mailbox })
       : response,
   };
 }
