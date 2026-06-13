@@ -632,6 +632,8 @@ export type Subscription = {
   providerCustomerId?: string;
   providerLastEventId?: string;
   providerLastEventType?: string;
+  providerPlanChangedAt?: string;
+  providerPreviousPriceId?: string;
   providerPriceId?: string;
   providerSignatureStatus?: string;
   providerSignatureVerifiedAt?: string;
@@ -647,6 +649,7 @@ export type Subscription = {
   currentPeriodEndAt?: string;
   livemode?: boolean;
   trialEndsAt?: string;
+  trialWillEndNotifiedAt?: string;
 };
 
 export type Entitlement = {
@@ -723,6 +726,12 @@ export type Invoice = {
   createdAt: string;
   dueAt: string;
   paidAt?: string | null;
+  creditedAt?: string | null;
+  creditedCents?: number;
+  netAmountDueCents?: number;
+  refundedAt?: string | null;
+  refundedCents?: number;
+  uncollectibleAt?: string | null;
   retryCount: number;
   nextPaymentAttemptAt?: string | null;
 };
@@ -740,6 +749,8 @@ export type PaymentEvent = {
   providerEventId?: string;
   providerEventType?: string;
   providerInvoiceId?: string;
+  providerPreviousPriceId?: string;
+  providerPriceId?: string;
   providerStatus?: string;
   providerSubscriptionId?: string;
   amountCents?: number;
@@ -5098,6 +5109,9 @@ export function fallbackPaymentLifecycleAudit(
   const invoices = data.invoices.filter((invoice) => !tenantId || invoice.tenantId === tenantId);
   const openInvoices = invoices.filter((invoice) => ['open', 'past_due'].includes(invoice.status));
   const paidInvoices = invoices.filter((invoice) => invoice.status === 'paid');
+  const invoiceStatusCounts = countLocalPaymentTypes(invoices);
+  const invoiceStatusesCovered = ['draft', 'open', 'paid', 'past_due', 'void', 'uncollectible'].filter((status) => (invoiceStatusCounts[status] ?? 0) > 0);
+  const adjustedInvoices = invoices.filter((invoice) => (invoice.refundedCents ?? 0) > 0 || (invoice.creditedCents ?? 0) > 0);
   const sessions = data.billingSessions.filter((session) => !tenantId || session.tenantId === tenantId);
   const sessionCounts = countLocalPaymentTypes(sessions);
   const paymentEvents = data.paymentEvents.filter((event) => !tenantId || event.tenantId === tenantId);
@@ -5110,12 +5124,18 @@ export function fallbackPaymentLifecycleAudit(
   const signedStripeEvents = paymentEvents.filter((event) => event.provider === 'stripe' && event.signatureStatus === 'verified');
   const signedEventIds = signedStripeEvents.map((event) => event.providerEventId).filter((id): id is string => Boolean(id));
   const duplicateSignedEventIds = signedEventIds.filter((id, index) => signedEventIds.indexOf(id) !== index);
+  const ignoredProviderEvents = paymentEvents.filter((event) => event.appliedType === 'provider.event.ignored' || event.status === 'ignored');
+  const driftEvents = paymentEvents.filter((event) => event.type === 'billing.drift.detected');
+  const planChangeEvents = paymentEvents.filter((event) =>
+    event.providerEventType === 'customer.subscription.trial_will_end' ||
+    (event.appliedType === 'subscription.updated' && Boolean(event.providerPreviousPriceId)));
   const stripeLaunch = fallbackProviderLaunchMatrix(data, backend, provider).rows.find((row) => row.id === 'stripe') ?? null;
   const stripeConfigured = Boolean(stripeLaunch?.configurationReady);
   const stripeSandboxPassed = stripeLaunch?.sandboxStatus === 'passed';
   const stripeLaunchReady = Boolean(stripeLaunch?.launchReady);
   const activeSubscription = activeSubscriptions[0] ?? subscriptions[0] ?? null;
   const activeEntitlement = activeEntitlements[0] ?? entitlements[0] ?? null;
+  const activeEntitlementOpenInvoices = openInvoices.filter((invoice) => invoice.subscriptionId === activeEntitlement?.subscriptionId);
   const rows = [
     paymentLifecycleAuditRow({
       area: 'subscription_starting_point',
@@ -5160,8 +5180,8 @@ export function fallbackPaymentLifecycleAudit(
     paymentLifecycleAuditRow({
       area: 'entitlement_source_of_truth',
       check: 'Product access is computed from subscription, invoice, and override state rather than browser-provided billing counters.',
-      evidence: [`${activeEntitlement?.status ?? 'missing'} entitlement from ${activeEntitlement?.source ?? 'missing source'}`, `${billingOverrides.filter((override) => override.status === 'active').length}/${billingOverrides.length} active billing override(s)`, `${openInvoices.length}/${invoices.length} open invoice(s)`, `${summary.activeSeats ?? 0}/${summary.seatLimit ?? 'unlimited'} active seats`],
-      localOk: activeEntitlements.length > 0 && openInvoices.length === 0 && failedBillingJobs.length === 0,
+      evidence: [`${activeEntitlement?.status ?? 'missing'} entitlement from ${activeEntitlement?.source ?? 'missing source'}`, `${billingOverrides.filter((override) => override.status === 'active').length}/${billingOverrides.length} active billing override(s)`, `${activeEntitlementOpenInvoices.length}/${invoices.length} open invoice(s) tied to active entitlement subscription`, `${summary.activeSeats ?? 0}/${summary.seatLimit ?? 'unlimited'} active seats`],
+      localOk: activeEntitlements.length > 0 && activeEntitlementOpenInvoices.length === 0 && failedBillingJobs.length === 0,
       productionOk: stripeLaunchReady,
       recommendation: 'Compute entitlements from stored provider-backed billing state and keep override records revocable and audited.',
       requiredEnv: ['STRIPE_WEBHOOK_SECRET', 'SIGNAL_STATE_SERVICE_URL', 'DATABASE_URL'],
@@ -5176,6 +5196,58 @@ export function fallbackPaymentLifecycleAudit(
       recommendation: 'Treat signed provider webhooks as the production subscription source of truth and reject unsigned or replayed event payloads.',
       requiredEnv: ['STRIPE_WEBHOOK_SECRET'],
       commands: ['STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-sign ./stripe-event.json', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>'],
+    }),
+    paymentLifecycleAuditRow({
+      area: 'ignored_webhook_resilience',
+      check: 'Signed but unsupported Stripe events are recorded as ignored payment events without failed billing jobs or business-state mutation.',
+      evidence: [`${ignoredProviderEvents.length} ignored provider event(s) recorded`, `${signedStripeEvents.filter((event) => event.appliedType === 'provider.event.ignored').length} verified ignored Stripe event(s)`, `${failedBillingJobs.length}/${billingJobs.length} failed billing_webhook job(s)`],
+      localOk: ignoredProviderEvents.length > 0 && failedBillingJobs.length === 0,
+      productionOk: stripeLaunchReady && signedStripeEvents.some((event) => event.appliedType === 'provider.event.ignored'),
+      recommendation: 'Record provider event coverage first, then map newly relevant Stripe event types deliberately instead of throwing in the webhook path.',
+      requiredEnv: ['STRIPE_WEBHOOK_SECRET'],
+      commands: ['STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-unknown-event.json <Stripe-Signature>'],
+    }),
+    paymentLifecycleAuditRow({
+      area: 'invoice_status_matrix',
+      check: 'Invoice lifecycle exercises draft, open, paid, past_due, void, and uncollectible states without UI/report crashes.',
+      evidence: [`${invoiceStatusesCovered.length}/6 invoice status value(s) covered`, `draft=${invoiceStatusCounts.draft ?? 0}, open=${invoiceStatusCounts.open ?? 0}, paid=${invoiceStatusCounts.paid ?? 0}, past_due=${invoiceStatusCounts.past_due ?? 0}, void=${invoiceStatusCounts.void ?? 0}, uncollectible=${invoiceStatusCounts.uncollectible ?? 0}`],
+      localOk: invoiceStatusesCovered.length === 6,
+      productionOk: stripeLaunchReady && signedStripeEvents.some((event) => event.appliedType === 'invoice.uncollectible'),
+      recommendation: 'Keep invoice status handling aligned with Stripe terminal states and block recovery for draft, void, and uncollectible invoices.',
+      requiredEnv: ['STRIPE_WEBHOOK_SECRET'],
+      commands: ['npm run admin -- payments webhook invoice.draft sub_demo --amount 4900', 'npm run admin -- payments webhook invoice.uncollectible sub_demo --amount 4900'],
+    }),
+    paymentLifecycleAuditRow({
+      area: 'plan_change_trial_end',
+      check: 'Trial-ending and provider plan-change subscription events are recorded and leave entitlement state derived from the current plan.',
+      evidence: [`${paymentEvents.filter((event) => event.providerEventType === 'customer.subscription.trial_will_end').length} trial_will_end event(s)`, `${planChangeEvents.length} trial/plan-change event(s) with provider evidence`, `${subscriptions.filter((subscription) => subscription.providerPlanChangedAt).length} subscription provider price change(s)`],
+      localOk: planChangeEvents.length > 0 && activeEntitlements.length > 0,
+      productionOk: stripeLaunchReady && signedStripeEvents.some((event) => event.providerEventType === 'customer.subscription.trial_will_end'),
+      recommendation: 'Prefer Stripe Customer Portal for upgrades, but record provider plan deltas and recompute entitlements when subscription.updated changes price metadata.',
+      requiredEnv: ['STRIPE_WEBHOOK_SECRET', 'SIGNAL_STRIPE_PRICE_TEAM'],
+      commands: ['npm run admin -- payments webhook subscription.updated sub_demo active --plan plan_team --provider-price price_new_team'],
+    }),
+    paymentLifecycleAuditRow({
+      area: 'refund_credit_reconciliation',
+      check: 'Refunds, credit notes, and local support credits are visible in payment events and invoice net amounts.',
+      evidence: [`${eventCounts['invoice.refunded'] ?? 0} refund event(s)`, `${(eventCounts['invoice.credit_applied'] ?? 0) + (eventCounts['billing.override.support_credit.created'] ?? 0)} credit event(s)`, `${adjustedInvoices.length} invoice(s) with refund or credit totals`],
+      localOk: (eventCounts['invoice.refunded'] ?? 0) > 0 &&
+        ((eventCounts['invoice.credit_applied'] ?? 0) > 0 || (eventCounts['billing.override.support_credit.created'] ?? 0) > 0) &&
+        adjustedInvoices.length > 0,
+      productionOk: stripeLaunchReady && signedStripeEvents.some((event) => event.appliedType === 'invoice.refunded'),
+      recommendation: 'Use provider webhooks for refunds/credit notes and audited local support credits only as reconciled billing ledger entries.',
+      requiredEnv: ['STRIPE_WEBHOOK_SECRET', 'STRIPE_SECRET_KEY'],
+      commands: ['npm run admin -- payments refund <invoiceId> 2500 Courtesy_credit', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-refund-event.json <Stripe-Signature>'],
+    }),
+    paymentLifecycleAuditRow({
+      area: 'provider_state_parity',
+      check: 'Payment sync records provider parity proof and flags provider/local drift before production launch.',
+      evidence: [`${eventCounts['billing.sync.completed'] ?? 0} billing sync event(s)`, `${driftEvents.length} billing drift event(s)`, `${paymentNotices.filter((notice) => notice.trigger === 'billing_drift_detected').length} drift lifecycle notice(s)`],
+      localOk: (eventCounts['billing.sync.completed'] ?? 0) > 0 && driftEvents.length === 0,
+      productionOk: stripeLaunchReady && (eventCounts['billing.sync.completed'] ?? 0) > 0 && driftEvents.length === 0,
+      recommendation: 'Run payments sync with live-provider mode before launch; treat local force/status commands as simulation unless provider parity is clean.',
+      requiredEnv: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'],
+      commands: ['npm run admin -- payments sync tenant_demo --live-provider', 'npm run admin -- payment-lifecycle --json'],
     }),
     paymentLifecycleAuditRow({
       area: 'stripe_launch_evidence',

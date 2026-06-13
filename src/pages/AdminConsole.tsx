@@ -2705,7 +2705,7 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
                     row.commands[0] ?? '-',
                   ])}
                 />
-                <CommandStrip commands={['npm run admin -- payment-lifecycle --json', 'curl http://127.0.0.1:8787/api/payment-lifecycle', 'npm run admin -- payment-lifecycle --env-file ./.env.production --json', 'npm run admin -- provider-launch --env-file ./.env.production --json']} />
+                <CommandStrip commands={['npm run admin -- payment-lifecycle --json', 'curl http://127.0.0.1:8787/api/payment-lifecycle', 'npm run admin -- payment-lifecycle --env-file ./.env.production --json', 'npm run admin -- provider-launch --env-file ./.env.production --json', 'npm run admin -- payments refund <invoiceId> 2500 Courtesy_credit', 'npm run admin -- payments sync tenant_demo --live-provider']} />
               </article>
             ) : (
               <ReportLoadingPanel icon={CreditCard} title="Payment lifecycle audit" />

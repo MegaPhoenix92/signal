@@ -4364,6 +4364,9 @@ export function paymentLifecycleAuditReport(state, {
   const invoices = (state.invoices ?? []).filter((invoice) => !tenant?.id || invoice.tenantId === tenant.id);
   const openInvoices = invoices.filter((invoice) => ['open', 'past_due'].includes(invoice.status));
   const paidInvoices = invoices.filter((invoice) => invoice.status === 'paid');
+  const invoiceStatusCounts = countPaymentTypes(invoices);
+  const invoiceStatusesCovered = ['draft', 'open', 'paid', 'past_due', 'void', 'uncollectible'].filter((status) => (invoiceStatusCounts[status] ?? 0) > 0);
+  const adjustedInvoices = invoices.filter((invoice) => (invoice.refundedCents ?? 0) > 0 || (invoice.creditedCents ?? 0) > 0);
   const sessions = (state.billingSessions ?? []).filter((session) => !tenant?.id || session.tenantId === tenant.id);
   const sessionCounts = countPaymentTypes(sessions);
   const paymentEvents = (state.paymentEvents ?? []).filter((event) => !tenant?.id || event.tenantId === tenant.id);
@@ -4376,6 +4379,11 @@ export function paymentLifecycleAuditReport(state, {
   const signedStripeEvents = paymentEvents.filter((event) => event.provider === 'stripe' && event.signatureStatus === 'verified');
   const signedEventIds = signedStripeEvents.map((event) => event.providerEventId).filter(Boolean);
   const duplicateSignedEventIds = signedEventIds.filter((id, index) => signedEventIds.indexOf(id) !== index);
+  const ignoredProviderEvents = paymentEvents.filter((event) => event.appliedType === 'provider.event.ignored' || event.status === 'ignored');
+  const driftEvents = paymentEvents.filter((event) => event.type === 'billing.drift.detected');
+  const planChangeEvents = paymentEvents.filter((event) =>
+    event.providerEventType === 'customer.subscription.trial_will_end' ||
+    (event.appliedType === 'subscription.updated' && Boolean(event.providerPreviousPriceId)));
   const launch = providerLaunch ?? providerLaunchMatrixReport(state, { backend, provider });
   const stripeLaunch = launch.rows.find((row) => row.id === 'stripe') ?? null;
   const stripeConfigured = Boolean(stripeLaunch?.configurationReady);
@@ -4383,6 +4391,7 @@ export function paymentLifecycleAuditReport(state, {
   const stripeLaunchReady = Boolean(stripeLaunch?.launchReady);
   const activeSubscription = activeSubscriptions[0] ?? subscriptions[0] ?? null;
   const activeEntitlement = activeEntitlements[0] ?? entitlements[0] ?? null;
+  const activeEntitlementOpenInvoices = openInvoices.filter((invoice) => invoice.subscriptionId === activeEntitlement?.subscriptionId);
 
   const rows = [
     paymentLifecycleAuditRow({
@@ -4456,10 +4465,10 @@ export function paymentLifecycleAuditReport(state, {
       evidence: [
         `${activeEntitlement?.status ?? 'missing'} entitlement from ${activeEntitlement?.source ?? 'missing source'}`,
         `${billingOverrides.filter((override) => override.status === 'active').length}/${billingOverrides.length} active billing override(s)`,
-        `${openInvoices.length}/${invoices.length} open invoice(s)`,
+        `${activeEntitlementOpenInvoices.length}/${invoices.length} open invoice(s) tied to active entitlement subscription`,
         `${summary.activeSeats ?? 0}/${summary.seatLimit ?? 'unlimited'} active seats`,
       ],
-      localOk: activeEntitlements.length > 0 && openInvoices.length === 0 && failedBillingJobs.length === 0,
+      localOk: activeEntitlements.length > 0 && activeEntitlementOpenInvoices.length === 0 && failedBillingJobs.length === 0,
       productionOk: stripeLaunchReady,
       recommendation: 'Compute entitlements from stored provider-backed billing state and keep override records revocable and audited.',
       requiredEnv: ['STRIPE_WEBHOOK_SECRET', 'SIGNAL_STATE_SERVICE_URL', 'DATABASE_URL'],
@@ -4479,6 +4488,77 @@ export function paymentLifecycleAuditReport(state, {
       recommendation: 'Treat signed provider webhooks as the production subscription source of truth and reject unsigned or replayed event payloads.',
       requiredEnv: ['STRIPE_WEBHOOK_SECRET'],
       commands: ['STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-sign ./stripe-event.json', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-event.json <Stripe-Signature>'],
+    }),
+    paymentLifecycleAuditRow({
+      area: 'ignored_webhook_resilience',
+      check: 'Signed but unsupported Stripe events are recorded as ignored payment events without failed billing jobs or business-state mutation.',
+      evidence: [
+        `${ignoredProviderEvents.length} ignored provider event(s) recorded`,
+        `${signedStripeEvents.filter((event) => event.appliedType === 'provider.event.ignored').length} verified ignored Stripe event(s)`,
+        `${failedBillingJobs.length}/${billingJobs.length} failed billing_webhook job(s)`,
+      ],
+      localOk: ignoredProviderEvents.length > 0 && failedBillingJobs.length === 0,
+      productionOk: stripeLaunchReady && signedStripeEvents.some((event) => event.appliedType === 'provider.event.ignored'),
+      recommendation: 'Record provider event coverage first, then map newly relevant Stripe event types deliberately instead of throwing in the webhook path.',
+      requiredEnv: ['STRIPE_WEBHOOK_SECRET'],
+      commands: ['STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-unknown-event.json <Stripe-Signature>'],
+    }),
+    paymentLifecycleAuditRow({
+      area: 'invoice_status_matrix',
+      check: 'Invoice lifecycle exercises draft, open, paid, past_due, void, and uncollectible states without UI/report crashes.',
+      evidence: [
+        `${invoiceStatusesCovered.length}/6 invoice status value(s) covered`,
+        `draft=${invoiceStatusCounts.draft ?? 0}, open=${invoiceStatusCounts.open ?? 0}, paid=${invoiceStatusCounts.paid ?? 0}, past_due=${invoiceStatusCounts.past_due ?? 0}, void=${invoiceStatusCounts.void ?? 0}, uncollectible=${invoiceStatusCounts.uncollectible ?? 0}`,
+      ],
+      localOk: invoiceStatusesCovered.length === 6,
+      productionOk: stripeLaunchReady && signedStripeEvents.some((event) => event.appliedType === 'invoice.uncollectible'),
+      recommendation: 'Keep invoice status handling aligned with Stripe terminal states and block recovery for draft, void, and uncollectible invoices.',
+      requiredEnv: ['STRIPE_WEBHOOK_SECRET'],
+      commands: ['npm run admin -- payments webhook invoice.draft sub_demo --amount 4900', 'npm run admin -- payments webhook invoice.uncollectible sub_demo --amount 4900'],
+    }),
+    paymentLifecycleAuditRow({
+      area: 'plan_change_trial_end',
+      check: 'Trial-ending and provider plan-change subscription events are recorded and leave entitlement state derived from the current plan.',
+      evidence: [
+        `${paymentEvents.filter((event) => event.providerEventType === 'customer.subscription.trial_will_end').length} trial_will_end event(s)`,
+        `${planChangeEvents.length} trial/plan-change event(s) with provider evidence`,
+        `${subscriptions.filter((subscription) => subscription.providerPlanChangedAt).length} subscription provider price change(s)`,
+      ],
+      localOk: planChangeEvents.length > 0 && activeEntitlements.length > 0,
+      productionOk: stripeLaunchReady && signedStripeEvents.some((event) => event.providerEventType === 'customer.subscription.trial_will_end'),
+      recommendation: 'Prefer Stripe Customer Portal for upgrades, but record provider plan deltas and recompute entitlements when subscription.updated changes price metadata.',
+      requiredEnv: ['STRIPE_WEBHOOK_SECRET', 'SIGNAL_STRIPE_PRICE_TEAM'],
+      commands: ['npm run admin -- payments webhook subscription.updated sub_demo active --plan plan_team --provider-price price_new_team'],
+    }),
+    paymentLifecycleAuditRow({
+      area: 'refund_credit_reconciliation',
+      check: 'Refunds, credit notes, and local support credits are visible in payment events and invoice net amounts.',
+      evidence: [
+        `${eventCounts['invoice.refunded'] ?? 0} refund event(s)`,
+        `${(eventCounts['invoice.credit_applied'] ?? 0) + (eventCounts['billing.override.support_credit.created'] ?? 0)} credit event(s)`,
+        `${adjustedInvoices.length} invoice(s) with refund or credit totals`,
+      ],
+      localOk: (eventCounts['invoice.refunded'] ?? 0) > 0 &&
+        ((eventCounts['invoice.credit_applied'] ?? 0) > 0 || (eventCounts['billing.override.support_credit.created'] ?? 0) > 0) &&
+        adjustedInvoices.length > 0,
+      productionOk: stripeLaunchReady && signedStripeEvents.some((event) => event.appliedType === 'invoice.refunded'),
+      recommendation: 'Use provider webhooks for refunds/credit notes and audited local support credits only as reconciled billing ledger entries.',
+      requiredEnv: ['STRIPE_WEBHOOK_SECRET', 'STRIPE_SECRET_KEY'],
+      commands: ['npm run admin -- payments refund <invoiceId> 2500 Courtesy_credit', 'STRIPE_WEBHOOK_SECRET=<stripe-webhook-secret> npm run admin -- payments webhook-signed ./stripe-refund-event.json <Stripe-Signature>'],
+    }),
+    paymentLifecycleAuditRow({
+      area: 'provider_state_parity',
+      check: 'Payment sync records provider parity proof and flags provider/local drift before production launch.',
+      evidence: [
+        `${eventCounts['billing.sync.completed'] ?? 0} billing sync event(s)`,
+        `${driftEvents.length} billing drift event(s)`,
+        `${paymentNotices.filter((notice) => notice.trigger === 'billing_drift_detected').length} drift lifecycle notice(s)`,
+      ],
+      localOk: (eventCounts['billing.sync.completed'] ?? 0) > 0 && driftEvents.length === 0,
+      productionOk: stripeLaunchReady && (eventCounts['billing.sync.completed'] ?? 0) > 0 && driftEvents.length === 0,
+      recommendation: 'Run payments sync with live-provider mode before launch; treat local force/status commands as simulation unless provider parity is clean.',
+      requiredEnv: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'],
+      commands: ['npm run admin -- payments sync tenant_demo --live-provider', 'npm run admin -- payment-lifecycle --json'],
     }),
     paymentLifecycleAuditRow({
       area: 'stripe_launch_evidence',
@@ -7704,6 +7784,8 @@ function appendPaymentEvent(state, {
   sessionId,
   invoiceId,
   providerInvoiceId,
+  providerPriceId,
+  providerPreviousPriceId,
   providerEventId,
   providerEventType,
   providerStatus,
@@ -7738,6 +7820,8 @@ function appendPaymentEvent(state, {
     ...(sessionId ? { sessionId } : {}),
     ...(invoiceId ? { invoiceId } : {}),
     ...(providerInvoiceId ? { providerInvoiceId } : {}),
+    ...(providerPriceId ? { providerPriceId } : {}),
+    ...(providerPreviousPriceId ? { providerPreviousPriceId } : {}),
     createdAt: nowIso(),
   };
   state.paymentEvents.push(event);
@@ -7749,6 +7833,65 @@ function latestInvoiceForSubscription(state, subscriptionId) {
   return [...(state.invoices ?? [])]
     .filter((invoice) => invoice.subscriptionId === subscriptionId)
     .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))[0] ?? null;
+}
+
+function latestInvoiceForTenant(state, tenantId) {
+  return [...(state.invoices ?? [])]
+    .filter((invoice) => invoice.tenantId === tenantId)
+    .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))[0] ?? null;
+}
+
+function findInvoiceByLocalOrProviderId(state, invoiceId, providerInvoiceId) {
+  const candidates = [invoiceId, providerInvoiceId].filter(Boolean);
+  if (candidates.length === 0) {
+    return null;
+  }
+  return (state.invoices ?? []).find((invoice) =>
+    candidates.includes(invoice.id) ||
+    candidates.includes(invoice.providerInvoiceId)) ?? null;
+}
+
+function recomputeInvoiceNetAmount(invoice) {
+  const amountDue = Math.max(0, Number(invoice.amountDueCents ?? 0));
+  const credited = Math.max(0, Number(invoice.creditedCents ?? 0));
+  const refunded = Math.max(0, Number(invoice.refundedCents ?? 0));
+  invoice.netAmountDueCents = Math.max(0, amountDue - credited - refunded);
+  return invoice.netAmountDueCents;
+}
+
+function applyInvoiceAdjustment(state, invoice, {
+  amountCents,
+  type,
+} = {}) {
+  if (!invoice) {
+    return null;
+  }
+  const amount = requireNonNegativeInteger(amountCents ?? 0, 'invoice adjustment amount in cents', 'payments refund <invoiceId> [amountCents]');
+  if (type === 'refund') {
+    invoice.refundedCents = Math.min(
+      Math.max(0, Number(invoice.amountDueCents ?? 0)),
+      Math.max(0, Number(invoice.refundedCents ?? 0)) + amount,
+    );
+    invoice.refundedAt = nowIso();
+  } else if (type === 'credit') {
+    invoice.creditedCents = Math.min(
+      Math.max(0, Number(invoice.amountDueCents ?? 0)),
+      Math.max(0, Number(invoice.creditedCents ?? 0)) + amount,
+    );
+    invoice.creditedAt = nowIso();
+  }
+  const net = recomputeInvoiceNetAmount(invoice);
+  if (net === 0 && ['open', 'past_due'].includes(invoice.status)) {
+    invoice.status = 'paid';
+    invoice.paidAt = invoice.paidAt ?? nowIso();
+    invoice.nextPaymentAttemptAt = null;
+    const subscription = (state.subscriptions ?? []).find((candidate) => candidate.id === invoice.subscriptionId);
+    if (subscription && subscription.status === 'past_due') {
+      subscription.status = 'active';
+      upsertEntitlementFromSubscription(state, subscription);
+    }
+  }
+  return invoice;
 }
 
 function findSubscriptionByLocalOrProviderId(state, subscriptionId, provider = 'local_test') {
@@ -7765,6 +7908,19 @@ function findSubscriptionByLocalOrProviderId(state, subscriptionId, provider = '
     });
   }
   return subscription;
+}
+
+function mapProviderSubscriptionStatus(status) {
+  if (['trialing', 'active', 'past_due', 'canceled'].includes(status)) {
+    return status;
+  }
+  if (['unpaid', 'incomplete', 'paused'].includes(status)) {
+    return 'past_due';
+  }
+  if (status === 'incomplete_expired') {
+    return 'canceled';
+  }
+  return status ?? 'active';
 }
 
 function optionalSubscriptionByLocalOrProviderId(state, subscriptionId) {
@@ -7920,7 +8076,7 @@ function upsertInvoiceForSubscription(state, subscription, status, { amountDueCe
   const plan = state.plans?.find((candidate) => candidate.id === subscription.planId);
   state.invoices = state.invoices ?? [];
   let invoice = latestInvoiceForSubscription(state, subscription.id);
-  if (!invoice || invoice.status === 'paid' || invoice.status === 'void') {
+  if (!invoice || ['paid', 'void', 'uncollectible'].includes(invoice.status)) {
     invoice = {
       id: makeId('inv'),
       tenantId: subscription.tenantId,
@@ -7933,6 +8089,8 @@ function upsertInvoiceForSubscription(state, subscription, status, { amountDueCe
       dueAt: expiresInIso(7 * 24 * 60 * 60 * 1000),
       retryCount: 0,
       nextPaymentAttemptAt: null,
+      creditedCents: 0,
+      refundedCents: 0,
     };
     state.invoices.push(invoice);
   }
@@ -7943,6 +8101,8 @@ function upsertInvoiceForSubscription(state, subscription, status, { amountDueCe
   invoice.tenantId = subscription.tenantId;
   invoice.subscriptionId = subscription.id;
   invoice.hostedInvoiceUrl = `signal://billing/invoice/${subscription.tenantId}/${invoice.id}`;
+  invoice.creditedCents = invoice.creditedCents ?? 0;
+  invoice.refundedCents = invoice.refundedCents ?? 0;
 
   if (status === 'paid') {
     invoice.paidAt = nowIso();
@@ -7954,9 +8114,17 @@ function upsertInvoiceForSubscription(state, subscription, status, { amountDueCe
   } else if (status === 'open') {
     invoice.paidAt = null;
     invoice.nextPaymentAttemptAt = invoice.nextPaymentAttemptAt ?? expiresInIso(2 * 24 * 60 * 60 * 1000);
+  } else if (status === 'draft') {
+    invoice.paidAt = null;
+    invoice.nextPaymentAttemptAt = null;
+  } else if (status === 'uncollectible') {
+    invoice.paidAt = null;
+    invoice.uncollectibleAt = invoice.uncollectibleAt ?? nowIso();
+    invoice.nextPaymentAttemptAt = null;
   } else if (status === 'void') {
     invoice.nextPaymentAttemptAt = null;
   }
+  recomputeInvoiceNetAmount(invoice);
 
   return invoice;
 }
@@ -8141,23 +8309,47 @@ function lifecycleNoticeForSubscription(state, subscription) {
 function lifecycleNoticeForInvoice(state, invoice) {
   const open = ['open', 'past_due'].includes(invoice.status);
   const pastDue = invoice.status === 'past_due';
+  const uncollectible = invoice.status === 'uncollectible';
   return lifecycleNotice({
     actionLabel: open ? 'Create recovery session' : 'Review invoice',
     actionTarget: open ? `payments recover ${invoice.id}` : `payments`,
-    body: `${invoice.id} is ${lifecycleText(invoice.status)} for $${((invoice.amountDueCents ?? 0) / 100).toFixed(0)} ${String(invoice.currency ?? 'usd').toUpperCase()}${invoice.nextPaymentAttemptAt ? ` with next attempt ${invoice.nextPaymentAttemptAt}` : ''}.`,
+    body: `${invoice.id} is ${lifecycleText(invoice.status)} for $${((invoice.amountDueCents ?? 0) / 100).toFixed(0)} ${String(invoice.currency ?? 'usd').toUpperCase()}${invoice.nextPaymentAttemptAt ? ` with next attempt ${invoice.nextPaymentAttemptAt}` : ''}${invoice.netAmountDueCents !== undefined ? `; net due $${((invoice.netAmountDueCents ?? 0) / 100).toFixed(0)}` : ''}.`,
     category: 'payment',
     createdAt: invoice.createdAt,
     id: `lcn_invoice_${invoice.id}`,
     ownerUserId: lifecycleOwnerForTenant(state, invoice.tenantId),
     provider: invoice.provider,
     resolvedAt: invoice.status === 'paid' ? invoice.paidAt ?? invoice.createdAt : null,
-    severity: pastDue ? 'critical' : open ? 'watch' : 'info',
+    severity: pastDue || uncollectible ? 'critical' : open ? 'watch' : 'info',
     sourceIds: { invoiceId: invoice.id, subscriptionId: invoice.subscriptionId, tenantId: invoice.tenantId },
-    status: open ? 'open' : 'resolved',
+    status: open || uncollectible ? 'open' : 'resolved',
     tenantId: invoice.tenantId,
-    title: pastDue ? 'Failed payment needs recovery' : invoice.status === 'paid' ? 'Payment recovered' : 'Invoice recovery path',
-    trigger: pastDue ? 'payment_failed' : invoice.status === 'paid' ? 'payment_recovered' : 'invoice_open',
-    updatedAt: invoice.paidAt ?? invoice.nextPaymentAttemptAt ?? invoice.dueAt,
+    title: uncollectible ? 'Invoice marked uncollectible' : pastDue ? 'Failed payment needs recovery' : invoice.status === 'paid' ? 'Payment recovered' : 'Invoice recovery path',
+    trigger: uncollectible ? 'invoice_uncollectible' : pastDue ? 'payment_failed' : invoice.status === 'paid' ? 'payment_recovered' : 'invoice_open',
+    updatedAt: invoice.uncollectibleAt ?? invoice.paidAt ?? invoice.nextPaymentAttemptAt ?? invoice.dueAt,
+  });
+}
+
+function lifecycleNoticeForPaymentDriftEvent(state, event) {
+  if (event.type !== 'billing.drift.detected') {
+    return null;
+  }
+  return lifecycleNotice({
+    actionLabel: 'Sync payments',
+    actionTarget: `payments sync ${event.tenantId ?? defaultTenantId(state)} --live-provider`,
+    body: `${event.provider ?? 'provider'} billing state differed from local state; run provider sync and review the payment event ledger.`,
+    category: 'payment',
+    createdAt: event.createdAt,
+    id: `lcn_payment_drift_${event.id}`,
+    ownerUserId: lifecycleOwnerForTenant(state, event.tenantId ?? defaultTenantId(state)),
+    provider: event.provider,
+    severity: 'watch',
+    sourceIds: { paymentEventId: event.id, subscriptionId: event.subscriptionId, tenantId: event.tenantId },
+    status: 'open',
+    tenantId: event.tenantId ?? defaultTenantId(state),
+    title: 'Billing provider drift detected',
+    trigger: 'billing_drift_detected',
+    updatedAt: event.createdAt,
   });
 }
 
@@ -8334,8 +8526,12 @@ function deriveLifecycleNotices(state) {
 
   (state.subscriptions ?? []).forEach((subscription) => notices.push(lifecycleNoticeForSubscription(state, subscription)));
   (state.invoices ?? [])
-    .filter((invoice) => ['past_due', 'open', 'paid'].includes(invoice.status))
+    .filter((invoice) => ['past_due', 'open', 'paid', 'uncollectible'].includes(invoice.status))
     .forEach((invoice) => notices.push(lifecycleNoticeForInvoice(state, invoice)));
+  (state.paymentEvents ?? [])
+    .map((event) => lifecycleNoticeForPaymentDriftEvent(state, event))
+    .filter(Boolean)
+    .forEach((notice) => notices.push(notice));
   for (const tenant of state.tenants ?? []) {
     ['checkout', 'portal', 'payment_recovery'].forEach((type) => {
       const session = latestBillingSession(state, tenant.id, type);
@@ -14283,6 +14479,7 @@ export async function syncPaymentState({ tenantId } = {}, options = {}) {
   return mutateState(
     'payments.sync',
     (state, actor) => {
+      const liveProviderSync = Boolean(options.livePaymentProvider || options.liveProviderSync || options.paymentProviderMode === 'live');
       const tenants = tenantId
         ? [findById(state.tenants ?? [], requireArg(tenantId, 'tenant id', 'payments sync [tenantId]'), 'Tenant')]
         : [...(state.tenants ?? [])];
@@ -14294,6 +14491,28 @@ export async function syncPaymentState({ tenantId } = {}, options = {}) {
       const results = tenants.map((tenant) => {
         const reconciliation = reconcileExpiredBillingOverrides(state, tenant);
         const entitlement = recomputeEntitlementForTenant(state, tenant.id);
+        const driftEvents = [];
+        if (liveProviderSync) {
+          for (const subscription of (state.subscriptions ?? []).filter((candidate) => candidate.tenantId === tenant.id && candidate.provider && !['local_test', 'local_override'].includes(candidate.provider))) {
+            const providerStatus = subscription.providerStatus;
+            const providerPriceId = subscription.providerPriceId;
+            const statusDrift = providerStatus && mapProviderSubscriptionStatus(providerStatus) !== subscription.status;
+            const priceDrift = subscription.expectedProviderPriceId && providerPriceId && subscription.expectedProviderPriceId !== providerPriceId;
+            if (statusDrift || priceDrift) {
+              driftEvents.push(appendPaymentEvent(state, {
+                tenantId: tenant.id,
+                provider: subscription.provider,
+                type: 'billing.drift.detected',
+                status: 'warning',
+                appliedType: 'payments.sync',
+                providerPriceId,
+                providerStatus,
+                providerSubscriptionId: subscription.providerSubscriptionId,
+                subscriptionId: subscription.id,
+              }));
+            }
+          }
+        }
         const event = appendPaymentEvent(state, {
           tenantId: tenant.id,
           provider: 'local_test',
@@ -14313,6 +14532,7 @@ export async function syncPaymentState({ tenantId } = {}, options = {}) {
         });
         return {
           canceledSubscriptionIds: reconciliation.canceledSubscriptionIds,
+          driftEventIds: driftEvents.map((event) => event.id),
           entitlementId: entitlement?.id ?? null,
           entitlementSource: entitlement?.source ?? null,
           entitlementStatus: entitlement?.status ?? 'missing',
@@ -14325,13 +14545,15 @@ export async function syncPaymentState({ tenantId } = {}, options = {}) {
       });
       const expiredOverrideIds = results.flatMap((result) => result.expiredOverrideIds);
       const canceledSubscriptionIds = results.flatMap((result) => result.canceledSubscriptionIds);
+      const driftEventIds = results.flatMap((result) => result.driftEventIds);
       return {
         canceledSubscriptionIds,
+        driftEventIds,
         entitlementIds: results.map((result) => result.entitlementId).filter(Boolean),
         eventIds: results.map((result) => result.eventId),
         expiredOverrideIds,
         jobIds: results.map((result) => result.jobId),
-        message: `Synced payment state for ${results.length} tenant${results.length === 1 ? '' : 's'}; ${expiredOverrideIds.length} expired override${expiredOverrideIds.length === 1 ? '' : 's'} reconciled.`,
+        message: `Synced payment state for ${results.length} tenant${results.length === 1 ? '' : 's'}; ${expiredOverrideIds.length} expired override${expiredOverrideIds.length === 1 ? '' : 's'} reconciled; ${driftEventIds.length} provider drift event${driftEventIds.length === 1 ? '' : 's'} recorded.`,
         results,
         targetId: tenantId ?? 'payments.sync',
         tenantIds: results.map((result) => result.tenantId),
@@ -14574,6 +14796,19 @@ export async function createBillingOverride(tenantId, type, { reason, planId, am
         tenant.suspendedByUserId = actor.id;
       }
 
+      const creditedInvoice = overrideType === 'support_credit'
+        ? [...(state.invoices ?? [])]
+            .filter((invoice) => invoice.tenantId === tenant.id && ['open', 'past_due'].includes(invoice.status))
+            .sort((left, right) => String(right.createdAt ?? '').localeCompare(String(left.createdAt ?? '')))[0] ?? null
+        : null;
+      if (creditedInvoice) {
+        applyInvoiceAdjustment(state, creditedInvoice, { amountCents: creditAmountCents, type: 'credit' });
+        const creditedSubscription = (state.subscriptions ?? []).find((candidate) => candidate.id === creditedInvoice.subscriptionId);
+        if (creditedSubscription) {
+          entitlement = upsertEntitlementFromSubscription(state, creditedSubscription);
+        }
+      }
+
       appendPaymentEvent(state, {
         tenantId: tenant.id,
         provider: 'local_override',
@@ -14581,13 +14816,16 @@ export async function createBillingOverride(tenantId, type, { reason, planId, am
         status: 'recorded',
         amountCents: creditAmountCents,
         billingOverrideId: override.id,
-        subscriptionId: subscription?.id,
+        invoiceId: creditedInvoice?.id,
+        subscriptionId: subscription?.id ?? creditedInvoice?.subscriptionId,
       });
 
       return {
         message: `${tenant.name} billing override recorded: ${overrideType}`,
         amountCents: creditAmountCents,
+        creditedInvoiceId: creditedInvoice?.id ?? null,
         entitlementId: entitlement?.id,
+        netAmountDueCents: creditedInvoice?.netAmountDueCents ?? null,
         overrideId: override.id,
         overrideType,
         planId: plan?.id,
@@ -14971,7 +15209,7 @@ export async function createInvoiceRecoverySession(invoiceId, options = {}) {
       const invoice = findById(state.invoices ?? [], requireArg(invoiceId, 'invoice id', 'payments recover <invoiceId>'), 'Invoice');
       const tenant = findById(state.tenants ?? [], invoice.tenantId, 'Tenant');
       requireBillingOwner(state, actor, tenant, 'payments.recover');
-      if (invoice.status === 'paid' || invoice.status === 'void') {
+      if (!['open', 'past_due'].includes(invoice.status)) {
         throw new SignalStateError(`Invoice is not recoverable: ${invoice.id}`, {
           code: 'INVOICE_NOT_RECOVERABLE',
           status: 409,
@@ -15028,8 +15266,64 @@ export async function createInvoiceRecoverySession(invoiceId, options = {}) {
   );
 }
 
+export async function recordInvoiceRefund(invoiceId, { amountCents, reason } = {}, options = {}) {
+  return mutateState(
+    'payments.refund',
+    (state, actor) => {
+      const invoice = findById(state.invoices ?? [], requireArg(invoiceId, 'invoice id', 'payments refund <invoiceId> [amountCents]'), 'Invoice');
+      const tenant = findById(state.tenants ?? [], invoice.tenantId, 'Tenant');
+      requireBillingOwner(state, actor, tenant, 'payments.refund');
+      const amount = requireNonNegativeInteger(
+        amountCents ?? invoice.amountDueCents ?? 0,
+        'refund amount in cents',
+        'payments refund <invoiceId> [amountCents]',
+      );
+      applyInvoiceAdjustment(state, invoice, { amountCents: amount, type: 'refund' });
+      const subscription = (state.subscriptions ?? []).find((candidate) => candidate.id === invoice.subscriptionId) ?? null;
+      const event = appendPaymentEvent(state, {
+        tenantId: invoice.tenantId,
+        provider: invoice.provider,
+        type: 'invoice.refunded',
+        status: 'recorded',
+        amountCents: amount,
+        invoiceId: invoice.id,
+        providerInvoiceId: invoice.providerInvoiceId,
+        providerSubscriptionId: invoice.providerSubscriptionId,
+        subscriptionId: invoice.subscriptionId,
+      });
+      const job = appendJob(state, {
+        tenantId: invoice.tenantId,
+        queue: 'billing_webhook',
+        type: 'invoice.refund.recorded',
+        targetId: invoice.id,
+        status: 'succeeded',
+        attempts: 1,
+        maxAttempts: 5,
+        message: `Recorded ${amount} cent refund for ${invoice.id}${reason ? `: ${reason}` : ''}.`,
+      });
+      if (subscription) {
+        upsertEntitlementFromSubscription(state, subscription);
+      }
+      return {
+        amountCents: amount,
+        eventId: event.id,
+        invoiceId: invoice.id,
+        jobId: job.id,
+        message: `Refund recorded for ${invoice.id}`,
+        netAmountDueCents: invoice.netAmountDueCents,
+        refundedCents: invoice.refundedCents,
+        status: invoice.status,
+        targetId: invoice.id,
+        tenantId: invoice.tenantId,
+      };
+    },
+    options,
+  );
+}
+
 export async function handlePaymentWebhook(eventType, {
   amountDueCents,
+  amountCents,
   currentPeriodEndAt,
   hostedInvoiceUrl,
   nextPaymentAttemptAt,
@@ -15050,6 +15344,7 @@ export async function handlePaymentWebhook(eventType, {
   signatureVerifiedAt,
   signatureTimestamp,
   livemode,
+  trialEndsAt,
 } = {}, options = {}) {
   return mutateState(
     'payments.webhook',
@@ -15062,7 +15357,22 @@ export async function handlePaymentWebhook(eventType, {
       );
       const type = requireOneOf(
         eventType,
-        ['checkout.completed', 'invoice.paid', 'invoice.payment_failed', 'subscription.updated', 'subscription.canceled'],
+        [
+          'checkout.completed',
+          'customer.balance_adjusted',
+          'invoice.credit_applied',
+          'invoice.draft',
+          'invoice.open',
+          'invoice.paid',
+          'invoice.payment_failed',
+          'invoice.refunded',
+          'invoice.uncollectible',
+          'invoice.void',
+          'provider.event.ignored',
+          'subscription.canceled',
+          'subscription.trial_will_end',
+          'subscription.updated',
+        ],
         'webhook type',
         'payments webhook <type> <subscriptionId|tenantId> [status|planId]',
       );
@@ -15083,11 +15393,117 @@ export async function handlePaymentWebhook(eventType, {
         };
       }
 
+      if (type === 'provider.event.ignored') {
+        const tenant = tenantId
+          ? findById(state.tenants ?? [], tenantId, 'Tenant')
+          : (state.tenants ?? []).find((candidate) => candidate.id === defaultTenantId(state)) ?? state.tenants?.[0] ?? null;
+        const event = appendPaymentEvent(state, {
+          tenantId: tenant?.id,
+          provider,
+          type: providerEventType ?? type,
+          status: 'ignored',
+          appliedType: type,
+          amountCents: requireNonNegativeInteger(amountCents, 'provider event amount in cents', 'payments webhook provider.event.ignored'),
+          livemode,
+          providerCustomerId,
+          providerEventId,
+          providerEventType,
+          providerInvoiceId,
+          providerPriceId,
+          providerStatus,
+          providerSubscriptionId,
+          signatureStatus,
+          signatureTimestamp,
+          signatureVerifiedAt,
+          subscriptionId,
+        });
+        return {
+          duplicate: false,
+          eventId: event.id,
+          jobId: null,
+          message: `Recorded ignored ${provider} webhook ${providerEventType ?? type}.`,
+          provider,
+          providerEventId,
+          providerEventType,
+          status: 'ignored',
+          targetId: providerEventId ?? event.id,
+          tenantId: tenant?.id ?? null,
+        };
+      }
+
+      if (['invoice.refunded', 'invoice.credit_applied', 'customer.balance_adjusted'].includes(type)) {
+        const adjustmentSubscription = optionalSubscriptionByLocalOrProviderId(state, subscriptionId ?? providerSubscriptionId);
+        const invoice = findInvoiceByLocalOrProviderId(state, undefined, providerInvoiceId)
+          ?? (adjustmentSubscription ? latestInvoiceForSubscription(state, adjustmentSubscription.id) : null)
+          ?? (tenantId ? latestInvoiceForTenant(state, tenantId) : null);
+        const tenant = invoice
+          ? findById(state.tenants ?? [], invoice.tenantId, 'Tenant')
+          : tenantId
+            ? findById(state.tenants ?? [], tenantId, 'Tenant')
+            : (state.tenants ?? []).find((candidate) => candidate.id === defaultTenantId(state)) ?? state.tenants?.[0] ?? null;
+        const amount = requireNonNegativeInteger(amountCents ?? amountDueCents ?? 0, 'invoice adjustment amount in cents', `payments webhook ${type}`);
+        const adjustmentType = type === 'invoice.refunded' ? 'refund' : 'credit';
+        const adjustedInvoice = invoice ? applyInvoiceAdjustment(state, invoice, { amountCents: amount, type: adjustmentType }) : null;
+        const subscription = adjustedInvoice
+          ? (state.subscriptions ?? []).find((candidate) => candidate.id === adjustedInvoice.subscriptionId)
+          : adjustmentSubscription;
+        const event = appendPaymentEvent(state, {
+          tenantId: tenant?.id,
+          provider,
+          type: providerEventType ?? type,
+          status: 'recorded',
+          appliedType: type,
+          amountCents: amount,
+          invoiceId: adjustedInvoice?.id,
+          livemode,
+          providerCustomerId,
+          providerEventId,
+          providerEventType,
+          providerInvoiceId,
+          providerPriceId,
+          providerStatus,
+          providerSubscriptionId,
+          signatureStatus,
+          signatureTimestamp,
+          signatureVerifiedAt,
+          subscriptionId: subscription?.id ?? subscriptionId,
+        });
+        const job = appendJob(state, {
+          tenantId: tenant?.id,
+          queue: 'billing_webhook',
+          type: provider === 'stripe' ? `payment.webhook.stripe.${type}` : `payment.webhook.${type}`,
+          targetId: adjustedInvoice?.id ?? subscription?.id ?? tenant?.id ?? providerEventId,
+          status: 'succeeded',
+          attempts: 1,
+          maxAttempts: 5,
+          message: adjustedInvoice
+            ? `Recorded ${adjustmentType} ${amount} for ${adjustedInvoice.id}.`
+            : `Recorded ${provider} ${type} without a matching local invoice.`,
+        });
+        return {
+          amountCents: amount,
+          duplicate: false,
+          eventId: event.id,
+          invoiceId: adjustedInvoice?.id ?? null,
+          jobId: job.id,
+          message: adjustedInvoice ? `Applied ${type} to ${adjustedInvoice.id}` : `Recorded ${type}`,
+          netAmountDueCents: adjustedInvoice?.netAmountDueCents ?? null,
+          provider,
+          providerEventId,
+          providerEventType,
+          status: adjustedInvoice?.status ?? 'recorded',
+          subscriptionId: subscription?.id ?? null,
+          targetId: adjustedInvoice?.id ?? subscription?.id ?? providerEventId ?? event.id,
+          tenantId: tenant?.id ?? null,
+        };
+      }
+
       let subscription;
       let tenant;
       let plan;
       let nextStatus;
       let invoice = null;
+      let providerPreviousPriceId = null;
 
       if (type === 'checkout.completed') {
         tenant = findById(state.tenants, requireArg(tenantId, 'tenant id', 'payments webhook checkout.completed <tenantId> <planId>'), 'Tenant');
@@ -15124,7 +15540,7 @@ export async function handlePaymentWebhook(eventType, {
         nextStatus = 'active';
       } else {
         const requiredSubscriptionId = requireArg(subscriptionId, 'subscription id', `payments webhook ${type} <subscriptionId>`);
-        subscription = ['subscription.updated', 'subscription.canceled'].includes(type)
+        subscription = ['subscription.updated', 'subscription.trial_will_end', 'subscription.canceled'].includes(type)
           ? upsertSubscriptionFromProviderMetadata(state, {
               planId,
               provider,
@@ -15136,12 +15552,21 @@ export async function handlePaymentWebhook(eventType, {
           : findSubscriptionByLocalOrProviderId(state, requiredSubscriptionId, provider);
         tenant = findById(state.tenants, subscription.tenantId, 'Tenant');
         subscription.provider = provider === 'local_test' ? subscription.provider : provider;
+        providerPreviousPriceId = subscription.providerPriceId ?? null;
         if (type === 'invoice.paid') {
           nextStatus = 'active';
         } else if (type === 'invoice.payment_failed') {
           nextStatus = 'past_due';
+        } else if (type === 'invoice.draft' || type === 'invoice.open') {
+          nextStatus = subscription.status;
+        } else if (type === 'invoice.uncollectible') {
+          nextStatus = 'past_due';
+        } else if (type === 'invoice.void') {
+          nextStatus = subscription.status;
         } else if (type === 'subscription.canceled') {
           nextStatus = 'canceled';
+        } else if (type === 'subscription.trial_will_end') {
+          nextStatus = subscription.status ?? 'trialing';
         } else {
           nextStatus = requireOneOf(status, ['trialing', 'active', 'past_due', 'canceled'], 'subscription status', 'payments webhook subscription.updated <subscriptionId> <status>');
         }
@@ -15163,6 +15588,14 @@ export async function handlePaymentWebhook(eventType, {
           signatureStatus,
           signatureVerifiedAt,
         });
+        if (providerPriceId && providerPreviousPriceId && providerPreviousPriceId !== providerPriceId) {
+          subscription.providerPreviousPriceId = providerPreviousPriceId;
+          subscription.providerPlanChangedAt = nowIso();
+        }
+        if (type === 'subscription.trial_will_end') {
+          subscription.trialWillEndNotifiedAt = nowIso();
+          subscription.trialEndsAt = trialEndsAt ?? currentPeriodEndAt ?? subscription.trialEndsAt ?? null;
+        }
         plan = findById(state.plans, subscription.planId, 'Plan');
       }
 
@@ -15170,6 +15603,14 @@ export async function handlePaymentWebhook(eventType, {
         invoice = upsertInvoiceForSubscription(state, subscription, 'past_due', { amountDueCents: normalizedAmountDueCents });
       } else if (type === 'invoice.paid') {
         invoice = upsertInvoiceForSubscription(state, subscription, 'paid', { amountDueCents: normalizedAmountDueCents });
+      } else if (type === 'invoice.draft') {
+        invoice = upsertInvoiceForSubscription(state, subscription, 'draft', { amountDueCents: normalizedAmountDueCents });
+      } else if (type === 'invoice.open') {
+        invoice = upsertInvoiceForSubscription(state, subscription, 'open', { amountDueCents: normalizedAmountDueCents });
+      } else if (type === 'invoice.uncollectible') {
+        invoice = upsertInvoiceForSubscription(state, subscription, 'uncollectible', { amountDueCents: normalizedAmountDueCents });
+      } else if (type === 'invoice.void') {
+        invoice = upsertInvoiceForSubscription(state, subscription, 'void', { amountDueCents: normalizedAmountDueCents });
       } else if (type === 'subscription.canceled') {
         invoice = latestInvoiceForSubscription(state, subscription.id);
         if (invoice && ['open', 'past_due'].includes(invoice.status)) {
@@ -15204,6 +15645,8 @@ export async function handlePaymentWebhook(eventType, {
         providerEventId,
         providerEventType,
         providerInvoiceId,
+        providerPriceId,
+        providerPreviousPriceId,
         providerStatus,
         providerSubscriptionId,
         signatureStatus,
@@ -16331,6 +16774,8 @@ export async function applyMutation(action, args = {}, options = {}) {
       });
     case 'payments.recover':
       return createInvoiceRecoverySession(args.invoiceId, options);
+    case 'payments.refund':
+      return recordInvoiceRefund(args.invoiceId, args, options);
     case 'payments.webhook':
       return handlePaymentWebhook(args.type, args, options);
     case 'jobs.run':

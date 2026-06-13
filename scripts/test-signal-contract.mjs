@@ -2437,13 +2437,176 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(portal.status, 200);
     assert.equal(portal.payload.action, 'payments.portal');
 
+    const unknownEvent = await postSignedStripeEvent({
+      id: 'evt_contract_stripe_unknown_ignored',
+      type: 'payment_intent.processing',
+      livemode: false,
+      data: {
+        object: {
+          id: 'pi_contract_processing',
+          object: 'payment_intent',
+          customer: 'cus_contract_signal',
+          metadata: {
+            tenantId: 'tenant_demo',
+          },
+          status: 'processing',
+        },
+      },
+    });
+    assert.equal(unknownEvent.response.status, 200);
+    assert.equal(unknownEvent.payload.details.status, 'ignored');
+    assert.equal(unknownEvent.payload.details.jobId, null);
+
+    const trialEvent = await postSignedStripeEvent({
+      id: 'evt_contract_stripe_trial_will_end',
+      type: 'customer.subscription.trial_will_end',
+      livemode: false,
+      data: {
+        object: {
+          id: 'sub_stripe_contract_signal',
+          object: 'subscription',
+          customer: 'cus_contract_signal',
+          status: 'trialing',
+          trial_end: 1781131800,
+          metadata: {
+            planId: 'plan_team',
+            tenantId: 'tenant_demo',
+          },
+        },
+      },
+    });
+    assert.equal(trialEvent.response.status, 200);
+
+    const seedProviderPrice = await mutate(adminToken, 'payments.webhook', {
+      planId: 'plan_team',
+      provider: 'stripe',
+      providerPriceId: 'price_contract_team',
+      providerSubscriptionId: 'sub_stripe_contract_signal',
+      status: 'active',
+      subscriptionId: 'sub_stripe_contract_signal',
+      tenantId: 'tenant_demo',
+      type: 'subscription.updated',
+    });
+    assert.equal(seedProviderPrice.status, 200);
+
+    const planChangedEvent = await postSignedStripeEvent({
+      id: 'evt_contract_stripe_plan_changed',
+      type: 'customer.subscription.updated',
+      livemode: false,
+      data: {
+        object: {
+          id: 'sub_stripe_contract_signal',
+          object: 'subscription',
+          customer: 'cus_contract_signal',
+          status: 'active',
+          items: {
+            data: [
+              {
+                price: {
+                  id: 'price_contract_team_v2',
+                },
+              },
+            ],
+          },
+          metadata: {
+            planId: 'plan_team',
+            tenantId: 'tenant_demo',
+          },
+        },
+      },
+    });
+    assert.equal(planChangedEvent.response.status, 200);
+
+    for (const [matrixSubscriptionId, invoiceEventType, expectedStatus] of [
+      ['sub_contract_draft_matrix', 'invoice.created', 'draft'],
+      ['sub_contract_open_matrix', 'invoice.finalized', 'open'],
+      ['sub_contract_past_due_matrix', 'invoice.payment_failed', 'past_due'],
+      ['sub_contract_paid_matrix', 'invoice.paid', 'paid'],
+      ['sub_contract_uncollectible_matrix', 'invoice.marked_uncollectible', 'uncollectible'],
+      ['sub_contract_void_matrix', 'invoice.voided', 'void'],
+    ]) {
+      const matrixSubscription = await mutate(adminToken, 'payments.webhook', {
+        planId: 'plan_team',
+        status: 'active',
+        subscriptionId: matrixSubscriptionId,
+        tenantId: 'tenant_demo',
+        type: 'subscription.updated',
+      });
+      assert.equal(matrixSubscription.status, 200);
+      const matrixInvoice = await postSignedStripeEvent({
+        id: `evt_contract_stripe_${expectedStatus}_matrix`,
+        type: invoiceEventType,
+        livemode: false,
+        data: {
+          object: {
+            id: `in_contract_${expectedStatus}_matrix`,
+            object: 'invoice',
+            amount_due: 4900,
+            customer: 'cus_contract_signal',
+            hosted_invoice_url: `https://invoice.stripe.com/i/in_contract_${expectedStatus}_matrix`,
+            status: expectedStatus === 'void' ? 'void' : expectedStatus,
+            subscription: matrixSubscriptionId,
+          },
+        },
+      });
+      assert.equal(matrixInvoice.response.status, 200);
+    }
+
+    const matrixState = await requestApi('/api/state', { token: adminToken });
+    const openInvoice = matrixState.payload.state.invoices.find((item) => item.providerInvoiceId === 'in_contract_open_matrix');
+    assert(openInvoice, 'contract matrix should create an open invoice');
+    const refund = await mutate(adminToken, 'payments.refund', {
+      amountCents: 1200,
+      invoiceId: invoice.id,
+      reason: 'Contract refund',
+    });
+    assert.equal(refund.status, 200);
+    const supportCredit = await mutate(adminToken, 'payments.override', {
+      amountCents: 1000,
+      reason: 'Contract credit',
+      tenantId: 'tenant_demo',
+      type: 'support_credit',
+    });
+    assert.equal(supportCredit.status, 200);
+    assert(supportCredit.payload.details.creditedInvoiceId, 'support credit should apply to an open or past-due invoice when one exists');
+
+    const creditNote = await postSignedStripeEvent({
+      id: 'evt_contract_stripe_credit_note',
+      type: 'credit_note.created',
+      livemode: false,
+      data: {
+        object: {
+          id: 'cn_contract_credit',
+          object: 'credit_note',
+          amount: 500,
+          invoice: 'in_contract_open_matrix',
+          customer: 'cus_contract_signal',
+        },
+      },
+    });
+    assert.equal(creditNote.response.status, 200);
+    assert.equal(creditNote.payload.details.invoiceId, openInvoice.id);
+
+    const paritySync = await mutate(adminToken, 'payments.sync', {
+      tenantId: 'tenant_demo',
+    });
+    assert.equal(paritySync.status, 200);
+
     const readyPaymentLifecycle = await requestApi('/api/payment-lifecycle', { token: adminToken });
     assert.equal(readyPaymentLifecycle.status, 200);
-    assert.equal(readyPaymentLifecycle.payload.payment.ok, true);
+    assert.equal(
+      readyPaymentLifecycle.payload.payment.ok,
+      true,
+      JSON.stringify(readyPaymentLifecycle.payload.payment.rows.filter((row) => !row.localOk)),
+    );
     assert.equal(readyPaymentLifecycle.payload.payment.summary.localReady, readyPaymentLifecycle.payload.payment.summary.total);
     assert.equal(readyPaymentLifecycle.payload.payment.productionReady, false);
     assert(readyPaymentLifecycle.payload.payment.rows.some((row) => row.area === 'failed_payment_recovery' && row.localOk === true));
     assert(readyPaymentLifecycle.payload.payment.rows.some((row) => row.area === 'signed_webhook_replay' && row.localOk === true));
+    assert(readyPaymentLifecycle.payload.payment.rows.some((row) => row.area === 'ignored_webhook_resilience' && row.localOk === true));
+    assert(readyPaymentLifecycle.payload.payment.rows.some((row) => row.area === 'invoice_status_matrix' && row.localOk === true));
+    assert(readyPaymentLifecycle.payload.payment.rows.some((row) => row.area === 'refund_credit_reconciliation' && row.localOk === true));
+    assert(readyPaymentLifecycle.payload.payment.rows.some((row) => row.area === 'plan_change_trial_end' && row.localOk === true));
   });
 
   await t.test('signed email delivery webhook and unsubscribe callback reconcile provider state', async () => {
