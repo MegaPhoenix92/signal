@@ -1950,6 +1950,7 @@ export const providerRequirementCatalog = [
     optionalEnv: ['SIGNAL_API_BASE_URL', 'SIGNAL_OAUTH_STATE_KEY', 'SIGNAL_OUTLOOK_NOTIFICATION_URL', 'SIGNAL_OUTLOOK_LIFECYCLE_NOTIFICATION_URL', 'SIGNAL_OUTLOOK_SUBSCRIPTION_RESOURCE', 'SIGNAL_OUTLOOK_WEBHOOK_CLIENT_STATE', 'SIGNAL_TOKEN_VAULT'],
     callbackPath: '/api/oauth/outlook/callback',
     webhookPath: '/api/webhooks/outlook',
+    lifecycleWebhookPath: '/api/webhooks/outlook/lifecycle',
     boundary: 'Graph OAuth connection, folder-scoped sync, delta cursor replay, and subscription notifications.',
   },
   {
@@ -3649,6 +3650,7 @@ export function providerLaunchMatrixReport(state, {
       boundary: item.boundary,
       callbackPath: item.callbackPath,
       webhookPath: item.webhookPath,
+      ...(item.lifecycleWebhookPath ? { lifecycleWebhookPath: item.lifecycleWebhookPath } : {}),
       configurationReady,
       configuredRequired: item.configuredRequired ?? [],
       missingEnv,
@@ -12511,6 +12513,117 @@ export async function renewMailboxWatch(watchId, options = {}) {
   );
 }
 
+function normalizeOutlookLifecycleEvent(value) {
+  const event = String(value ?? '').trim();
+  if (['reauthorizationRequired', 'subscriptionRemoved', 'missed'].includes(event)) {
+    return event;
+  }
+  throw new ProviderWatchError('Outlook lifecycle notification has an unsupported lifecycleEvent.', {
+    code: 'OUTLOOK_LIFECYCLE_EVENT_INVALID',
+    status: 400,
+    details: { lifecycleEvent: value ?? null },
+  });
+}
+
+function outlookLifecycleReason(lifecycleEvent) {
+  if (lifecycleEvent === 'reauthorizationRequired') {
+    return 'Microsoft Graph requested subscription reauthorization.';
+  }
+  if (lifecycleEvent === 'subscriptionRemoved') {
+    return 'Microsoft Graph reported that the subscription was removed.';
+  }
+  return 'Microsoft Graph reported missed notifications; mailbox sync should catch up.';
+}
+
+function outlookLifecycleJobType(lifecycleEvent) {
+  return lifecycleEvent === 'missed' ? 'outlook.watch.notification' : 'mailbox.watch.renew';
+}
+
+function applyOutlookLifecycleToWatch(state, notification) {
+  if (!notification.clientState) {
+    throw new ProviderWatchError('Outlook notification clientState is required.', {
+      code: 'OUTLOOK_NOTIFICATION_CLIENT_STATE_REQUIRED',
+      status: 401,
+    });
+  }
+  const lifecycleEvent = normalizeOutlookLifecycleEvent(notification.lifecycleEvent);
+  const receivedDigest = digestClientState(notification.clientState);
+  const watch = (state.emailWatchSubscriptions ?? []).find((candidate) =>
+    candidate.provider === 'outlook' && candidate.clientStateDigest === receivedDigest);
+  if (!watch) {
+    throw new ProviderWatchError('Outlook notification clientState did not match any active watch.', {
+      code: 'OUTLOOK_NOTIFICATION_CLIENT_STATE_INVALID',
+      status: 401,
+    });
+  }
+  const mailbox = findById(state.mailboxes ?? [], watch.mailboxId, 'Mailbox');
+  const observedAt = nowIso();
+  const reason = outlookLifecycleReason(lifecycleEvent);
+  const providerErrorCode = `OUTLOOK_LIFECYCLE_${lifecycleEvent.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase()}`;
+  Object.assign(watch, {
+    tenantId: watch.tenantId ?? mailbox.tenantId,
+    lastLifecycleNotificationAt: observedAt,
+    lifecycleNotificationCount: (watch.lifecycleNotificationCount ?? 0) + 1,
+    providerBackoffReason: reason,
+    providerLastError: reason,
+    providerLastErrorAt: observedAt,
+    providerLastErrorCode: providerErrorCode,
+    providerLifecycleEvent: lifecycleEvent,
+    providerSubscriptionId: notification.subscriptionId ?? watch.providerSubscriptionId ?? watch.providerWatchId ?? null,
+    updatedAt: observedAt,
+  });
+  if (lifecycleEvent !== 'missed') {
+    watch.status = 'expired';
+    watch.nextRenewalAt = observedAt;
+  }
+  const job = appendJob(state, {
+    tenantId: mailbox.tenantId,
+    queue: 'email_sync',
+    type: outlookLifecycleJobType(lifecycleEvent),
+    targetId: mailbox.id,
+    status: 'queued',
+    attempts: 0,
+    maxAttempts: 5,
+    message: `${reason} Queued ${lifecycleEvent === 'missed' ? 'mailbox sync' : 'watch renewal'} for ${mailbox.id}.`,
+    providerErrorCode,
+  });
+  return {
+    jobId: job.id,
+    lifecycleEvent,
+    mailboxId: mailbox.id,
+    tenantId: mailbox.tenantId,
+    watchId: watch.id,
+  };
+}
+
+export async function handleOutlookLifecycleNotification(payload = {}, options = {}) {
+  return mutateState(
+    'mailboxes.watch-lifecycle',
+    (state, _actor) => {
+      let notifications;
+      try {
+        notifications = parseOutlookChangeNotification(payload);
+        const results = notifications.map((notification) => applyOutlookLifecycleToWatch(state, notification));
+        const events = [...new Set(results.map((item) => item.lifecycleEvent))];
+        return {
+          count: results.length,
+          jobIds: results.map((item) => item.jobId),
+          lifecycleEvents: events,
+          mailboxIds: [...new Set(results.map((item) => item.mailboxId))],
+          message: `Recorded ${results.length} Outlook lifecycle notification${results.length === 1 ? '' : 's'}.`,
+          provider: 'outlook',
+          targetId: results[0]?.watchId ?? 'outlook.lifecycle',
+          tenantIds: [...new Set(results.map((item) => item.tenantId))],
+          watchIds: [...new Set(results.map((item) => item.watchId))],
+        };
+      } catch (watchError) {
+        throw signalErrorFromProviderError(watchError);
+      }
+    },
+    { ...options, requireExplicitActor: true },
+  );
+}
+
 export async function handleProviderWatchNotification(provider, payload = {}, options = {}) {
   return mutateState(
     'mailboxes.watch-notification',
@@ -14115,6 +14228,128 @@ export async function syncPaymentState({ tenantId } = {}, options = {}) {
         results,
         targetId: tenantId ?? 'payments.sync',
         tenantIds: results.map((result) => result.tenantId),
+      };
+    },
+    options,
+  );
+}
+
+function normalizeBillingReturnResult(value, sessionType = null) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['cancel', 'canceled', 'cancelled'].includes(normalized)) {
+    return 'cancel';
+  }
+  if (['portal', 'portal_return', 'billing_portal', 'return'].includes(normalized)) {
+    return 'portal_return';
+  }
+  if (normalized === 'success' || normalized === 'succeeded' || normalized === 'checkout_completed' || !normalized) {
+    return sessionType === 'portal' ? 'portal_return' : 'success';
+  }
+  throw new SignalStateError(`Unsupported billing return result: ${value}`, {
+    code: 'BILLING_RETURN_RESULT_INVALID',
+    status: 400,
+    details: { result: value },
+  });
+}
+
+function billingSessionMatchesReturn(session, identifiers) {
+  return identifiers.some((identifier) =>
+    session.id === identifier ||
+    session.providerSessionId === identifier ||
+    session.providerReturnSessionId === identifier);
+}
+
+function resolveBillingReturnSession(state, {
+  billingSessionId,
+  providerSessionId,
+  sessionId,
+  tenantId,
+} = {}) {
+  const identifiers = [billingSessionId, sessionId, providerSessionId]
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .filter(Boolean);
+  if (identifiers.length > 0) {
+    return (state.billingSessions ?? []).find((session) => billingSessionMatchesReturn(session, identifiers)) ?? null;
+  }
+  if (!tenantId) {
+    return null;
+  }
+  return latestBillingSession(state, tenantId, 'checkout')
+    ?? latestBillingSession(state, tenantId, 'portal')
+    ?? latestBillingSession(state, tenantId, 'payment_recovery');
+}
+
+export async function reconcileBillingReturn({
+  billingSessionId,
+  providerSessionId,
+  result,
+  sessionId,
+  tenantId,
+} = {}, options = {}) {
+  return mutateState(
+    'payments.return',
+    (state, actor) => {
+      const session = resolveBillingReturnSession(state, {
+        billingSessionId,
+        providerSessionId,
+        sessionId,
+        tenantId,
+      });
+      const targetTenantId = session?.tenantId ?? tenantId;
+      if (!targetTenantId) {
+        throw new SignalStateError('Billing return requires a billing session id, provider session id, or tenant id.', {
+          code: 'BILLING_RETURN_TARGET_REQUIRED',
+          status: 400,
+        });
+      }
+      const tenant = findById(state.tenants ?? [], targetTenantId, 'Tenant');
+      requireBillingOwner(state, actor, tenant, 'payments.return');
+      const redirectStatus = normalizeBillingReturnResult(result, session?.type ?? null);
+      const returnedAt = nowIso();
+      if (session) {
+        session.status = redirectStatus === 'cancel' ? 'canceled' : 'returned';
+        session.returnedAt = returnedAt;
+        session.returnResult = redirectStatus;
+        if (providerSessionId && providerSessionId !== session.providerSessionId) {
+          session.providerReturnSessionId = providerSessionId;
+        }
+        session.updatedAt = returnedAt;
+      }
+
+      const reconciliation = reconcileExpiredBillingOverrides(state, tenant);
+      const entitlement = recomputeEntitlementForTenant(state, tenant.id);
+      const event = appendPaymentEvent(state, {
+        tenantId: tenant.id,
+        provider: session?.provider ?? 'local_test',
+        type: `billing.return.${redirectStatus}`,
+        status: 'recorded',
+        sessionId: session?.id,
+        subscriptionId: entitlement?.subscriptionId,
+      });
+      const job = appendJob(state, {
+        tenantId: tenant.id,
+        queue: 'billing_webhook',
+        type: `payment.return.${redirectStatus}`,
+        targetId: session?.id ?? tenant.id,
+        status: 'succeeded',
+        attempts: 1,
+        maxAttempts: 5,
+        message: `Reconciled billing return for ${tenant.name}.`,
+      });
+      return {
+        canceledSubscriptionIds: reconciliation.canceledSubscriptionIds,
+        entitlementId: entitlement?.id ?? null,
+        entitlementStatus: entitlement?.status ?? 'missing',
+        eventId: event.id,
+        expiredOverrideIds: reconciliation.expiredOverrideIds,
+        jobId: job.id,
+        message: `Billing return reconciled for ${tenant.name}`,
+        redirectStatus,
+        sessionId: session?.id ?? null,
+        sessionType: session?.type ?? null,
+        targetId: session?.id ?? tenant.id,
+        tenantId: tenant.id,
+        tenantStatusChange: reconciliation.tenantStatusChange,
       };
     },
     options,
