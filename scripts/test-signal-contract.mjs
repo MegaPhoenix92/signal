@@ -1784,7 +1784,7 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
     assert.equal(syncedState.payload.state.subscriptions.find((item) => item.id === expiredOverrideSubscription.id).status, 'canceled');
     assert(syncedState.payload.state.paymentEvents.some((event) => event.type === 'billing.sync.completed' && event.tenantId === 'tenant_demo'));
 
-    const cliSync = await runCli(['payments', 'sync', 'tenant_demo', '--json']);
+    const cliSync = await runCli(['payments', 'sync', 'tenant_demo', '--json'], { SIGNAL_ADMIN_ACTOR: 'usr_admin' });
     assert.equal(cliSync.action, 'payments.sync');
     assert(cliSync.details.expiredOverrideIds.includes(expiredAccess.payload.details.overrideId));
   });

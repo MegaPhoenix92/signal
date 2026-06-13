@@ -47,6 +47,7 @@ import {
   scopeStateForActor,
   signalDigestionPipelineReport,
   summarizeState,
+  sessionUsersForActor,
   switchSession,
   tenantIsolationAuditReport,
   unsubscribeEmailDigest,
@@ -1115,14 +1116,7 @@ async function route(req, res) {
             team: actor.team ?? null,
           }
         : null,
-      availableUsers: state.users.map((user) => ({
-        email: user.email,
-        id: user.id,
-        name: user.name,
-        role: user.role,
-        status: user.status,
-        team: user.team ?? null,
-      })),
+      availableUsers: sessionUsersForActor(state, actor),
       auth: requestActor.auth,
     });
     return;
