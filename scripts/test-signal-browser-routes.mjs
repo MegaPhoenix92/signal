@@ -40,13 +40,28 @@ async function stopProcess(child) {
   if (!child || child.exitCode !== null) {
     return;
   }
-  child.kill('SIGTERM');
+  const kill = (signal) => {
+    try {
+      if (child.pid && process.platform !== 'win32') {
+        process.kill(-child.pid, signal);
+        return;
+      }
+    } catch {
+      // Fall back to killing only the direct child below.
+    }
+    child.kill(signal);
+  };
+  kill('SIGTERM');
   await Promise.race([
     new Promise((resolve) => child.once('close', resolve)),
     sleep(2000),
   ]);
   if (child.exitCode === null) {
-    child.kill('SIGKILL');
+    kill('SIGKILL');
+    await Promise.race([
+      new Promise((resolve) => child.once('close', resolve)),
+      sleep(2000),
+    ]);
   }
 }
 
@@ -86,6 +101,7 @@ async function startApi({ apiPort, statePath }) {
       SIGNAL_API_HOST: '127.0.0.1',
       SIGNAL_API_PORT: String(apiPort),
     },
+    detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const output = processOutputCollector(child);
@@ -100,6 +116,7 @@ async function startVite({ apiPort, webPort }) {
       ...process.env,
       VITE_SIGNAL_API_URL: `http://127.0.0.1:${apiPort}`,
     },
+    detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const output = processOutputCollector(child);
@@ -147,6 +164,7 @@ async function startChrome({ cdpPort, profileDir }) {
     args.splice(1, 0, '--no-sandbox');
   }
   const child = spawn(executable, args, {
+    detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const output = processOutputCollector(child);
