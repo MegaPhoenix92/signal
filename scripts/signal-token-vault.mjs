@@ -20,6 +20,12 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const defaultVaultPath = path.join(rootDir, 'data', 'signal-token-vault.json');
 const cipherAlgorithm = 'aes-256-gcm';
 const defaultRefreshSkewMs = 5 * 60 * 1000;
+const MIN_PASSPHRASE_LENGTH = 16;
+const RAW_KEY_BYTES = 32;
+const LEGACY_KDF = 'sha256-v1';
+const HKDF_KDF = 'hkdf-v1';
+const RAW_KDF = 'raw-v1';
+const HKDF_INFO = 'signal-token-vault-v1';
 
 export function resolveTokenVaultPath(vaultPath = process.env.SIGNAL_TOKEN_VAULT) {
   return vaultPath ? path.resolve(vaultPath) : defaultVaultPath;
@@ -37,14 +43,88 @@ function requireEncryptionMaterial(env = process.env) {
   return value;
 }
 
+function keyDigestFromBytes(keyBytes) {
+  return crypto.createHash('sha256').update(keyBytes).digest('hex').slice(0, 16);
+}
+
+function decodeRawKeyMaterial(material) {
+  if (typeof material !== 'string' || !/^[A-Za-z0-9+/=_-]+$/.test(material)) {
+    return null;
+  }
+  for (const encoding of ['base64url', 'base64']) {
+    try {
+      const decoded = Buffer.from(material, encoding);
+      if (decoded.length === RAW_KEY_BYTES) {
+        return decoded;
+      }
+    } catch {
+      // Try the next encoding.
+    }
+  }
+  return null;
+}
+
+function assertPassphraseLength(material) {
+  if (material.length < MIN_PASSPHRASE_LENGTH) {
+    throw new TokenVaultError(`SIGNAL_TOKEN_ENCRYPTION_KEY must be at least ${MIN_PASSPHRASE_LENGTH} characters or a base64-encoded 32-byte key.`, {
+      code: 'TOKEN_VAULT_KEY_TOO_SHORT',
+      status: 412,
+      details: { minLength: MIN_PASSPHRASE_LENGTH },
+    });
+  }
+}
+
+function deriveLegacyKeyBytes(material) {
+  return crypto.createHash('sha256').update(material, 'utf8').digest();
+}
+
+function deriveHkdfKeyBytes(material, saltBase64url) {
+  if (!saltBase64url) {
+    throw new TokenVaultError('Token vault HKDF requires a per-vault salt.', {
+      code: 'TOKEN_VAULT_KDF_SALT_MISSING',
+      status: 412,
+    });
+  }
+  const salt = Buffer.from(saltBase64url, 'base64url');
+  const ikm = Buffer.isBuffer(material) ? material : Buffer.from(material, 'utf8');
+  return Buffer.from(crypto.hkdfSync('sha256', ikm, salt, HKDF_INFO, RAW_KEY_BYTES));
+}
+
+function resolveKeyDerivation(material, { kdf = HKDF_KDF, salt = null } = {}) {
+  const rawKey = decodeRawKeyMaterial(material);
+  if (rawKey) {
+    return {
+      digest: keyDigestFromBytes(rawKey),
+      kdf: RAW_KDF,
+      key: rawKey,
+      material,
+    };
+  }
+  assertPassphraseLength(material);
+  if (kdf === LEGACY_KDF) {
+    const key = deriveLegacyKeyBytes(material);
+    return {
+      digest: keyDigestFromBytes(key),
+      kdf: LEGACY_KDF,
+      key,
+      material,
+    };
+  }
+  const key = deriveHkdfKeyBytes(material, salt);
+  return {
+    digest: keyDigestFromBytes(key),
+    kdf: HKDF_KDF,
+    key,
+    material,
+  };
+}
+
 function parseKeyring(env = process.env) {
   const configured = env.SIGNAL_TOKEN_ENCRYPTION_KEYS;
   if (!configured) {
     const material = requireEncryptionMaterial(env);
     return [{
-      digest: crypto.createHash('sha256').update(material, 'utf8').digest('hex').slice(0, 16),
       id: 'v1',
-      key: crypto.createHash('sha256').update(material, 'utf8').digest(),
       material,
     }];
   }
@@ -70,9 +150,7 @@ function parseKeyring(env = process.env) {
         });
       }
       return {
-        digest: crypto.createHash('sha256').update(material, 'utf8').digest('hex').slice(0, 16),
         id,
-        key: crypto.createHash('sha256').update(material, 'utf8').digest(),
         material,
       };
     });
@@ -86,12 +164,47 @@ function parseKeyring(env = process.env) {
   return keys;
 }
 
-function currentKey(env = process.env) {
-  return parseKeyring(env)[0];
+function currentKey(env = process.env, vaultMeta = null) {
+  const entry = parseKeyring(env)[0];
+  return {
+    id: entry.id,
+    ...resolveKeyDerivation(entry.material, {
+      kdf: HKDF_KDF,
+      salt: vaultMeta?.kdfSalt ?? null,
+    }),
+  };
 }
 
-function keyDigest(env = process.env) {
-  return currentKey(env).digest;
+function keyDigest(env = process.env, vaultMeta = null) {
+  return currentKey(env, vaultMeta).digest;
+}
+
+function ensureVaultCryptoMeta(vault) {
+  vault.meta = vault.meta ?? {};
+  if (!vault.meta.kdfSalt) {
+    vault.meta.kdfSalt = crypto.randomBytes(16).toString('base64url');
+    vault.meta.kdfVersion = HKDF_KDF;
+  }
+  if (!Number.isFinite(vault.meta.encryptionCounter)) {
+    vault.meta.encryptionCounter = 0;
+  }
+  return vault;
+}
+
+function nextEncryptionIv(vault, keyId) {
+  vault.meta.encryptionCounter += 1;
+  const iv = Buffer.alloc(12);
+  crypto.createHash('sha256').update(String(keyId), 'utf8').digest().subarray(0, 4).copy(iv, 0);
+  iv.writeBigUInt64BE(BigInt(vault.meta.encryptionCounter), 4);
+  return iv;
+}
+
+function deriveKeyForEncryptedRecord(entry, encrypted, vaultMeta) {
+  const kdf = encrypted?.kdf ?? LEGACY_KDF;
+  return resolveKeyDerivation(entry.material, {
+    kdf,
+    salt: kdf === HKDF_KDF ? vaultMeta?.kdfSalt ?? null : null,
+  });
 }
 
 function credentialDigest(value) {
@@ -118,9 +231,10 @@ function isExpiredOrNearExpiry(expiresAt, { nowMs = Date.now(), skewMs = default
   return Number.isFinite(expiresMs) && expiresMs <= nowMs + skewMs;
 }
 
-function encryptJson(value, { env = process.env } = {}) {
-  const iv = crypto.randomBytes(12);
-  const key = currentKey(env);
+function encryptJson(value, { env = process.env, vault } = {}) {
+  ensureVaultCryptoMeta(vault);
+  const key = currentKey(env, vault.meta);
+  const iv = nextEncryptionIv(vault, key.id);
   const cipher = crypto.createCipheriv(cipherAlgorithm, key.key, iv);
   const plaintext = Buffer.from(JSON.stringify(value), 'utf8');
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
@@ -130,19 +244,20 @@ function encryptJson(value, { env = process.env } = {}) {
     ciphertext: ciphertext.toString('base64url'),
     encryptedAt: nowIso(),
     iv: iv.toString('base64url'),
+    kdf: key.kdf,
     keyDigest: key.digest,
     keyId: key.id,
     tag: tag.toString('base64url'),
   };
 }
 
-export function decryptVaultPayload(encrypted, { env = process.env } = {}) {
+export function decryptVaultPayload(encrypted, { env = process.env, vaultMeta = null } = {}) {
   const keyring = parseKeyring(env);
   const candidates = encrypted?.keyId
     ? keyring.filter((key) => key.id === encrypted.keyId)
     : [
-      ...keyring.filter((key) => encrypted?.keyDigest && key.digest === encrypted.keyDigest),
-      ...keyring.filter((key) => !encrypted?.keyDigest || key.digest !== encrypted.keyDigest),
+      ...keyring.filter((key) => encrypted?.keyDigest && deriveKeyForEncryptedRecord(key, encrypted, vaultMeta).digest === encrypted.keyDigest),
+      ...keyring.filter((key) => !encrypted?.keyDigest || deriveKeyForEncryptedRecord(key, encrypted, vaultMeta).digest !== encrypted.keyDigest),
     ];
   if (candidates.length === 0) {
     throw new TokenVaultError('Provider credential record references an unknown token vault key.', {
@@ -152,9 +267,10 @@ export function decryptVaultPayload(encrypted, { env = process.env } = {}) {
     });
   }
   let lastError = null;
-  for (const key of candidates) {
+  for (const entry of candidates) {
     try {
-      const decipher = crypto.createDecipheriv(cipherAlgorithm, key.key, Buffer.from(encrypted.iv, 'base64url'));
+      const derived = deriveKeyForEncryptedRecord(entry, encrypted, vaultMeta);
+      const decipher = crypto.createDecipheriv(cipherAlgorithm, derived.key, Buffer.from(encrypted.iv, 'base64url'));
       decipher.setAuthTag(Buffer.from(encrypted.tag, 'base64url'));
       const plaintext = Buffer.concat([
         decipher.update(Buffer.from(encrypted.ciphertext, 'base64url')),
@@ -303,7 +419,7 @@ async function refreshCredentialRecord({
     expiresAt: expiryFromResponse(mergedResponse, Number.isFinite(refreshedAtMs) ? refreshedAtMs : Date.now()),
     refreshAvailable: Boolean(mergedResponse.refresh_token),
     updatedAt: refresh.refreshedAt,
-    encrypted: encryptJson(refreshedPayload, { env }),
+    encrypted: encryptJson(refreshedPayload, { env, vault }),
   };
 
   const existingIndex = (vault.records ?? []).findIndex((candidate) => candidate.id === record.id);
@@ -341,7 +457,7 @@ export async function storeProviderCredential({
   }
 
   const resolvedVaultPath = resolveTokenVaultPath(vaultPath);
-  const vault = await readVault(resolvedVaultPath);
+  const vault = ensureVaultCryptoMeta(await readVault(resolvedVaultPath));
   const recordId = `cred_${provider}_${mailboxId}`;
   const issuedAt = nowIso();
   const record = {
@@ -365,7 +481,7 @@ export async function storeProviderCredential({
       scopes,
       response,
       issuedAt,
-    }, { env }),
+    }, { env, vault }),
   };
 
   const existingIndex = (vault.records ?? []).findIndex((item) => item.id === recordId);
@@ -409,7 +525,7 @@ export async function listProviderCredentialRecords({ vaultPath = resolveTokenVa
       refreshAvailable: record.refreshAvailable,
       scopeCount: record.scopeCount,
       updatedAt: record.updatedAt,
-      keyMatches: (env.SIGNAL_TOKEN_ENCRYPTION_KEY || env.SIGNAL_TOKEN_ENCRYPTION_KEYS) ? record.encrypted?.keyDigest === keyDigest(env) : null,
+      keyMatches: (env.SIGNAL_TOKEN_ENCRYPTION_KEY || env.SIGNAL_TOKEN_ENCRYPTION_KEYS) ? record.encrypted?.keyDigest === keyDigest(env, vault.meta) : null,
       keyId: record.encrypted?.keyId ?? 'v1',
     })),
   };
@@ -421,7 +537,7 @@ export async function verifyProviderCredentialVault({ vaultPath = resolveTokenVa
   const results = [];
   for (const record of vault.records ?? []) {
     try {
-      decryptVaultPayload(record.encrypted, { env });
+      decryptVaultPayload(record.encrypted, { env, vaultMeta: vault.meta });
       results.push({ id: record.id, keyId: record.encrypted?.keyId ?? 'v1', ok: true });
     } catch (error) {
       results.push({
@@ -445,18 +561,22 @@ export async function verifyProviderCredentialVault({ vaultPath = resolveTokenVa
 
 export async function rotateProviderCredentialVault({ vaultPath = resolveTokenVaultPath(), env = process.env } = {}) {
   const resolvedVaultPath = resolveTokenVaultPath(vaultPath);
-  const vault = await readVault(resolvedVaultPath);
-  const targetKey = currentKey(env);
+  const vault = ensureVaultCryptoMeta(await readVault(resolvedVaultPath));
+  const targetKey = currentKey(env, vault.meta);
   let rotated = 0;
   vault.records = await Promise.all((vault.records ?? []).map(async (record) => {
-    const payload = decryptVaultPayload(record.encrypted, { env });
-    if (record.encrypted?.keyId === targetKey.id && record.encrypted?.keyDigest === targetKey.digest) {
+    const payload = decryptVaultPayload(record.encrypted, { env, vaultMeta: vault.meta });
+    if (
+      record.encrypted?.keyId === targetKey.id &&
+      record.encrypted?.keyDigest === targetKey.digest &&
+      (record.encrypted?.kdf ?? LEGACY_KDF) === targetKey.kdf
+    ) {
       return record;
     }
     rotated += 1;
     return {
       ...record,
-      encrypted: encryptJson(payload, { env }),
+      encrypted: encryptJson(payload, { env, vault }),
       rotatedAt: nowIso(),
       updatedAt: nowIso(),
     };
@@ -493,7 +613,7 @@ export async function loadProviderCredential({
   let record = findCredentialRecord(vault, { credentialVaultRef, mailboxId, provider });
   assertRecordUsable(record, { credentialVaultRef, mailboxId, provider });
 
-  let payload = decryptVaultPayload(record.encrypted, { env });
+  let payload = decryptVaultPayload(record.encrypted, { env, vaultMeta: vault.meta });
   let refreshedAt = null;
   if (refreshExpired && isExpiredOrNearExpiry(record.expiresAt, { skewMs: refreshSkewMs })) {
     const refresh = await refreshCredentialRecord({
