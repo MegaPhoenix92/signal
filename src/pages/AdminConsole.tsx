@@ -518,6 +518,17 @@ export function AdminConsole({ liveState }: { liveState: LiveState }) {
     }
   }, [contextTenantId, currentActor?.tenantId, data]);
 
+  // Reset operator-panel filters/selection when the admin context tenant changes.
+  // Owner/flow filters hold ids scoped to the previous tenant; without this reset a
+  // stale filter would silently filter the new tenant's signals to an empty list (#82/#89 review).
+  useEffect(() => {
+    setSignalStatusFilter('all');
+    setSignalOwnerFilter('all');
+    setSignalFlowFilter('all');
+    setSelectedOperatorAccountId('');
+    setAccountReviewNote('Admin operator review');
+  }, [contextTenantId]);
+
   function selectAdminTab(tab: AdminTab, sub?: AdminSubRoute, focus = false) {
     const route = normalizeAdminRoute({ tab, sub });
     setActiveRoute(route);
