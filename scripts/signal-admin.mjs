@@ -139,6 +139,7 @@ const subcommand = positionals[1] ?? null;
 const flags = new Set(args.filter((arg) => arg.startsWith('-')));
 const wantsJson = flags.has('--json');
 const force = flags.has('--force');
+const confirmed = flags.has('--yes');
 const dryRun = flags.has('--dry-run');
 const saveEvidencePath = optionValue('--save-evidence');
 const envFilePath = optionValue('--env-file');
@@ -2636,8 +2637,20 @@ async function run() {
       return;
 
     case 'bootstrap': {
+      if (force && !confirmed) {
+        throw new SignalStateError('Force bootstrap requires --yes to confirm destructive overwrite.', {
+          code: 'BOOTSTRAP_CONFIRMATION_REQUIRED',
+          status: 400,
+          details: { usage: 'npm run admin -- bootstrap --force --yes' },
+        });
+      }
       const result = await bootstrapState({ force });
-      emit(wantsJson ? { ok: true, statePath: result.statePath, summary: result.summary } : `Bootstrapped local Signal state at ${result.statePath}`);
+      emit(wantsJson
+        ? { backupPath: result.backupPath ?? null, ok: true, statePath: result.statePath, summary: result.summary }
+        : [
+          `Bootstrapped local Signal state at ${result.statePath}`,
+          result.backupPath ? `Previous state backed up to ${result.backupPath}` : null,
+        ].filter(Boolean).join('\n'));
       return;
     }
 

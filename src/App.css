@@ -107,11 +107,16 @@ button {
   transition: background 180ms ease, color 180ms ease, transform 180ms ease;
 }
 
-.nav-links a:hover,
+.nav-links a:hover {
+  background: rgba(17, 20, 17, 0.08);
+  color: var(--ink);
+}
+
 .nav-links a:focus-visible {
   background: rgba(17, 20, 17, 0.08);
   color: var(--ink);
-  outline: none;
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
 }
 
 .nav-action {
@@ -124,10 +129,14 @@ button {
 }
 
 .nav-action:hover,
+.button:hover {
+  transform: translateY(-2px);
+}
+
 .nav-action:focus-visible,
-.button:hover,
 .button:focus-visible {
-  outline: none;
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
   transform: translateY(-2px);
 }
 
@@ -149,11 +158,16 @@ button {
   width: 42px;
 }
 
-.mobile-nav-toggle:hover,
+.mobile-nav-toggle:hover {
+  background: var(--lime);
+  color: var(--ink);
+}
+
 .mobile-nav-toggle:focus-visible {
   background: var(--lime);
   color: var(--ink);
-  outline: none;
+  outline: 2px solid var(--white);
+  outline-offset: 2px;
 }
 
 .hero {
@@ -739,11 +753,16 @@ h3 {
     padding: 12px;
   }
 
-  .mobile-nav-panel a:hover,
+  .mobile-nav-panel a:hover {
+    background: rgba(17, 20, 17, 0.08);
+    color: var(--ink);
+  }
+
   .mobile-nav-panel a:focus-visible {
     background: rgba(17, 20, 17, 0.08);
     color: var(--ink);
-    outline: none;
+    outline: 2px solid var(--lime);
+    outline-offset: 2px;
   }
 
   .mobile-nav-action {
@@ -940,11 +959,16 @@ h3 {
 }
 
 .product-nav a:hover,
-.product-nav a:focus-visible,
 .product-nav a.is-active {
   background: var(--lime);
   color: var(--ink);
-  outline: none;
+}
+
+.product-nav a:focus-visible {
+  background: var(--lime);
+  color: var(--ink);
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
 }
 
 .product-main {
@@ -1430,11 +1454,16 @@ h3 {
   padding: 0 11px;
 }
 
-.inline-action:hover,
+.inline-action:hover {
+  background: var(--lime);
+  color: var(--ink);
+}
+
 .inline-action:focus-visible {
   background: var(--lime);
   color: var(--ink);
-  outline: none;
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
 }
 
 .inline-action:disabled {
@@ -1589,11 +1618,16 @@ h3 {
 }
 
 .account-health-card:hover,
-.account-health-card:focus-visible,
 .account-health-card[data-selected='true'] {
   background: rgba(182, 255, 69, 0.16);
   border-color: rgba(65, 99, 0, 0.3);
-  outline: none;
+}
+
+.account-health-card:focus-visible {
+  background: rgba(182, 255, 69, 0.16);
+  border-color: rgba(65, 99, 0, 0.3);
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
 }
 
 .account-health-card span,
@@ -2340,11 +2374,16 @@ h3 {
 }
 
 .admin-tab:hover,
-.admin-tab:focus-visible,
 .admin-tab[aria-selected='true'] {
   background: var(--lime);
   color: var(--ink);
-  outline: none;
+}
+
+.admin-tab:focus-visible {
+  background: var(--lime);
+  color: var(--ink);
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
 }
 
 .admin-grid {

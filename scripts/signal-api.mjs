@@ -240,18 +240,32 @@ function applyCorsHeaders(req, res) {
   res.setHeader('Vary', 'Origin');
 }
 
+function securityHeaders(extraHeaders = {}) {
+  const headers = {
+    'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    ...extraHeaders,
+  };
+  if (process.env.SIGNAL_COOKIE_SECURE === 'true') {
+    headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains';
+  }
+  return headers;
+}
+
 function sendJson(res, statusCode, payload, extraHeaders = {}) {
-  res.writeHead(statusCode, {
+  res.writeHead(statusCode, securityHeaders({
     'Content-Type': 'application/json; charset=utf-8',
     ...extraHeaders,
-  });
+  }));
   res.end(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
 function sendText(res, statusCode, text, contentType = 'text/plain; charset=utf-8') {
-  res.writeHead(statusCode, {
+  res.writeHead(statusCode, securityHeaders({
     'Content-Type': contentType,
-  });
+  }));
   res.end(text);
 }
 
@@ -369,7 +383,7 @@ function errorPayload(error) {
     payload: {
       ok: false,
       code: 'API_ERROR',
-      error: error instanceof Error ? error.message : String(error),
+      error: 'Internal error',
     },
   };
 }

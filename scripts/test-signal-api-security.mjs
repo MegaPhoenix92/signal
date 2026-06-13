@@ -487,6 +487,55 @@ test('OAuth callback rejects signed state that does not match session oauthState
   );
 });
 
+test('OAuth callback rejects signed state with a nonce mismatch', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-oauth-nonce-mismatch-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const oauthEnv = { SIGNAL_OAUTH_STATE_KEY: 'oauth-nonce-mismatch-key' };
+  const previousOAuthStateKey = process.env.SIGNAL_OAUTH_STATE_KEY;
+  process.env.SIGNAL_OAUTH_STATE_KEY = oauthEnv.SIGNAL_OAUTH_STATE_KEY;
+  t.after(() => {
+    if (previousOAuthStateKey === undefined) {
+      delete process.env.SIGNAL_OAUTH_STATE_KEY;
+    } else {
+      process.env.SIGNAL_OAUTH_STATE_KEY = previousOAuthStateKey;
+    }
+  });
+
+  const oauthPayload = createOAuthStatePayload({
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    mailboxId: 'mbx_outlook_success',
+    ownerUserId: 'usr_admin',
+    provider: 'outlook',
+    sessionId: 'mcs_outlook_reauth',
+    tenantId: 'tenant_demo',
+  });
+  const oauthState = signOAuthState(oauthPayload, { env: oauthEnv });
+  const state = await loadState({ statePath });
+  const session = state.mailboxConnectionSessions.find((candidate) => candidate.id === 'mcs_outlook_reauth');
+  session.oauthStateDigest = oauthStateDigest(oauthState);
+  session.oauthStateNonce = 'mismatched-nonce';
+  await saveState(state, { statePath });
+
+  await assert.rejects(
+    () => completeMailboxConnectionFromOAuthCallback('outlook', { code: 'local_mcs_outlook_reauth', state: oauthState }, {
+      actorUserId: 'usr_admin',
+      env: oauthEnv,
+      statePath,
+    }),
+    (error) => {
+      assert.equal(error.code, 'OAUTH_STATE_NONCE_MISMATCH');
+      assert.equal(error.status, 401);
+      assert.equal(error.details?.sessionId, 'mcs_outlook_reauth');
+      return true;
+    },
+  );
+});
+
 test('OAuth callback rejects a session whose provider differs from the callback provider', async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-oauth-session-provider-mismatch-'));
   const statePath = path.join(tempDir, 'signal-state.json');
@@ -506,18 +555,20 @@ test('OAuth callback rejects a session whose provider differs from the callback 
     }
   });
 
-  const oauthState = signOAuthState(createOAuthStatePayload({
+  const oauthPayload = createOAuthStatePayload({
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
     mailboxId: 'mbx_outlook_success',
     ownerUserId: 'usr_admin',
     provider: 'outlook',
     sessionId: 'mcs_outlook_reauth',
     tenantId: 'tenant_demo',
-  }), { env: oauthEnv });
+  });
+  const oauthState = signOAuthState(oauthPayload, { env: oauthEnv });
   const state = await loadState({ statePath });
   const session = state.mailboxConnectionSessions.find((candidate) => candidate.id === 'mcs_outlook_reauth');
   session.provider = 'gmail';
   session.oauthStateDigest = oauthStateDigest(oauthState);
+  session.oauthStateNonce = oauthPayload.nonce;
   session.selectedScopes = ['selected_label_snippets'];
   await saveState(state, { statePath });
 
@@ -1018,17 +1069,19 @@ test('production OAuth callback route ignores spoofed X-Signal-Actor and uses SI
   });
 
   await bootstrapState({ force: true, statePath });
-  const oauthState = signOAuthState(createOAuthStatePayload({
+  const oauthPayload = createOAuthStatePayload({
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
     mailboxId: 'mbx_outlook_success',
     ownerUserId: 'usr_admin',
     provider: 'outlook',
     sessionId: 'mcs_outlook_reauth',
     tenantId: 'tenant_demo',
-  }), { env: oauthEnv });
+  });
+  const oauthState = signOAuthState(oauthPayload, { env: oauthEnv });
   const state = await loadState({ statePath });
   const session = state.mailboxConnectionSessions.find((candidate) => candidate.id === 'mcs_outlook_reauth');
   session.oauthStateDigest = oauthStateDigest(oauthState);
+  session.oauthStateNonce = oauthPayload.nonce;
   await saveState(state, { statePath });
 
   api = await startApiForSecurityTest({

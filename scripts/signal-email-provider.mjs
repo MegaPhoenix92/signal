@@ -428,8 +428,8 @@ export function parseSignedEmailWebhook(rawBody, signatureHeader, endpointSecret
   const body = requireString(rawBody, 'raw webhook body');
   const secret = requireString(endpointSecret, 'email webhook endpoint secret');
   const { digest, timestamp } = parseSignatureHeader(signatureHeader);
-  const age = Math.abs(Math.floor(Date.now() / 1000) - timestamp);
-  if (age > toleranceSeconds) {
+  const age = Math.floor(Date.now() / 1000) - timestamp;
+  if (age > toleranceSeconds || age < 0) {
     throw new EmailProviderError('Email webhook signature timestamp is outside the allowed tolerance.', {
       code: 'EMAIL_WEBHOOK_SIGNATURE_EXPIRED',
       status: 401,
@@ -437,13 +437,21 @@ export function parseSignedEmailWebhook(rawBody, signatureHeader, endpointSecret
     });
   }
   const expected = signEmailWebhookPayload(body, secret, { timestamp }).split('v1=')[1];
-  if (!/^[a-f0-9]{64}$/i.test(digest)) {
+  if (!/^[a-f0-9]{64}$/i.test(digest) || !/^[a-f0-9]{64}$/i.test(expected)) {
     throw new EmailProviderError('Email webhook signature verification failed.', {
       code: 'EMAIL_WEBHOOK_SIGNATURE_INVALID',
       status: 401,
     });
   }
-  if (!crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(digest, 'hex'))) {
+  const expectedBuffer = Buffer.from(expected, 'hex');
+  const digestBuffer = Buffer.from(digest, 'hex');
+  if (expectedBuffer.length !== digestBuffer.length) {
+    throw new EmailProviderError('Email webhook signature verification failed.', {
+      code: 'EMAIL_WEBHOOK_SIGNATURE_INVALID',
+      status: 401,
+    });
+  }
+  if (!crypto.timingSafeEqual(expectedBuffer, digestBuffer)) {
     throw new EmailProviderError('Email webhook signature verification failed.', {
       code: 'EMAIL_WEBHOOK_SIGNATURE_INVALID',
       status: 401,
@@ -488,8 +496,8 @@ export function verifySendGridWebhookSignature(rawBody, signatureHeader, timesta
       status: 401,
     });
   }
-  const ageSeconds = Math.abs(Math.floor(nowMs / 1000) - timestamp);
-  if (ageSeconds > toleranceSeconds) {
+  const ageSeconds = Math.floor(nowMs / 1000) - timestamp;
+  if (ageSeconds > toleranceSeconds || ageSeconds < 0) {
     throw new EmailProviderError('SendGrid webhook signature timestamp is outside the allowed tolerance.', {
       code: 'EMAIL_WEBHOOK_SIGNATURE_EXPIRED',
       status: 401,

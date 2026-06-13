@@ -2686,7 +2686,18 @@ function withFallbackModelGovernancePolicies(data: SignalAppData): SignalAppData
 }
 
 export const fallbackSignalData = withFallbackModelGovernancePolicies(signalData);
-export const localApiUrl = import.meta.env.VITE_SIGNAL_API_URL ?? 'http://127.0.0.1:8787';
+function resolveLocalApiUrl() {
+  const configured = import.meta.env.VITE_SIGNAL_API_URL;
+  if (configured) {
+    return configured;
+  }
+  if (import.meta.env.PROD) {
+    throw new Error('VITE_SIGNAL_API_URL is required in production builds.');
+  }
+  return 'http://127.0.0.1:8787';
+}
+
+export const localApiUrl = resolveLocalApiUrl();
 const localApiCredentials: RequestCredentials = 'include';
 const localApiActorUserId = import.meta.env.VITE_SIGNAL_LOCAL_ACTOR ?? 'usr_admin';
 

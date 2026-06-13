@@ -9,8 +9,10 @@ import {
   STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH,
   createStripeBillingPortalSession,
   createStripeCheckoutSession,
+  signStripeWebhookPayload,
   stripeBillingPortalIdempotencyKey,
   stripeCheckoutIdempotencyKey,
+  verifyStripeWebhookSignature,
 } from './signal-payment-provider.mjs';
 import {
   bootstrapState,
@@ -250,4 +252,28 @@ test('createCheckoutSession retries reuse the same derived Stripe idempotency ke
   assert.equal(billingSession?.providerIdempotencyKey, firstKey);
   const billingJob = state.jobs.find((job) => job.targetId === billingSession?.id);
   assert.equal(billingJob?.providerIdempotencyKey, firstKey);
+});
+
+test('Stripe webhook verification rejects future-dated signatures', () => {
+  const body = JSON.stringify({ id: 'evt_future', object: 'event' });
+  const secret = 'whsec_future_timestamp_test';
+  const futureTimestamp = Math.floor(Date.now() / 1000) + 120;
+  const signature = signStripeWebhookPayload(body, secret, { timestamp: futureTimestamp });
+
+  assert.throws(
+    () => verifyStripeWebhookSignature(body, signature, secret),
+    (error) => error.code === 'PAYMENT_WEBHOOK_TIMESTAMP_STALE',
+  );
+});
+
+test('Stripe webhook verification rejects stale signatures', () => {
+  const body = JSON.stringify({ id: 'evt_stale', object: 'event' });
+  const secret = 'whsec_stale_timestamp_test';
+  const staleTimestamp = Math.floor(Date.now() / 1000) - 600;
+  const signature = signStripeWebhookPayload(body, secret, { timestamp: staleTimestamp });
+
+  assert.throws(
+    () => verifyStripeWebhookSignature(body, signature, secret),
+    (error) => error.code === 'PAYMENT_WEBHOOK_TIMESTAMP_STALE',
+  );
 });
