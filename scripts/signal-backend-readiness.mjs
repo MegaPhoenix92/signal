@@ -282,10 +282,10 @@ export function backendReadiness({ env = process.env, statePath } = {}) {
       ok: tenantIsolationReady,
       message: tenantIsolationReady
         ? (tenantIsolationMode === 'rls'
-          ? 'Postgres RLS mode is configured; the state service creates and verifies pg_policies on startup.'
+          ? 'Postgres RLS mode is configured; the state service creates and verifies service-role pg_policies on monolithic state tables at startup.'
           : 'Tenant isolation policy mode is declared for multi-org enforcement.')
         : (tenantIsolationMode === 'rls'
-          ? 'RLS mode requires postgres state-service storage plus SIGNAL_STATE_SERVICE_RLS=true so startup verifies pg_policies.'
+          ? 'RLS mode requires postgres state-service storage plus SIGNAL_STATE_SERVICE_RLS=true so startup verifies service-role pg_policies on monolithic state tables.'
           : 'Production multi-org support needs durable tenant isolation such as RLS or policy enforcement.'),
       requiredEnv: tenantIsolationMode === 'rls'
         ? ['SIGNAL_TENANT_ISOLATION_MODE', 'SIGNAL_STATE_SERVICE_BACKEND', 'SIGNAL_STATE_SERVICE_RLS', ...stateServiceDatabaseEnv]

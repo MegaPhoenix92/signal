@@ -1377,6 +1377,7 @@ export function tenantIsolationAuditReport(state, {
   const tenantRoutingRules = (reportState.routingRules ?? []).filter((rule) => !tenant?.id || rule.tenantId === tenant.id);
   const tenantNotifications = (reportState.notificationEvents ?? []).filter((event) => !tenant?.id || event.tenantId === tenant.id);
   const tenantSources = (reportState.sourceMessages ?? []).filter((message) => !tenant?.id || message.tenantId === tenant.id);
+  const tenantScopedCollections = TENANT_SCOPED_COLLECTIONS.length;
   const visibleWithinTenant = scope.visibleSignals.length <= tenantSignals.length &&
     scope.visibleMailboxes.length <= tenantMailboxes.length &&
     scope.visibleSourceMessages.length <= tenantSources.length &&
@@ -1435,16 +1436,17 @@ export function tenantIsolationAuditReport(state, {
     }),
     tenantIsolationAuditRow({
       area: 'actor_scoped_visibility',
-      check: 'User workspace signals, mailboxes, source snippets, and notifications are derived from actor-scoped visibility helpers.',
+      check: 'User workspace signals, mailboxes, source snippets, notifications, accounts, and governance records are derived from actor-scoped visibility helpers.',
       evidence: [
         `${scope.visibleSignals.length}/${tenantSignals.length} visible signal row(s)`,
         `${scope.visibleMailboxes.length}/${tenantMailboxes.length} visible mailbox row(s)`,
         `${scope.visibleSourceMessages.length}/${tenantSources.length} visible source snippet(s)`,
         `${scope.visibleNotifications.length}/${tenantNotifications.length} visible notification(s)`,
+        `${tenantScopedCollections} tenant-scoped collection(s) audited by doctor/app scoping`,
       ],
       localOk: Boolean(actorMembership) && visibleWithinTenant,
       productionOk: productionIsolationReady,
-      recommendation: 'Members should see owned/team-routed work and own notifications; admins can see tenant-wide operations.',
+      recommendation: 'Members should see owned/team-routed work and own notifications; admins can see tenant-wide operations across every tenant-scoped app collection.',
       commands: ['npm run admin -- dashboard-audit --json', 'curl http://127.0.0.1:8787/api/dashboard-audit'],
     }),
     tenantIsolationAuditRow({
@@ -1489,16 +1491,17 @@ export function tenantIsolationAuditReport(state, {
     }),
     tenantIsolationAuditRow({
       area: 'production_rls_policy',
-      check: 'Production storage must enforce tenant isolation through database policy, RLS, or an equivalent state-service authorization layer.',
+      check: 'Production state service must verify RLS/service-role policies on monolithic state tables while app scoping remains the per-tenant JSON record boundary.',
       evidence: [
         tenantIsolation?.message ?? 'Tenant isolation backend check missing',
         `backend mode ${backendBoundary.mode}`,
+        `${tenantScopedCollections} app-scoped tenant collection(s) require scopeStateForActor/doctor coverage`,
       ],
       localOk: true,
       productionOk: Boolean(tenantIsolation?.ok),
-      recommendation: 'Do not run multiple customer organizations on shared production storage until the tenant isolation backend check is green.',
-      requiredEnv: ['SIGNAL_TENANT_ISOLATION_MODE', 'SIGNAL_STATE_SERVICE_URL', 'DATABASE_URL'],
-      commands: ['npm run admin -- backend --env-file ./.env.production --json', 'npm run admin -- production-plan --json'],
+      recommendation: 'Do not run multiple customer organizations on shared production storage until RLS startup verification is green and tenant-isolation tests prove app-level scoping for tenant records.',
+      requiredEnv: ['SIGNAL_TENANT_ISOLATION_MODE', 'SIGNAL_STATE_SERVICE_BACKEND', 'SIGNAL_STATE_SERVICE_RLS', 'SIGNAL_STATE_SERVICE_URL', 'DATABASE_URL'],
+      commands: ['npm run admin -- backend --env-file ./.env.production --json', 'npm run test:tenant-isolation', 'npm run test:state-service'],
     }),
     tenantIsolationAuditRow({
       area: 'durable_state_boundary',
@@ -1528,7 +1531,7 @@ export function tenantIsolationAuditReport(state, {
     recommendation: {
       decision: 'support_multi_member_orgs',
       summary: 'The SaaS should keep multi-member organizations because tenant membership, role, owner, and team routing can support per-user focus while preserving one workspace.',
-      productionGuardrail: 'Production tenant isolation still needs durable backend, managed auth, signed sessions, and policy/RLS evidence before multiple customer orgs share infrastructure.',
+      productionGuardrail: 'Production tenant isolation still needs durable backend, managed auth, signed sessions, state-service table RLS evidence, and app-scoping test evidence before multiple customer orgs share infrastructure.',
       memberPrivacyDefault: 'Members should default to owned mailbox sources, owned/team-routed signals, own notifications, and assigned account work; admins keep tenant-wide operations visibility.',
     },
     roleMatrix: [
@@ -1550,6 +1553,7 @@ export function tenantIsolationAuditReport(state, {
       activeAdmins: activeAdmins.length,
       activeMembers: activeMembers.length,
       actorScopedRows: rows.filter((row) => row.area === 'actor_scoped_visibility').length,
+      appScopedCollections: tenantScopedCollections,
       localReady: rows.filter((row) => row.localOk).length,
       orphanMemberships: orphanMemberships.length,
       productionReady: rows.filter((row) => row.productionOk).length,
@@ -2934,9 +2938,10 @@ export function productReadinessReport(state, {
         `${summary.admins} active admin(s)`,
         `${summary.activeMemberships} active membership(s)`,
         `${summary.apiSessions} digest-only API session record(s)`,
+        `${TENANT_SCOPED_COLLECTIONS.length} tenant-scoped app collection(s) covered by scopeStateForActor/doctor`,
         `Backend tenant isolation: ${backend?.checks?.find?.((check) => check.id === 'tenant_isolation')?.ok ? 'configured' : 'not production configured'}`,
       ],
-      gaps: backendProductionReady ? [] : ['Configure durable production tenant isolation mode and managed auth/storage before multi-customer production use.'],
+      gaps: backendProductionReady ? [] : ['Configure durable production tenant isolation mode, managed auth/storage, state-service table RLS, and app-scoping test proof before multi-customer production use.'],
     }),
     readinessRequirement({
       id: 'email_source_and_detection_flow',
@@ -3183,11 +3188,14 @@ export function launchGateReport(state, {
       evidence: [
         tenantIsolation?.message ?? 'Tenant isolation readiness has not been evaluated.',
         `${summary.tenants} tenant(s), ${summary.memberships} membership record(s)`,
+        `${TENANT_SCOPED_COLLECTIONS.length} app-scoped tenant collection(s)`,
       ],
       blockers: tenantIsolation?.ok ? [] : [tenantIsolation?.message ?? 'Configure a durable tenant isolation policy before production.'],
       requiredEnv: tenantIsolation?.missingEnv ?? ['SIGNAL_TENANT_ISOLATION_MODE'],
       commands: [
         'SIGNAL_TENANT_ISOLATION_MODE=rls npm run admin -- backend --json',
+        'npm run test:tenant-isolation',
+        'npm run test:state-service',
       ],
     }),
     launchGateItem({
@@ -6410,7 +6418,9 @@ function backendHandoffActionFromCheck(check) {
     command: commandMap[check.id] ?? 'npm run admin -- backend --json',
     followUpCommands: check.id === 'state_service_storage'
       ? ['npm run test:state-service', 'SIGNAL_STATE_SERVICE_URL=<state-service-url> SIGNAL_STATE_SERVICE_TOKEN=<token> npm run state-service:admin -- health --json']
-      : [],
+      : check.id === 'tenant_isolation'
+        ? ['npm run test:tenant-isolation', 'npm run test:state-service']
+        : [],
   };
 }
 
@@ -7237,10 +7247,11 @@ export function completionAuditReport(state, {
       evidence: [
         `${isolation.summary.activeAdmins} admin(s), ${isolation.summary.activeMembers} member(s)`,
         `${isolation.summary.actorScopedRows} actor-scoped audit row(s)`,
+        `${isolation.summary.appScopedCollections} tenant-scoped app collection(s) covered`,
         `${summary.activeApiSessions ?? 0}/${summary.apiSessions ?? 0} active API session(s)`,
       ],
       blockers: isolation.productionReady ? [] : [isolation.recommendation.productionGuardrail],
-      commands: ['npm run admin -- tenant-isolation --json', 'npm run admin -- users --json', 'npm run admin -- session token usr_admin --json'],
+      commands: ['npm run admin -- tenant-isolation --json', 'npm run test:tenant-isolation', 'npm run test:state-service', 'npm run admin -- users --json', 'npm run admin -- session token usr_admin --json'],
       api: '/api/tenant-isolation',
     }),
     completionAuditRow({
