@@ -228,55 +228,53 @@ test('Signal local API preserves concurrent mutations without lost updates', asy
   api = await startLocalActorApi({ port, statePath });
 
   const suffix = Date.now();
-  const [tenantA, tenantB] = await Promise.all([
+  const domainA = `concurrent-a-${suffix}.test`;
+  const domainB = `concurrent-b-${suffix}.test`;
+  const mutationHeaders = {
+    'Content-Type': 'application/json',
+    'X-Signal-Actor': 'usr_admin',
+  };
+  const [updateA, updateB] = await Promise.all([
     fetch(`${api.apiBaseUrl}/api/mutations`, {
       body: JSON.stringify({
-        action: 'tenants.create',
+        action: 'tenants.domain',
         args: {
-          name: `Tenant A ${suffix}`,
-          domain: `a-${suffix}.test`,
-          adminEmail: `a-${suffix}@acme.example`,
+          domain: domainA,
+          tenantId: 'tenant_demo',
         },
       }),
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Signal-Actor': 'usr_admin',
-      },
+      headers: mutationHeaders,
       method: 'POST',
     }).then(async (response) => ({ payload: await parseJsonResponse(response), status: response.status })),
     fetch(`${api.apiBaseUrl}/api/mutations`, {
       body: JSON.stringify({
-        action: 'tenants.create',
+        action: 'tenants.domain',
         args: {
-          name: `Tenant B ${suffix}`,
-          domain: `b-${suffix}.test`,
-          adminEmail: `b-${suffix}@acme.example`,
+          domain: domainB,
+          tenantId: 'tenant_demo',
         },
       }),
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Signal-Actor': 'usr_admin',
-      },
+      headers: mutationHeaders,
       method: 'POST',
     }).then(async (response) => ({ payload: await parseJsonResponse(response), status: response.status })),
   ]);
 
-  assert.equal(tenantA.status, 200);
-  assert.equal(tenantB.status, 200);
-  assert.equal(tenantA.payload.ok, true);
-  assert.equal(tenantB.payload.ok, true);
+  assert.equal(updateA.status, 200);
+  assert.equal(updateB.status, 200);
+  assert.equal(updateA.payload.ok, true);
+  assert.equal(updateB.payload.ok, true);
 
   const fileState = JSON.parse(await fs.readFile(statePath, 'utf8'));
-  const tenantARecord = fileState.tenants.find((tenant) => tenant.domain === `a-${suffix}.test`);
-  const tenantBRecord = fileState.tenants.find((tenant) => tenant.domain === `b-${suffix}.test`);
-  assert.ok(tenantARecord?.id, 'concurrent mutation A should persist with an id');
-  assert.ok(tenantBRecord?.id, 'concurrent mutation B should persist with an id');
-  assert.notEqual(tenantARecord.id, tenantBRecord.id, 'concurrent tenants should receive distinct ids');
+  const tenantDemo = fileState.tenants.find((tenant) => tenant.id === 'tenant_demo');
+  assert.ok(tenantDemo, 'tenant_demo should remain present after concurrent domain updates');
+  assert.ok([domainA, domainB].includes(tenantDemo.domain), 'final tenant domain should reflect one of the concurrent updates');
 
-  const createAudits = fileState.auditEvents.filter((event) =>
-    event.action === 'tenants.create'
-    && (event.targetId === tenantARecord.id || event.targetId === tenantBRecord.id));
-  assert.equal(createAudits.length, 2, 'both concurrent tenant creates should append audit events');
-  assert.equal(new Set(createAudits.map((event) => event.actor)).size, 1);
-  assert.equal(createAudits[0].actor, 'usr_admin');
+  const domainAudits = fileState.auditEvents.filter((event) =>
+    event.action === 'tenants.domain' && event.targetId === 'tenant_demo');
+  assert.equal(domainAudits.length, 2, 'concurrent updates to the same tenant record should append both audit events without losing one');
+  assert.deepEqual(
+    new Set(domainAudits.map((event) => event.actor)),
+    new Set(['usr_admin']),
+    'both concurrent domain updates should be attributed to the same actor',
+  );
 });

@@ -431,6 +431,7 @@ test('Signal state service postgres RLS mode creates and verifies policies', asy
   const meta = await store.meta();
   assert.equal(meta.rls.ok, true);
   assert.equal(meta.rls.tables.length, 2);
+  assert(meta.rls.tables.length > 0, 'RLS mode should verify at least one protected table');
   assert(meta.rls.tables.every((table) => table.rlsEnabled && table.policyCount > 0));
 });
 
@@ -847,14 +848,15 @@ test('Signal API preserves concurrent mutations through external state service',
   api = await startApi({ apiPort, serviceToken, serviceUrl, sessionSecret });
 
   const suffix = Date.now();
-  const [tenantA, tenantB] = await Promise.all([
+  const domainA = `svc-concurrent-a-${suffix}.test`;
+  const domainB = `svc-concurrent-b-${suffix}.test`;
+  const [updateA, updateB] = await Promise.all([
     requestApi(api.apiBaseUrl, '/api/mutations', {
       body: {
-        action: 'tenants.create',
+        action: 'tenants.domain',
         args: {
-          name: `Service Tenant A ${suffix}`,
-          domain: `svc-a-${suffix}.test`,
-          adminEmail: `svc-a-${suffix}@acme.example`,
+          domain: domainA,
+          tenantId: 'tenant_demo',
         },
       },
       method: 'POST',
@@ -862,11 +864,10 @@ test('Signal API preserves concurrent mutations through external state service',
     }),
     requestApi(api.apiBaseUrl, '/api/mutations', {
       body: {
-        action: 'tenants.create',
+        action: 'tenants.domain',
         args: {
-          name: `Service Tenant B ${suffix}`,
-          domain: `svc-b-${suffix}.test`,
-          adminEmail: `svc-b-${suffix}@acme.example`,
+          domain: domainB,
+          tenantId: 'tenant_demo',
         },
       },
       method: 'POST',
@@ -874,23 +875,24 @@ test('Signal API preserves concurrent mutations through external state service',
     }),
   ]);
 
-  assert.equal(tenantA.status, 200);
-  assert.equal(tenantB.status, 200);
-  assert.equal(tenantA.payload.ok, true);
-  assert.equal(tenantB.payload.ok, true);
+  assert.equal(updateA.status, 200);
+  assert.equal(updateB.status, 200);
+  assert.equal(updateA.payload.ok, true);
+  assert.equal(updateB.payload.ok, true);
 
   const persistedState = JSON.parse(await fs.readFile(stateFile, 'utf8'));
-  const tenantARecord = persistedState.tenants.find((tenant) => tenant.domain === `svc-a-${suffix}.test`);
-  const tenantBRecord = persistedState.tenants.find((tenant) => tenant.domain === `svc-b-${suffix}.test`);
-  assert.ok(tenantARecord?.id, 'concurrent mutation A should persist through state service');
-  assert.ok(tenantBRecord?.id, 'concurrent mutation B should persist through state service');
-  assert.notEqual(tenantARecord.id, tenantBRecord.id, 'concurrent tenants should receive distinct ids');
+  const tenantDemo = persistedState.tenants.find((tenant) => tenant.id === 'tenant_demo');
+  assert.ok(tenantDemo, 'tenant_demo should remain present after concurrent state-service updates');
+  assert.ok([domainA, domainB].includes(tenantDemo.domain), 'final tenant domain should reflect one of the concurrent updates');
 
-  const createAudits = persistedState.auditEvents.filter((event) =>
-    event.action === 'tenants.create'
-    && (event.targetId === tenantARecord.id || event.targetId === tenantBRecord.id));
-  assert.equal(createAudits.length, 2, 'both concurrent tenant creates should append audit events');
-  assert.equal(createAudits.every((event) => event.actor === 'usr_admin'), true);
+  const domainAudits = persistedState.auditEvents.filter((event) =>
+    event.action === 'tenants.domain' && event.targetId === 'tenant_demo');
+  assert.equal(domainAudits.length, 2, 'concurrent updates to the same tenant record should append both audit events through the external state service');
+  assert.deepEqual(
+    new Set(domainAudits.map((event) => event.actor)),
+    new Set(['usr_admin']),
+    'both concurrent domain updates should be attributed to the same actor',
+  );
 });
 
 test('Signal state service health endpoint exposes only liveness metadata', async (t) => {
