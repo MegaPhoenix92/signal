@@ -18,6 +18,9 @@ export default defineConfig({
           if (hasPathSuffix(id, '/src/signalData.ts')) {
             return 'signal-data';
           }
+          if (containsPath(id, 'AdminConsole.tsx')) {
+            return 'admin-console';
+          }
           return undefined;
         },
       },
