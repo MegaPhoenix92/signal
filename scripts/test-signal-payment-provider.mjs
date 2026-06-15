@@ -7,8 +7,10 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   STRIPE_IDEMPOTENCY_KEY_MAX_LENGTH,
+  assertStripeLivemodeMatches,
   createStripeBillingPortalSession,
   createStripeCheckoutSession,
+  resolveExpectedStripeLivemode,
   signStripeWebhookPayload,
   parseSignedStripeWebhook,
   stripeEventToLocalPaymentWebhook,
@@ -19,7 +21,10 @@ import {
 import {
   bootstrapState,
   createCheckoutSession,
+  handlePaymentWebhook,
+  handleSignedStripePaymentWebhook,
   loadState,
+  SignalStateError,
 } from './signal-state.mjs';
 
 const env = {
@@ -365,4 +370,151 @@ test('signed Stripe parser returns ignored mapping for unknown but valid signed 
 
   assert.equal(parsed.mapping.localType, 'provider.event.ignored');
   assert.equal(parsed.verification.signatureStatus, 'verified');
+});
+
+test('resolveExpectedStripeLivemode honors SIGNAL_STRIPE_LIVEMODE and NODE_ENV fallback', () => {
+  assert.equal(resolveExpectedStripeLivemode({ SIGNAL_STRIPE_LIVEMODE: 'true' }), true);
+  assert.equal(resolveExpectedStripeLivemode({ SIGNAL_STRIPE_LIVEMODE: 'false' }), false);
+  assert.equal(resolveExpectedStripeLivemode({ NODE_ENV: 'production' }), true);
+  assert.equal(resolveExpectedStripeLivemode({ NODE_ENV: 'development' }), false);
+});
+
+test('assertStripeLivemodeMatches rejects cross-environment webhook delivery', () => {
+  assert.throws(
+    () => assertStripeLivemodeMatches(true, false),
+    (error) => error.code === 'PAYMENT_WEBHOOK_LIVEMODE_MISMATCH',
+  );
+  assert.doesNotThrow(() => assertStripeLivemodeMatches(false, false));
+});
+
+test('signed Stripe webhook handler rejects livemode mismatch before mutating state', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-livemode-guard-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+  const secret = 'whsec_livemode_guard_test';
+  const previousLivemode = process.env.SIGNAL_STRIPE_LIVEMODE;
+  const previousNodeEnv = process.env.NODE_ENV;
+
+  t.after(async () => {
+    if (previousLivemode === undefined) {
+      delete process.env.SIGNAL_STRIPE_LIVEMODE;
+    } else {
+      process.env.SIGNAL_STRIPE_LIVEMODE = previousLivemode;
+    }
+    if (previousNodeEnv === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  process.env.SIGNAL_STRIPE_LIVEMODE = 'true';
+
+  const body = JSON.stringify({
+    id: 'evt_livemode_mismatch',
+    type: 'invoice.paid',
+    created: 1_700_000_000,
+    livemode: false,
+    data: {
+      object: {
+        amount_due: 4900,
+        customer: 'cus_signal',
+        id: 'in_livemode_mismatch',
+        object: 'invoice',
+        subscription: 'sub_stripe_signal',
+      },
+    },
+  });
+  const signature = signStripeWebhookPayload(body, secret);
+
+  await assert.rejects(
+    () => handleSignedStripePaymentWebhook(body, signature, {
+      actorUserId: 'usr_admin',
+      endpointSecret: secret,
+      statePath,
+    }),
+    (error) => error instanceof SignalStateError && error.code === 'PAYMENT_WEBHOOK_LIVEMODE_MISMATCH',
+  );
+
+  const state = await loadState({ statePath });
+  assert.equal(
+    state.paymentEvents.some((event) => event.providerEventId === 'evt_livemode_mismatch'),
+    false,
+    'livemode mismatch must not append payment events',
+  );
+});
+
+test('subscription webhook ordering ignores stale provider events after cancellation', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-subscription-ordering-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+
+  await handlePaymentWebhook('subscription.updated', {
+    planId: 'plan_team',
+    provider: 'stripe',
+    providerEventCreatedAt: 1_700_000_100,
+    providerEventId: 'evt_sub_active',
+    providerEventType: 'customer.subscription.updated',
+    providerStatus: 'active',
+    providerSubscriptionId: 'sub_stripe_signal',
+    status: 'active',
+    subscriptionId: 'sub_demo',
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  await handlePaymentWebhook('subscription.canceled', {
+    planId: 'plan_team',
+    provider: 'stripe',
+    providerEventCreatedAt: 1_700_000_200,
+    providerEventId: 'evt_sub_deleted',
+    providerEventType: 'customer.subscription.deleted',
+    providerStatus: 'canceled',
+    providerSubscriptionId: 'sub_stripe_signal',
+    subscriptionId: 'sub_demo',
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  const staleUpdate = await handlePaymentWebhook('subscription.updated', {
+    planId: 'plan_team',
+    provider: 'stripe',
+    providerEventCreatedAt: 1_700_000_050,
+    providerEventId: 'evt_sub_stale_active',
+    providerEventType: 'customer.subscription.updated',
+    providerStatus: 'active',
+    providerSubscriptionId: 'sub_stripe_signal',
+    status: 'active',
+    subscriptionId: 'sub_demo',
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  assert.equal(staleUpdate.details.status, 'out_of_order');
+
+  const state = await loadState({ statePath });
+  const subscription = state.subscriptions.find((item) => item.id === 'sub_demo');
+  assert.equal(subscription?.status, 'canceled');
+  assert.equal(subscription?.providerLastEventCreatedAt, 1_700_000_200);
+  assert(state.paymentEvents.some((event) => event.providerEventId === 'evt_sub_stale_active' && event.status === 'out_of_order'));
+});
+
+test('Stripe mapper includes provider event created timestamp', () => {
+  const mapping = stripeEventToLocalPaymentWebhook({
+    id: 'evt_created_ts',
+    type: 'customer.subscription.updated',
+    created: 1_700_000_321,
+    data: {
+      object: {
+        id: 'sub_stripe_signal',
+        object: 'subscription',
+        status: 'active',
+      },
+    },
+  });
+
+  assert.equal(mapping.providerEventCreatedAt, 1_700_000_321);
 });

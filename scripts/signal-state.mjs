@@ -4,9 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   PaymentProviderError,
+  assertStripeLivemodeMatches,
   createStripeBillingPortalSession,
   createStripeCheckoutSession,
   parseSignedStripeWebhook,
+  resolveExpectedStripeLivemode,
 } from './signal-payment-provider.mjs';
 import {
   EmailProviderError,
@@ -7882,9 +7884,27 @@ function upsertSubscriptionFromProviderMetadata(state, {
   return subscription;
 }
 
+const SUBSCRIPTION_WEBHOOK_TYPES = new Set([
+  'subscription.updated',
+  'subscription.trial_will_end',
+  'subscription.canceled',
+]);
+
+function isStaleStripeSubscriptionEvent(subscription, provider, providerEventCreatedAt) {
+  if (provider !== 'stripe' || !Number.isFinite(providerEventCreatedAt)) {
+    return false;
+  }
+  const lastApplied = subscription?.providerLastEventCreatedAt;
+  if (!Number.isFinite(lastApplied)) {
+    return false;
+  }
+  return providerEventCreatedAt <= lastApplied;
+}
+
 function applySubscriptionProviderRefs(subscription, {
   provider,
   providerCustomerId,
+  providerEventCreatedAt,
   providerEventId,
   providerEventType,
   providerPriceId,
@@ -7931,6 +7951,9 @@ function applySubscriptionProviderRefs(subscription, {
   }
   if (providerEventType) {
     subscription.providerLastEventType = providerEventType;
+  }
+  if (Number.isFinite(providerEventCreatedAt)) {
+    subscription.providerLastEventCreatedAt = providerEventCreatedAt;
   }
   if (signatureStatus) {
     subscription.providerSignatureStatus = signatureStatus;
@@ -15620,6 +15643,7 @@ export async function handlePaymentWebhook(eventType, {
   providerPriceId,
   providerEventId,
   providerEventType,
+  providerEventCreatedAt,
   providerSessionId,
   providerStatus,
   providerSubscriptionId,
@@ -15808,6 +15832,7 @@ export async function handlePaymentWebhook(eventType, {
         applySubscriptionProviderRefs(subscription, {
           provider,
           providerCustomerId,
+          providerEventCreatedAt,
           providerEventId,
           providerEventType,
           providerPriceId,
@@ -15836,6 +15861,40 @@ export async function handlePaymentWebhook(eventType, {
         tenant = findById(state.tenants, subscription.tenantId, 'Tenant');
         subscription.provider = provider === 'local_test' ? subscription.provider : provider;
         providerPreviousPriceId = subscription.providerPriceId ?? null;
+        if (SUBSCRIPTION_WEBHOOK_TYPES.has(type) && isStaleStripeSubscriptionEvent(subscription, provider, providerEventCreatedAt)) {
+          const event = appendPaymentEvent(state, {
+            tenantId: tenant.id,
+            provider,
+            type: providerEventType ?? type,
+            status: 'out_of_order',
+            appliedType: type,
+            livemode,
+            providerCustomerId,
+            providerEventId,
+            providerEventType,
+            providerInvoiceId,
+            providerPriceId,
+            providerStatus,
+            providerSubscriptionId,
+            signatureStatus,
+            signatureTimestamp,
+            signatureVerifiedAt,
+            subscriptionId: subscription.id,
+          });
+          return {
+            duplicate: false,
+            eventId: event.id,
+            jobId: null,
+            message: `Ignored out-of-order ${provider} webhook ${providerEventType ?? type} for ${subscription.id}.`,
+            provider,
+            providerEventId,
+            providerEventType,
+            status: 'out_of_order',
+            subscriptionId: subscription.id,
+            targetId: subscription.id,
+            tenantId: tenant.id,
+          };
+        }
         if (type === 'invoice.paid') {
           nextStatus = 'active';
         } else if (type === 'invoice.payment_failed') {
@@ -15861,6 +15920,7 @@ export async function handlePaymentWebhook(eventType, {
         applySubscriptionProviderRefs(subscription, {
           provider,
           providerCustomerId,
+          providerEventCreatedAt,
           providerEventId,
           providerEventType,
           providerPriceId,
@@ -16002,10 +16062,24 @@ export async function handleSignedStripePaymentWebhook(rawBody, signatureHeader,
     throw error;
   }
 
+  try {
+    assertStripeLivemodeMatches(resolveExpectedStripeLivemode(process.env), parsed.mapping.livemode);
+  } catch (error) {
+    if (error instanceof PaymentProviderError) {
+      throw new SignalStateError(error.message, {
+        code: error.code,
+        status: error.status,
+        details: error.details,
+      });
+    }
+    throw error;
+  }
+
   return handlePaymentWebhook(parsed.mapping.localType, {
     ...parsed.mapping.args,
     livemode: parsed.mapping.livemode,
     provider: parsed.mapping.provider,
+    providerEventCreatedAt: parsed.mapping.providerEventCreatedAt,
     providerEventId: parsed.mapping.providerEventId,
     providerEventType: parsed.mapping.eventType,
     signatureStatus: parsed.verification.signatureStatus,
