@@ -518,6 +518,43 @@ function requireMappedValue(value, label, eventType) {
   return value;
 }
 
+export function resolveExpectedStripeLivemode(env = process.env) {
+  const configured = env.SIGNAL_STRIPE_LIVEMODE;
+  if (configured === 'true') {
+    return true;
+  }
+  if (configured === 'false') {
+    return false;
+  }
+  return env.NODE_ENV === 'production';
+}
+
+export function assertStripeLivemodeMatches(expectedLivemode, actualLivemode) {
+  if (typeof actualLivemode !== 'boolean') {
+    throw new PaymentProviderError('Stripe webhook event is missing livemode.', {
+      code: 'PAYMENT_WEBHOOK_LIVEMODE_MISSING',
+      status: 400,
+    });
+  }
+  if (actualLivemode !== expectedLivemode) {
+    throw new PaymentProviderError(
+      `Stripe webhook livemode:${actualLivemode} does not match deployment expectation (${expectedLivemode}).`,
+      {
+        code: 'PAYMENT_WEBHOOK_LIVEMODE_MISMATCH',
+        status: 400,
+        details: { expectedLivemode, actualLivemode },
+      },
+    );
+  }
+}
+
+function finalizeStripeEventMapping(event, mapping) {
+  return {
+    ...mapping,
+    providerEventCreatedAt: Number.isFinite(event.created) ? event.created : undefined,
+  };
+}
+
 export function stripeEventToLocalPaymentWebhook(event) {
   if (!event || typeof event !== 'object') {
     throw new PaymentProviderError('Stripe webhook payload must be a JSON event object.', {
@@ -540,7 +577,7 @@ export function stripeEventToLocalPaymentWebhook(event) {
   const amountCents = objectAmountCents(object);
 
   if (eventType === 'checkout.session.completed') {
-    return {
+    return finalizeStripeEventMapping(event, {
       args: {
         planId: requireMappedValue(planId, 'metadata.planId', eventType),
         providerCustomerId,
@@ -553,11 +590,11 @@ export function stripeEventToLocalPaymentWebhook(event) {
       localType: 'checkout.completed',
       provider: 'stripe',
       providerEventId,
-    };
+    });
   }
 
   if (eventType === 'invoice.paid') {
-    return {
+    return finalizeStripeEventMapping(event, {
       args: {
         amountDueCents: Number.isFinite(object.amount_due) ? object.amount_due : undefined,
         hostedInvoiceUrl: optionalString(object.hosted_invoice_url),
@@ -573,11 +610,11 @@ export function stripeEventToLocalPaymentWebhook(event) {
       localType: 'invoice.paid',
       provider: 'stripe',
       providerEventId,
-    };
+    });
   }
 
   if (eventType === 'invoice.created' || eventType === 'invoice.finalized') {
-    return {
+    return finalizeStripeEventMapping(event, {
       args: {
         amountDueCents: Number.isFinite(object.amount_due) ? object.amount_due : amountCents,
         hostedInvoiceUrl: optionalString(object.hosted_invoice_url),
@@ -594,11 +631,11 @@ export function stripeEventToLocalPaymentWebhook(event) {
       localType: eventType === 'invoice.created' && object.status === 'draft' ? 'invoice.draft' : 'invoice.open',
       provider: 'stripe',
       providerEventId,
-    };
+    });
   }
 
   if (eventType === 'invoice.marked_uncollectible' || eventType === 'invoice.voided') {
-    return {
+    return finalizeStripeEventMapping(event, {
       args: {
         amountDueCents: Number.isFinite(object.amount_due) ? object.amount_due : amountCents,
         hostedInvoiceUrl: optionalString(object.hosted_invoice_url),
@@ -615,11 +652,11 @@ export function stripeEventToLocalPaymentWebhook(event) {
       localType: eventType === 'invoice.marked_uncollectible' ? 'invoice.uncollectible' : 'invoice.void',
       provider: 'stripe',
       providerEventId,
-    };
+    });
   }
 
   if (eventType === 'invoice.payment_failed' || eventType === 'invoice.payment_action_required') {
-    return {
+    return finalizeStripeEventMapping(event, {
       args: {
         amountDueCents: Number.isFinite(object.amount_due) ? object.amount_due : undefined,
         hostedInvoiceUrl: optionalString(object.hosted_invoice_url),
@@ -635,7 +672,7 @@ export function stripeEventToLocalPaymentWebhook(event) {
       localType: 'invoice.payment_failed',
       provider: 'stripe',
       providerEventId,
-    };
+    });
   }
 
   if (eventType === 'customer.subscription.created' || eventType === 'customer.subscription.updated' || eventType === 'customer.subscription.paused' || eventType === 'customer.subscription.resumed' || eventType === 'customer.subscription.trial_will_end') {
@@ -646,7 +683,7 @@ export function stripeEventToLocalPaymentWebhook(event) {
         : eventType === 'customer.subscription.trial_will_end'
           ? 'trialing'
           : mapStripeSubscriptionStatus(object.status);
-    return {
+    return finalizeStripeEventMapping(event, {
       args: {
         status: mappedStatus,
         planId,
@@ -665,11 +702,11 @@ export function stripeEventToLocalPaymentWebhook(event) {
       localType: eventType === 'customer.subscription.trial_will_end' ? 'subscription.trial_will_end' : 'subscription.updated',
       provider: 'stripe',
       providerEventId,
-    };
+    });
   }
 
   if (eventType === 'customer.subscription.deleted') {
-    return {
+    return finalizeStripeEventMapping(event, {
       args: {
         tenantId,
         planId,
@@ -685,11 +722,11 @@ export function stripeEventToLocalPaymentWebhook(event) {
       localType: 'subscription.canceled',
       provider: 'stripe',
       providerEventId,
-    };
+    });
   }
 
   if (eventType === 'charge.refunded' || eventType.startsWith('refund.')) {
-    return {
+    return finalizeStripeEventMapping(event, {
       args: {
         amountCents,
         providerCustomerId,
@@ -705,11 +742,11 @@ export function stripeEventToLocalPaymentWebhook(event) {
       localType: 'invoice.refunded',
       provider: 'stripe',
       providerEventId,
-    };
+    });
   }
 
   if (eventType.startsWith('credit_note.')) {
-    return {
+    return finalizeStripeEventMapping(event, {
       args: {
         amountCents,
         providerCustomerId,
@@ -725,11 +762,11 @@ export function stripeEventToLocalPaymentWebhook(event) {
       localType: 'invoice.credit_applied',
       provider: 'stripe',
       providerEventId,
-    };
+    });
   }
 
   if (eventType.startsWith('customer.balance_transaction.')) {
-    return {
+    return finalizeStripeEventMapping(event, {
       args: {
         amountCents,
         providerCustomerId,
@@ -745,10 +782,10 @@ export function stripeEventToLocalPaymentWebhook(event) {
       localType: 'customer.balance_adjusted',
       provider: 'stripe',
       providerEventId,
-    };
+    });
   }
 
-  return ignoredStripeEventMapping({
+  return finalizeStripeEventMapping(event, ignoredStripeEventMapping({
     amountCents,
     eventType,
     livemode: Boolean(event.livemode),
@@ -760,7 +797,7 @@ export function stripeEventToLocalPaymentWebhook(event) {
     providerSubscriptionId,
     subscriptionId,
     tenantId,
-  });
+  }));
 }
 
 export function parseSignedStripeWebhook(rawBody, signatureHeader, endpointSecret, options = {}) {

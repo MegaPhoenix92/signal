@@ -642,6 +642,7 @@ export type Subscription = {
   providerCustomerId?: string;
   providerLastEventId?: string;
   providerLastEventType?: string;
+  providerLastEventCreatedAt?: number;
   providerPlanChangedAt?: string;
   providerPreviousPriceId?: string;
   providerPriceId?: string;
