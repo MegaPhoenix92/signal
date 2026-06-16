@@ -502,6 +502,66 @@ test('subscription webhook ordering ignores stale provider events after cancella
   assert(state.paymentEvents.some((event) => event.providerEventId === 'evt_sub_stale_active' && event.status === 'out_of_order'));
 });
 
+test('invoice webhooks do not advance Stripe subscription ordering watermark', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-invoice-ordering-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+
+  await handlePaymentWebhook('subscription.updated', {
+    planId: 'plan_team',
+    provider: 'stripe',
+    providerEventCreatedAt: 1_700_000_100,
+    providerEventId: 'evt_sub_active_ordering',
+    providerEventType: 'customer.subscription.updated',
+    providerStatus: 'active',
+    providerSubscriptionId: 'sub_stripe_signal',
+    status: 'active',
+    subscriptionId: 'sub_demo',
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  await handlePaymentWebhook('invoice.paid', {
+    amountDueCents: 4900,
+    provider: 'stripe',
+    providerEventCreatedAt: 1_700_000_200,
+    providerEventId: 'evt_invoice_paid_ordering',
+    providerEventType: 'invoice.paid',
+    providerInvoiceId: 'in_signal_invoice_ordering',
+    providerStatus: 'paid',
+    providerSubscriptionId: 'sub_stripe_signal',
+    subscriptionId: 'sub_demo',
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  const cancellation = await handlePaymentWebhook('subscription.canceled', {
+    planId: 'plan_team',
+    provider: 'stripe',
+    providerEventCreatedAt: 1_700_000_150,
+    providerEventId: 'evt_sub_canceled_after_invoice',
+    providerEventType: 'customer.subscription.deleted',
+    providerStatus: 'canceled',
+    providerSubscriptionId: 'sub_stripe_signal',
+    subscriptionId: 'sub_demo',
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  assert.equal(cancellation.details.status, 'canceled');
+
+  const state = await loadState({ statePath });
+  const subscription = state.subscriptions.find((item) => item.id === 'sub_demo');
+  assert.equal(subscription?.status, 'canceled');
+  assert.equal(subscription?.providerLastEventCreatedAt, 1_700_000_150);
+  assert.equal(
+    state.paymentEvents.some((event) => event.providerEventId === 'evt_sub_canceled_after_invoice' && event.status === 'out_of_order'),
+    false,
+  );
+});
+
 test('Stripe mapper includes provider event created timestamp', () => {
   const mapping = stripeEventToLocalPaymentWebhook({
     id: 'evt_created_ts',

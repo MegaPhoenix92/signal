@@ -7915,6 +7915,7 @@ function applySubscriptionProviderRefs(subscription, {
   livemode,
   signatureStatus,
   signatureVerifiedAt,
+  updateOrderingWatermark = false,
 } = {}) {
   if (provider && provider !== 'local_test') {
     subscription.provider = provider;
@@ -7952,7 +7953,7 @@ function applySubscriptionProviderRefs(subscription, {
   if (providerEventType) {
     subscription.providerLastEventType = providerEventType;
   }
-  if (Number.isFinite(providerEventCreatedAt)) {
+  if (updateOrderingWatermark && Number.isFinite(providerEventCreatedAt)) {
     subscription.providerLastEventCreatedAt = providerEventCreatedAt;
   }
   if (signatureStatus) {
@@ -15843,6 +15844,7 @@ export async function handlePaymentWebhook(eventType, {
           livemode,
           signatureStatus,
           signatureVerifiedAt,
+          updateOrderingWatermark: false,
         });
         tenant.planId = plan.id;
         nextStatus = 'active';
@@ -15930,6 +15932,7 @@ export async function handlePaymentWebhook(eventType, {
           livemode,
           signatureStatus,
           signatureVerifiedAt,
+          updateOrderingWatermark: SUBSCRIPTION_WEBHOOK_TYPES.has(type),
         });
         if (providerPriceId && providerPreviousPriceId && providerPreviousPriceId !== providerPriceId) {
           subscription.providerPreviousPriceId = providerPreviousPriceId;
