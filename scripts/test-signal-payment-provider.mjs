@@ -309,7 +309,7 @@ test('Stripe mapper records unknown events as ignored instead of throwing', () =
   assert.equal(mapping.args.providerCustomerId, 'cus_signal');
 });
 
-test('Stripe mapper supports invoice terminal states, refunds, credits, and trial notices', () => {
+test('Stripe mapper supports invoice terminal states, canonical refunds, credits, and trial notices', () => {
   const baseInvoice = {
     customer: 'cus_signal',
     hosted_invoice_url: 'https://invoice.stripe.test/in_123',
@@ -337,6 +337,11 @@ test('Stripe mapper supports invoice terminal states, refunds, credits, and tria
     id: 'evt_refund',
     type: 'refund.created',
     data: { object: { id: 're_123', amount: 1200, invoice: 'in_123', object: 'refund' } },
+  }).localType, 'provider.event.ignored');
+  assert.equal(stripeEventToLocalPaymentWebhook({
+    id: 'evt_charge_refunded',
+    type: 'charge.refunded',
+    data: { object: { id: 'ch_123', amount_refunded: 1200, invoice: 'in_123', object: 'charge' } },
   }).localType, 'invoice.refunded');
   assert.equal(stripeEventToLocalPaymentWebhook({
     id: 'evt_credit',
@@ -500,6 +505,118 @@ test('subscription webhook ordering ignores stale provider events after cancella
   assert.equal(subscription?.status, 'canceled');
   assert.equal(subscription?.providerLastEventCreatedAt, 1_700_000_200);
   assert(state.paymentEvents.some((event) => event.providerEventId === 'evt_sub_stale_active' && event.status === 'out_of_order'));
+});
+
+test('refund.created does not double-apply a Stripe refund after charge.refunded', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-refund-dedup-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+
+  const invoicePaid = stripeEventToLocalPaymentWebhook({
+    id: 'evt_invoice_paid_refund_dedup',
+    type: 'invoice.paid',
+    created: 1_700_000_000,
+    data: {
+      object: {
+        amount_due: 4900,
+        customer: 'cus_signal',
+        id: 'in_refund_dedup',
+        metadata: {
+          subscriptionId: 'sub_demo',
+          tenantId: 'tenant_demo',
+        },
+        object: 'invoice',
+        subscription: 'sub_stripe_signal',
+      },
+    },
+  });
+
+  await handlePaymentWebhook(invoicePaid.localType, {
+    ...invoicePaid.args,
+    livemode: invoicePaid.livemode,
+    provider: invoicePaid.provider,
+    providerEventCreatedAt: invoicePaid.providerEventCreatedAt,
+    providerEventId: invoicePaid.providerEventId,
+    providerEventType: invoicePaid.eventType,
+  }, { actorUserId: 'usr_admin', statePath });
+
+  const canonicalRefund = stripeEventToLocalPaymentWebhook({
+    id: 'evt_charge_refunded_dedup',
+    type: 'charge.refunded',
+    created: 1_700_000_100,
+    data: {
+      object: {
+        amount_refunded: 1200,
+        customer: 'cus_signal',
+        id: 'ch_refund_dedup',
+        invoice: 'in_refund_dedup',
+        metadata: {
+          subscriptionId: 'sub_demo',
+          tenantId: 'tenant_demo',
+        },
+        object: 'charge',
+        subscription: 'sub_stripe_signal',
+      },
+    },
+  });
+
+  const duplicateRefund = stripeEventToLocalPaymentWebhook({
+    id: 'evt_refund_created_dedup',
+    type: 'refund.created',
+    created: 1_700_000_101,
+    data: {
+      object: {
+        amount: 1200,
+        customer: 'cus_signal',
+        id: 're_refund_dedup',
+        invoice: 'in_refund_dedup',
+        metadata: {
+          subscriptionId: 'sub_demo',
+          tenantId: 'tenant_demo',
+        },
+        object: 'refund',
+        subscription: 'sub_stripe_signal',
+      },
+    },
+  });
+
+  const canonicalResult = await handlePaymentWebhook(canonicalRefund.localType, {
+    ...canonicalRefund.args,
+    livemode: canonicalRefund.livemode,
+    provider: canonicalRefund.provider,
+    providerEventCreatedAt: canonicalRefund.providerEventCreatedAt,
+    providerEventId: canonicalRefund.providerEventId,
+    providerEventType: canonicalRefund.eventType,
+  }, { actorUserId: 'usr_admin', statePath });
+  const duplicateResult = await handlePaymentWebhook(duplicateRefund.localType, {
+    ...duplicateRefund.args,
+    livemode: duplicateRefund.livemode,
+    provider: duplicateRefund.provider,
+    providerEventCreatedAt: duplicateRefund.providerEventCreatedAt,
+    providerEventId: duplicateRefund.providerEventId,
+    providerEventType: duplicateRefund.eventType,
+  }, { actorUserId: 'usr_admin', statePath });
+
+  assert.equal(canonicalResult.details.status, 'paid');
+  assert.equal(duplicateResult.details.status, 'ignored');
+
+  const state = await loadState({ statePath });
+  const invoice = state.invoices.find((item) => item.providerInvoiceId === 'in_refund_dedup');
+  assert.equal(invoice?.amountDueCents, 4900);
+  assert.equal(invoice?.refundedCents, 1200);
+  assert.equal(invoice?.netAmountDueCents, 3700);
+  assert.equal(
+    state.paymentEvents.filter((event) => event.appliedType === 'invoice.refunded').length,
+    1,
+  );
+  assert(
+    state.paymentEvents.some((event) => event.providerEventId === 'evt_refund_created_dedup' && event.status === 'ignored'),
+  );
 });
 
 test('Stripe mapper includes provider event created timestamp', () => {
