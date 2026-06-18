@@ -725,7 +725,7 @@ export function stripeEventToLocalPaymentWebhook(event) {
     });
   }
 
-  if (eventType === 'charge.refunded') {
+  if (eventType === 'charge.refunded' || eventType === 'refund.created') {
     return finalizeStripeEventMapping(event, {
       args: {
         amountCents,
