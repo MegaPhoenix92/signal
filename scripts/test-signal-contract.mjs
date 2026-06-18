@@ -2323,6 +2323,7 @@ test('Signal local API, CLI, auth, flow, and subscription contract', async (t) =
           subscription: 'sub_stripe_contract_signal',
           metadata: {
             planId: 'plan_team',
+            subscriptionId: 'sub_demo',
             tenantId: 'tenant_demo',
           },
         },
