@@ -725,7 +725,7 @@ export function stripeEventToLocalPaymentWebhook(event) {
     });
   }
 
-  if (eventType === 'charge.refunded' || eventType.startsWith('refund.')) {
+  if (eventType === 'charge.refunded' || eventType === 'refund.created') {
     return finalizeStripeEventMapping(event, {
       args: {
         amountCents,
@@ -743,6 +743,22 @@ export function stripeEventToLocalPaymentWebhook(event) {
       provider: 'stripe',
       providerEventId,
     });
+  }
+
+  if (eventType.startsWith('refund.')) {
+    return finalizeStripeEventMapping(event, ignoredStripeEventMapping({
+      amountCents,
+      eventType,
+      livemode: Boolean(event.livemode),
+      providerCustomerId,
+      providerEventId,
+      providerInvoiceId,
+      providerPriceId,
+      providerStatus: object.status,
+      providerSubscriptionId,
+      subscriptionId,
+      tenantId,
+    }));
   }
 
   if (eventType.startsWith('credit_note.')) {

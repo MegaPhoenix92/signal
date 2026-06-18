@@ -7781,6 +7781,31 @@ function recomputeInvoiceNetAmount(invoice) {
   return invoice.netAmountDueCents;
 }
 
+function priorStripeChargeRefundedCents(state, providerInvoiceId) {
+  if (!providerInvoiceId) {
+    return 0;
+  }
+  const priorAmounts = (state.paymentEvents ?? [])
+    .filter((event) => event.provider === 'stripe'
+      && event.appliedType === 'invoice.refunded'
+      && event.providerEventType === 'charge.refunded'
+      && event.providerInvoiceId === providerInvoiceId
+      && event.status === 'recorded')
+    .map((event) => Math.max(0, Number(event.amountCents ?? 0)));
+  return priorAmounts.length > 0 ? Math.max(...priorAmounts) : 0;
+}
+
+function hasStripeChargeRefundedForInvoice(state, providerInvoiceId) {
+  if (!providerInvoiceId) {
+    return false;
+  }
+  return (state.paymentEvents ?? []).some((event) => event.provider === 'stripe'
+    && event.appliedType === 'invoice.refunded'
+    && event.providerEventType === 'charge.refunded'
+    && event.providerInvoiceId === providerInvoiceId
+    && event.status === 'recorded');
+}
+
 function applyInvoiceAdjustment(state, invoice, {
   amountCents,
   type,
@@ -15749,9 +15774,54 @@ export async function handlePaymentWebhook(eventType, {
           : tenantId
             ? findById(state.tenants ?? [], tenantId, 'Tenant')
             : (state.tenants ?? []).find((candidate) => candidate.id === defaultTenantId(state)) ?? state.tenants?.[0] ?? null;
-        const amount = requireNonNegativeInteger(amountCents ?? amountDueCents ?? 0, 'invoice adjustment amount in cents', `payments webhook ${type}`);
+        const invoiceProviderId = providerInvoiceId ?? invoice?.providerInvoiceId ?? null;
+        if (type === 'invoice.refunded' && provider === 'stripe' && providerEventType === 'refund.created' && hasStripeChargeRefundedForInvoice(state, invoiceProviderId)) {
+          const event = appendPaymentEvent(state, {
+            tenantId: tenant?.id,
+            provider,
+            type: providerEventType,
+            status: 'ignored',
+            appliedType: 'provider.event.ignored',
+            amountCents: requireNonNegativeInteger(amountCents ?? amountDueCents ?? 0, 'invoice adjustment amount in cents', `payments webhook ${type}`),
+            invoiceId: invoice?.id,
+            livemode,
+            providerCustomerId,
+            providerEventId,
+            providerEventType,
+            providerInvoiceId: invoiceProviderId,
+            providerPriceId,
+            providerStatus,
+            providerSubscriptionId,
+            signatureStatus,
+            signatureTimestamp,
+            signatureVerifiedAt,
+            subscriptionId: subscriptionId ?? adjustmentSubscription?.id,
+          });
+          return {
+            duplicate: false,
+            eventId: event.id,
+            invoiceId: invoice?.id ?? null,
+            jobId: null,
+            message: `Ignored duplicate ${provider} refund webhook ${providerEventType} after charge.refunded for ${invoiceProviderId ?? 'unknown invoice'}.`,
+            provider,
+            providerEventId,
+            providerEventType,
+            status: 'ignored',
+            subscriptionId: subscriptionId ?? adjustmentSubscription?.id ?? null,
+            targetId: invoice?.id ?? providerEventId ?? event.id,
+            tenantId: tenant?.id ?? null,
+          };
+        }
+        const reportedAmount = requireNonNegativeInteger(amountCents ?? amountDueCents ?? 0, 'invoice adjustment amount in cents', `payments webhook ${type}`);
         const adjustmentType = type === 'invoice.refunded' ? 'refund' : 'credit';
-        const adjustedInvoice = invoice ? applyInvoiceAdjustment(state, invoice, { amountCents: amount, type: adjustmentType }) : null;
+        let adjustmentAmount = reportedAmount;
+        if (type === 'invoice.refunded' && provider === 'stripe' && providerEventType === 'charge.refunded') {
+          const priorCumulative = priorStripeChargeRefundedCents(state, invoiceProviderId);
+          adjustmentAmount = Math.max(0, reportedAmount - priorCumulative);
+        }
+        const adjustedInvoice = invoice && adjustmentAmount > 0
+          ? applyInvoiceAdjustment(state, invoice, { amountCents: adjustmentAmount, type: adjustmentType })
+          : invoice ?? null;
         const subscription = adjustedInvoice
           ? (state.subscriptions ?? []).find((candidate) => candidate.id === adjustedInvoice.subscriptionId)
           : adjustmentSubscription;
@@ -15761,13 +15831,13 @@ export async function handlePaymentWebhook(eventType, {
           type: providerEventType ?? type,
           status: 'recorded',
           appliedType: type,
-          amountCents: amount,
+          amountCents: type === 'invoice.refunded' && providerEventType === 'charge.refunded' ? reportedAmount : adjustmentAmount,
           invoiceId: adjustedInvoice?.id,
           livemode,
           providerCustomerId,
           providerEventId,
           providerEventType,
-          providerInvoiceId,
+          providerInvoiceId: invoiceProviderId ?? providerInvoiceId,
           providerPriceId,
           providerStatus,
           providerSubscriptionId,
@@ -15785,11 +15855,11 @@ export async function handlePaymentWebhook(eventType, {
           attempts: 1,
           maxAttempts: 5,
           message: adjustedInvoice
-            ? `Recorded ${adjustmentType} ${amount} for ${adjustedInvoice.id}.`
+            ? `Recorded ${adjustmentType} ${adjustmentAmount} for ${adjustedInvoice.id}.`
             : `Recorded ${provider} ${type} without a matching local invoice.`,
         });
         return {
-          amountCents: amount,
+          amountCents: adjustmentAmount,
           duplicate: false,
           eventId: event.id,
           invoiceId: adjustedInvoice?.id ?? null,
