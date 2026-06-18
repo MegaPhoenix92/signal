@@ -7915,6 +7915,57 @@ const SUBSCRIPTION_WEBHOOK_TYPES = new Set([
   'subscription.canceled',
 ]);
 
+const STRIPE_INVOICE_AMOUNT_REQUIRED_TYPES = new Set([
+  'invoice.draft',
+  'invoice.open',
+  'invoice.paid',
+  'invoice.payment_failed',
+  'invoice.uncollectible',
+]);
+
+function resolveStripeInvoiceAmountDueCents(amountDueCents, eventType) {
+  if (amountDueCents === undefined || amountDueCents === null || amountDueCents === '') {
+    throw new SignalStateError(`Stripe ${eventType} requires invoice amount due in cents`, {
+      code: 'ARG_INVALID',
+      details: { amountDueCents, eventType },
+    });
+  }
+  return requireNonNegativeInteger(
+    amountDueCents,
+    'invoice amount due in cents',
+    `payments webhook ${eventType}`,
+  );
+}
+
+function resolveCheckoutSubscription(state, {
+  tenant,
+  plan,
+  provider,
+  subscriptionId,
+  providerSubscriptionId,
+}) {
+  const existing = optionalSubscriptionByLocalOrProviderId(state, providerSubscriptionId)
+    ?? optionalSubscriptionByLocalOrProviderId(state, subscriptionId);
+  if (existing) {
+    return existing;
+  }
+  const id = subscriptionId?.startsWith('sub_')
+    ? subscriptionId
+    : (subscriptionId
+      ? `sub_${tenant.id}_${subscriptionId}`
+      : `sub_${tenant.id}_${providerSubscriptionId ?? plan.id}`);
+  const subscription = {
+    id,
+    tenantId: tenant.id,
+    provider,
+    planId: plan.id,
+    status: 'active',
+  };
+  state.subscriptions = state.subscriptions ?? [];
+  state.subscriptions.push(subscription);
+  return subscription;
+}
+
 function isStaleStripeSubscriptionEvent(subscription, provider, providerEventCreatedAt) {
   if (provider !== 'stripe' || !Number.isFinite(providerEventCreatedAt)) {
     return false;
@@ -15683,11 +15734,6 @@ export async function handlePaymentWebhook(eventType, {
     'payments.webhook',
     (state, actor) => {
       requirePlatformOperator(actor, 'payments.webhook');
-      const normalizedAmountDueCents = requireNonNegativeInteger(
-        amountDueCents,
-        'invoice amount due in cents',
-        'payments webhook <type> <subscriptionId|tenantId> [status|planId]',
-      );
       const type = requireOneOf(
         eventType,
         [
@@ -15709,6 +15755,13 @@ export async function handlePaymentWebhook(eventType, {
         'webhook type',
         'payments webhook <type> <subscriptionId|tenantId> [status|planId]',
       );
+      const normalizedAmountDueCents = provider === 'stripe' && STRIPE_INVOICE_AMOUNT_REQUIRED_TYPES.has(type)
+        ? resolveStripeInvoiceAmountDueCents(amountDueCents, type)
+        : requireNonNegativeInteger(
+          amountDueCents,
+          'invoice amount due in cents',
+          'payments webhook <type> <subscriptionId|tenantId> [status|planId]',
+        );
       const existingProviderEvent = providerEventId
         ? (state.paymentEvents ?? []).find((event) => event.provider === provider && event.providerEventId === providerEventId)
         : null;
@@ -15886,17 +15939,13 @@ export async function handlePaymentWebhook(eventType, {
       if (type === 'checkout.completed') {
         tenant = findById(state.tenants, requireArg(tenantId, 'tenant id', 'payments webhook checkout.completed <tenantId> <planId>'), 'Tenant');
         plan = findById(state.plans, requireArg(planId, 'plan id', 'payments webhook checkout.completed <tenantId> <planId>'), 'Plan');
-        subscription = state.subscriptions.find((candidate) => candidate.tenantId === tenant.id);
-        if (!subscription) {
-          subscription = {
-            id: `sub_${tenant.id}`,
-            tenantId: tenant.id,
-            provider,
-            planId: plan.id,
-            status: 'active',
-          };
-          state.subscriptions.push(subscription);
-        }
+        subscription = resolveCheckoutSubscription(state, {
+          tenant,
+          plan,
+          provider,
+          subscriptionId,
+          providerSubscriptionId,
+        });
         subscription.planId = plan.id;
         subscription.provider = provider;
         subscription.status = 'active';

@@ -567,6 +567,195 @@ test('invoice webhooks do not advance Stripe subscription ordering watermark', a
   );
 });
 
+test('checkout.session.completed mapper preserves metadata subscriptionId', () => {
+  const mapping = stripeEventToLocalPaymentWebhook({
+    id: 'evt_checkout_sub_id',
+    type: 'checkout.session.completed',
+    data: {
+      object: {
+        id: 'cs_checkout_sub_id',
+        customer: 'cus_signal',
+        metadata: {
+          planId: 'plan_team',
+          subscriptionId: 'sub_checkout_target',
+          tenantId: 'tenant_demo',
+        },
+        object: 'checkout.session',
+        subscription: 'sub_stripe_checkout_new',
+      },
+    },
+  });
+
+  assert.equal(mapping.args.subscriptionId, 'sub_checkout_target');
+  assert.equal(mapping.args.providerSubscriptionId, 'sub_stripe_checkout_new');
+});
+
+test('checkout.completed binds Stripe identifiers to the matching subscription', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-checkout-bind-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const seeded = await loadState({ statePath });
+  seeded.subscriptions.push({
+    id: 'sub_legacy',
+    tenantId: 'tenant_demo',
+    planId: 'plan_team',
+    provider: 'local_test',
+    status: 'canceled',
+  });
+  await fs.writeFile(statePath, `${JSON.stringify(seeded, null, 2)}\n`);
+
+  await handlePaymentWebhook('checkout.completed', {
+    planId: 'plan_team',
+    provider: 'stripe',
+    providerCustomerId: 'cus_checkout_bind',
+    providerEventId: 'evt_checkout_bind',
+    providerEventType: 'checkout.session.completed',
+    providerSessionId: 'cs_checkout_bind',
+    providerStatus: 'complete',
+    providerSubscriptionId: 'sub_stripe_checkout_bind',
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  const state = await loadState({ statePath });
+  const legacy = state.subscriptions.find((item) => item.id === 'sub_demo');
+  const bound = state.subscriptions.find((item) => item.providerSubscriptionId === 'sub_stripe_checkout_bind');
+  assert.equal(legacy?.providerSubscriptionId, undefined);
+  assert.equal(bound?.providerCustomerId, 'cus_checkout_bind');
+  assert.equal(bound?.planId, 'plan_team');
+  assert.notEqual(bound?.id, 'sub_demo');
+});
+
+test('checkout.completed uses metadata subscriptionId before creating a new subscription', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-checkout-metadata-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+  const seeded = await loadState({ statePath });
+  seeded.subscriptions.push({
+    id: 'sub_checkout_target',
+    tenantId: 'tenant_demo',
+    planId: 'plan_team',
+    provider: 'local_test',
+    status: 'trialing',
+  });
+  await fs.writeFile(statePath, `${JSON.stringify(seeded, null, 2)}\n`);
+
+  await handlePaymentWebhook('checkout.completed', {
+    planId: 'plan_team',
+    provider: 'stripe',
+    providerCustomerId: 'cus_checkout_metadata',
+    providerEventId: 'evt_checkout_metadata',
+    providerEventType: 'checkout.session.completed',
+    providerSessionId: 'cs_checkout_metadata',
+    providerStatus: 'complete',
+    providerSubscriptionId: 'sub_stripe_metadata_new',
+    subscriptionId: 'sub_checkout_target',
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  const state = await loadState({ statePath });
+  const target = state.subscriptions.find((item) => item.id === 'sub_checkout_target');
+  const demo = state.subscriptions.find((item) => item.id === 'sub_demo');
+  assert.equal(target?.providerSubscriptionId, 'sub_stripe_metadata_new');
+  assert.equal(target?.status, 'active');
+  assert.equal(demo?.providerSubscriptionId, undefined);
+  assert.equal(state.subscriptions.filter((item) => item.tenantId === 'tenant_demo').length, 2);
+});
+
+test('Stripe invoice lifecycle webhooks reject missing amountDueCents', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-invoice-amount-required-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+
+  for (const type of [
+    'invoice.draft',
+    'invoice.open',
+    'invoice.paid',
+    'invoice.payment_failed',
+    'invoice.uncollectible',
+  ]) {
+    await assert.rejects(
+      () => handlePaymentWebhook(type, {
+        provider: 'stripe',
+        providerEventId: `evt_missing_amount_${type}`,
+        providerEventType: type.replace('.', '_'),
+        providerInvoiceId: `in_missing_${type}`,
+        providerSubscriptionId: 'sub_stripe_signal',
+        subscriptionId: 'sub_demo',
+        tenantId: 'tenant_demo',
+      }, { actorUserId: 'usr_admin', statePath }),
+      (error) => error instanceof SignalStateError && error.code === 'ARG_INVALID',
+    );
+  }
+});
+
+test('Stripe invoice lifecycle webhooks reject malformed amountDueCents', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-invoice-amount-malformed-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+
+  for (const amountDueCents of ['not-a-number', 49.5]) {
+    await assert.rejects(
+      () => handlePaymentWebhook('invoice.paid', {
+        amountDueCents,
+        provider: 'stripe',
+        providerEventId: `evt_malformed_amount_${amountDueCents}`,
+        providerEventType: 'invoice.paid',
+        providerInvoiceId: 'in_malformed_amount',
+        providerSubscriptionId: 'sub_stripe_signal',
+        subscriptionId: 'sub_demo',
+        tenantId: 'tenant_demo',
+      }, { actorUserId: 'usr_admin', statePath }),
+      (error) => error instanceof SignalStateError && error.code === 'ARG_INVALID',
+    );
+  }
+});
+
+test('Stripe invoice.paid records the provider amount instead of plan defaults', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-invoice-amount-explicit-'));
+  const statePath = path.join(tempDir, 'signal-state.json');
+
+  t.after(async () => {
+    await fs.rm(tempDir, { force: true, recursive: true });
+  });
+
+  await bootstrapState({ force: true, statePath });
+
+  await handlePaymentWebhook('invoice.paid', {
+    amountDueCents: 3125,
+    provider: 'stripe',
+    providerEventId: 'evt_invoice_paid_explicit_amount',
+    providerEventType: 'invoice.paid',
+    providerInvoiceId: 'in_explicit_amount',
+    providerSubscriptionId: 'sub_stripe_signal',
+    subscriptionId: 'sub_demo',
+    tenantId: 'tenant_demo',
+  }, { actorUserId: 'usr_admin', statePath });
+
+  const state = await loadState({ statePath });
+  const invoice = state.invoices.find((item) => item.providerInvoiceId === 'in_explicit_amount');
+  assert.equal(invoice?.amountDueCents, 3125);
+});
+
 test('refund.created does not double-apply a Stripe refund after charge.refunded', async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'signal-refund-dedup-'));
   const statePath = path.join(tempDir, 'signal-state.json');

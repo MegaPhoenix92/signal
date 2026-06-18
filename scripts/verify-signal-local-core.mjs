@@ -1618,6 +1618,7 @@ const stripeCheckoutPayload = JSON.stringify({
       subscription: 'sub_stripe_signal_test',
       metadata: {
         planId: 'plan_team',
+        subscriptionId: 'sub_demo',
         tenantId: 'tenant_demo',
       },
     },
@@ -1756,7 +1757,10 @@ const stripePaidPayload = JSON.stringify({
   livemode: false,
   data: {
     object: {
+      id: 'in_stripe_paid_local',
       object: 'invoice',
+      amount_due: 4900,
+      customer: 'cus_signal_test',
       subscription: 'sub_demo',
       metadata: {
         subscriptionId: 'sub_demo',

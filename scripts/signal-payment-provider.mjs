@@ -583,6 +583,7 @@ export function stripeEventToLocalPaymentWebhook(event) {
         providerCustomerId,
         providerSessionId: objectId(object),
         providerSubscriptionId,
+        subscriptionId: localSubscriptionId,
         tenantId: requireMappedValue(tenantId, 'metadata.tenantId', eventType),
       },
       eventType,
