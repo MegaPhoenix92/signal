@@ -2073,13 +2073,13 @@ assert.equal(signedCredit.details.invoiceId, openInvoiceForCredit.id);
 
 const stripeRefundPayload = JSON.stringify({
   id: 'evt_stripe_refund_local',
-  type: 'refund.created',
+  type: 'charge.refunded',
   livemode: false,
   data: {
     object: {
-      id: 're_signal_refund_local',
-      object: 'refund',
-      amount: 600,
+      id: 'ch_signal_refund_local',
+      object: 'charge',
+      amount_refunded: 600,
       invoice: refundableInvoice.providerInvoiceId ?? refundableInvoice.id,
       customer: 'cus_signal_test',
     },
