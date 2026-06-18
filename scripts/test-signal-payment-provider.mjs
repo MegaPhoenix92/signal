@@ -10,6 +10,7 @@ import {
   assertStripeLivemodeMatches,
   createStripeBillingPortalSession,
   createStripeCheckoutSession,
+  createStripeCheckoutSessionRequest,
   resolveExpectedStripeLivemode,
   signStripeWebhookPayload,
   parseSignedStripeWebhook,
@@ -565,6 +566,37 @@ test('invoice webhooks do not advance Stripe subscription ordering watermark', a
     state.paymentEvents.some((event) => event.providerEventId === 'evt_sub_canceled_after_invoice' && event.status === 'out_of_order'),
     false,
   );
+});
+
+test('createStripeCheckoutSessionRequest includes subscriptionId metadata when subscription is known', () => {
+  const request = createStripeCheckoutSessionRequest({
+    tenant,
+    plan: { id: 'plan_team' },
+    subscription: { id: 'sub_demo' },
+    env,
+  });
+
+  assert.equal(request.params.metadata.subscriptionId, 'sub_demo');
+  assert.equal(request.params.subscription_data.metadata.subscriptionId, 'sub_demo');
+});
+
+test('invoice.paid mapper falls back to amount_paid when amount_due is absent', () => {
+  const mapping = stripeEventToLocalPaymentWebhook({
+    id: 'evt_invoice_paid_amount_paid',
+    type: 'invoice.paid',
+    data: {
+      object: {
+        amount_paid: 3125,
+        customer: 'cus_signal',
+        id: 'in_amount_paid',
+        metadata: { subscriptionId: 'sub_demo' },
+        object: 'invoice',
+        subscription: 'sub_stripe_signal',
+      },
+    },
+  });
+
+  assert.equal(mapping.args.amountDueCents, 3125);
 });
 
 test('checkout.session.completed mapper preserves metadata subscriptionId', () => {

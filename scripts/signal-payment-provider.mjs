@@ -228,6 +228,7 @@ export function createStripeCheckoutSessionRequest({ tenant, plan, subscription,
     signalPlanId: plan.id,
     signalTenantId: tenant.id,
     tenantId: tenant.id,
+    ...(subscription?.id ? { subscriptionId: subscription.id } : {}),
   };
 
   return {
@@ -597,7 +598,7 @@ export function stripeEventToLocalPaymentWebhook(event) {
   if (eventType === 'invoice.paid') {
     return finalizeStripeEventMapping(event, {
       args: {
-        amountDueCents: Number.isFinite(object.amount_due) ? object.amount_due : undefined,
+        amountDueCents: Number.isFinite(object.amount_due) ? object.amount_due : amountCents,
         hostedInvoiceUrl: optionalString(object.hosted_invoice_url),
         nextPaymentAttemptAt: unixSecondsToIso(object.next_payment_attempt),
         providerCustomerId,

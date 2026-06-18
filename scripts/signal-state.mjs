@@ -7944,8 +7944,11 @@ function resolveCheckoutSubscription(state, {
   subscriptionId,
   providerSubscriptionId,
 }) {
-  const existing = optionalSubscriptionByLocalOrProviderId(state, providerSubscriptionId)
-    ?? optionalSubscriptionByLocalOrProviderId(state, subscriptionId);
+  const candidates = [
+    optionalSubscriptionByLocalOrProviderId(state, subscriptionId),
+    optionalSubscriptionByLocalOrProviderId(state, providerSubscriptionId),
+  ];
+  const existing = candidates.find((candidate) => candidate && candidate.tenantId === tenant.id);
   if (existing) {
     return existing;
   }
