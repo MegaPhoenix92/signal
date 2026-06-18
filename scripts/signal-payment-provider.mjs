@@ -728,9 +728,12 @@ export function stripeEventToLocalPaymentWebhook(event) {
   }
 
   if (eventType === 'charge.refunded' || eventType === 'refund.created') {
+    const refundAmountCents = eventType === 'charge.refunded' && Number.isFinite(object.amount_refunded)
+      ? object.amount_refunded
+      : amountCents;
     return finalizeStripeEventMapping(event, {
       args: {
-        amountCents,
+        amountCents: refundAmountCents,
         providerCustomerId,
         providerInvoiceId,
         providerPriceId,
