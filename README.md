@@ -87,7 +87,7 @@ Individual suites: `npm run test:api-security`, `npm run test:state-service`, `n
 Build and run the API image (file-backed state for a minimal smoke deploy):
 
 ```bash
-docker build -t signal-api .
+docker build --build-arg VITE_SIGNAL_API_URL=http://127.0.0.1:8787 -t signal-api .
 docker run --rm -p 8787:8787 -v "$(pwd)/data:/app/data" signal-api
 ```
 

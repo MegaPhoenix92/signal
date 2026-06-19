@@ -2,6 +2,9 @@ FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 
+ARG VITE_SIGNAL_API_URL=http://127.0.0.1:8787
+ENV VITE_SIGNAL_API_URL=$VITE_SIGNAL_API_URL
+
 COPY package.json package-lock.json ./
 RUN npm ci
 

@@ -1,25 +1,35 @@
+x-build-args: &build-args
+  VITE_SIGNAL_API_URL: http://localhost:8787
+
 services:
   api:
-    build: .
+    build:
+      context: .
+      args: *build-args
     ports:
       - "8787:8787"
     environment:
-      SIGNAL_ALLOW_LOCAL_ACTOR: "true"
-      SIGNAL_ADMIN_STATE: /app/data/signal-local.json
+      SIGNAL_API_CORS_ORIGINS: http://localhost:5173
       SIGNAL_API_HOST: 0.0.0.0
       SIGNAL_API_PORT: "8787"
       SIGNAL_BACKEND_MODE: external-service
-      SIGNAL_STATE_SERVICE_URL: http://state-service:8791/state
-      SIGNAL_STATE_SERVICE_TOKEN: local-compose-state-token
+      SIGNAL_COOKIE_SECURE: "true"
+      SIGNAL_OAUTH_ACTOR: usr_system_oauth
       SIGNAL_OAUTH_STATE_KEY: signal-compose-oauth-state-key
+      SIGNAL_REQUIRE_SIGNED_SESSION: "true"
       SIGNAL_SESSION_SECRET: signal-compose-session-secret-32chars
+      SIGNAL_STATE_SERVICE_TOKEN: local-compose-state-token
+      SIGNAL_STATE_SERVICE_URL: http://state-service:8791/state
+      SIGNAL_WEBHOOK_ACTOR: usr_system_webhook
     volumes:
       - signal-data:/app/data
     depends_on:
       - state-service
 
   web:
-    build: .
+    build:
+      context: .
+      args: *build-args
     command: ["node", "scripts/signal-frontend-server.mjs"]
     ports:
       - "5173:8080"
@@ -30,7 +40,9 @@ services:
       - api
 
   scheduler:
-    build: .
+    build:
+      context: .
+      args: *build-args
     command: ["npm", "run", "scheduler"]
     environment:
       SIGNAL_BACKEND_MODE: external-service
@@ -38,24 +50,26 @@ services:
       SIGNAL_OPERATIONS_ALERT_CHANNEL: compose-ops
       SIGNAL_PROVIDER_VALIDATION_SCHEDULER: signal-scheduler
       SIGNAL_SCHEDULER_LOCK_POLICY: file-lock
-      SIGNAL_STATE_SERVICE_URL: http://state-service:8791/state
       SIGNAL_STATE_SERVICE_TOKEN: local-compose-state-token
+      SIGNAL_STATE_SERVICE_URL: http://state-service:8791/state
     volumes:
       - signal-data:/app/data
     depends_on:
       - state-service
 
   state-service:
-    build: .
+    build:
+      context: .
+      args: *build-args
     command: ["node", "scripts/signal-state-service.mjs"]
     ports:
       - "8791:8791"
     environment:
+      SIGNAL_STATE_SERVICE_BACKEND: file
+      SIGNAL_STATE_SERVICE_FILE: /app/data/signal-state-service.json
       SIGNAL_STATE_SERVICE_HOST: 0.0.0.0
       SIGNAL_STATE_SERVICE_PORT: "8791"
       SIGNAL_STATE_SERVICE_TOKEN: local-compose-state-token
-      SIGNAL_STATE_SERVICE_BACKEND: file
-      SIGNAL_STATE_SERVICE_FILE: /app/data/signal-state-service.json
     volumes:
       - signal-data:/app/data
 
