@@ -2083,6 +2083,7 @@ const stripeRefundPayload = JSON.stringify({
     object: {
       id: 'ch_signal_refund_local',
       object: 'charge',
+      amount: 4900,
       amount_refunded: 600,
       invoice: refundableInvoice.providerInvoiceId ?? refundableInvoice.id,
       customer: 'cus_signal_test',

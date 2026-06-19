@@ -832,6 +832,7 @@ test('refund.created does not double-apply a Stripe refund after charge.refunded
     created: 1_700_000_100,
     data: {
       object: {
+        amount: 4900,
         amount_refunded: 1200,
         customer: 'cus_signal',
         id: 'ch_refund_dedup',
@@ -929,6 +930,7 @@ test('charge.refunded applies cumulative Stripe refund totals across partial ref
     created: 1_700_000_100,
     data: {
       object: {
+        amount: 4900,
         amount_refunded: 500,
         customer: 'cus_signal',
         id: 'ch_partial_refund',
@@ -948,6 +950,7 @@ test('charge.refunded applies cumulative Stripe refund totals across partial ref
     created: 1_700_000_200,
     data: {
       object: {
+        amount: 4900,
         amount_refunded: 800,
         customer: 'cus_signal',
         id: 'ch_partial_refund',
@@ -983,6 +986,32 @@ test('charge.refunded applies cumulative Stripe refund totals across partial ref
   const invoice = state.invoices.find((item) => item.providerInvoiceId === 'in_partial_refund');
   assert.equal(invoice?.refundedCents, 800);
   assert.equal(invoice?.netAmountDueCents, 4100);
+});
+
+test('charge.refunded mapping uses amount_refunded instead of gross charge amount', () => {
+  const mapped = stripeEventToLocalPaymentWebhook({
+    id: 'evt_charge_refunded_realistic_amount',
+    type: 'charge.refunded',
+    created: 1_700_000_300,
+    data: {
+      object: {
+        amount: 4900,
+        amount_refunded: 500,
+        customer: 'cus_signal',
+        id: 'ch_realistic_partial_refund',
+        invoice: 'in_realistic_partial_refund',
+        metadata: {
+          subscriptionId: 'sub_demo',
+          tenantId: 'tenant_demo',
+        },
+        object: 'charge',
+        subscription: 'sub_stripe_signal',
+      },
+    },
+  });
+
+  assert.equal(mapped.localType, 'invoice.refunded');
+  assert.equal(mapped.args.amountCents, 500);
 });
 
 test('refund.created applies a Stripe refund when charge.refunded was not delivered', async (t) => {
