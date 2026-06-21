@@ -17,8 +17,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production \
     SIGNAL_API_HOST=0.0.0.0 \
-    SIGNAL_API_PORT=8787 \
-    SIGNAL_ADMIN_STATE=/app/data/signal-local.json
+    SIGNAL_API_PORT=8787
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
