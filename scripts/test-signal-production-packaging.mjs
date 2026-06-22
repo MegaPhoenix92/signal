@@ -7,6 +7,21 @@ import { assertApiSecurityConfig } from './signal-api-auth.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+function parseDockerfileRuntimeEnv(source) {
+  const runtimeSection = source.split('FROM node:22-bookworm-slim AS runtime')[1] ?? '';
+  const envBlock = runtimeSection.match(/ENV\s+([\s\S]*?)\n\nCOPY/u)?.[1] ?? '';
+  const entries = {};
+  for (const rawLine of envBlock.split('\n')) {
+    const line = rawLine.trim().replace(/\\$/u, '').trim();
+    if (!line) {
+      continue;
+    }
+    const [key, ...valueParts] = line.split('=');
+    entries[key] = valueParts.join('=');
+  }
+  return entries;
+}
+
 const composeApiEnv = {
   SIGNAL_API_CORS_ORIGINS: 'http://localhost:5173',
   SIGNAL_API_HOST: '0.0.0.0',
@@ -28,8 +43,13 @@ test('pg is a runtime dependency for production images', async () => {
   assert.equal(packageJson.devDependencies?.pg, undefined, 'pg must not remain under devDependencies');
 });
 
-test('docker compose api config passes production security assertions', () => {
-  assert.doesNotThrow(() => assertApiSecurityConfig(composeApiEnv));
+test('docker compose api config passes production security assertions', async () => {
+  const dockerfile = await fs.readFile(path.join(rootDir, 'Dockerfile'), 'utf8');
+  const dockerfileRuntimeEnv = parseDockerfileRuntimeEnv(dockerfile);
+  assert.doesNotThrow(() => assertApiSecurityConfig({
+    ...dockerfileRuntimeEnv,
+    ...composeApiEnv,
+  }));
 });
 
 test('production web bundle inlines VITE_SIGNAL_API_URL', async () => {
@@ -66,4 +86,9 @@ test('Dockerfile declares VITE_SIGNAL_API_URL for production web builds', async 
   const dockerfile = await fs.readFile(path.join(rootDir, 'Dockerfile'), 'utf8');
   assert.match(dockerfile, /ARG VITE_SIGNAL_API_URL/);
   assert.match(dockerfile, /ENV VITE_SIGNAL_API_URL=\$VITE_SIGNAL_API_URL/);
+  assert.deepEqual(parseDockerfileRuntimeEnv(dockerfile), {
+    NODE_ENV: 'production',
+    SIGNAL_API_HOST: '0.0.0.0',
+    SIGNAL_API_PORT: '8787',
+  });
 });
