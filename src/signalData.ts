@@ -2787,7 +2787,7 @@ function resolveLocalApiUrl() {
     return configured;
   }
   if (import.meta.env.PROD) {
-    throw new Error('VITE_SIGNAL_API_URL is required in production builds.');
+    throw new Error('Signal API URL is required in production builds.');
   }
   return 'http://127.0.0.1:8787';
 }
