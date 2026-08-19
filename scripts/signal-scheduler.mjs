@@ -17,6 +17,10 @@ import {
 import {
   createLogger,
 } from './signal-logger.mjs';
+import {
+  PUBLIC_SALES_SIGNAL_JOB,
+  runPublicSalesSignalJob,
+} from './public-sales-signal.mjs';
 
 export const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const defaultSchedulerQueues = [
@@ -29,6 +33,7 @@ export const defaultSchedulerQueues = [
   'signal_detection',
   'governance',
   'user_onboarding',
+  PUBLIC_SALES_SIGNAL_JOB,
 ];
 
 function flagValue(argv, name) {
@@ -496,9 +501,46 @@ export async function runSchedulerTick(config, {
   recordSchedulerHeartbeatImpl = recordSchedulerHeartbeat,
   renewMailboxWatchImpl = renewMailboxWatch,
   runJobsImpl = runJobs,
+  runPublicSalesSignalJobImpl = runPublicSalesSignalJob,
 } = {}) {
-  const statePath = resolveStatePath(config.statePath);
+  const publicQueues = config.queues.filter((queue) => queue === PUBLIC_SALES_SIGNAL_JOB);
+  const tenantQueues = config.queues.filter((queue) => queue !== PUBLIC_SALES_SIGNAL_JOB);
   const startedAt = new Date().toISOString();
+
+  if (tenantQueues.length === 0 && publicQueues.length > 0) {
+    if (config.dryRun) {
+      return {
+        ok: true,
+        actorUserId: config.actorUserId,
+        dryRun: true,
+        queues: publicQueues.map((queue) => ({ queue, due: 1, waiting: 0 })),
+        startedAt,
+        statePath: 'public-sales-signal',
+        outcomes: [],
+      };
+    }
+    const jobResult = await runPublicSalesSignalJobImpl({ env: config.env });
+    const outcomes = [{
+      queue: PUBLIC_SALES_SIGNAL_JOB,
+      action: PUBLIC_SALES_SIGNAL_JOB,
+      count: jobResult.written ?? 0,
+      succeeded: jobResult.ok ? (jobResult.written ?? 0) : 0,
+      failed: jobResult.ok ? 0 : 1,
+    }];
+    return {
+      ok: Boolean(jobResult.ok),
+      actorUserId: config.actorUserId,
+      dryRun: false,
+      finishedAt: new Date().toISOString(),
+      outcomes,
+      ran: jobResult.written ?? 0,
+      startedAt,
+      statePath: jobResult.storePath,
+      watchRenewals: { count: 0, succeeded: 0, failed: 0 },
+    };
+  }
+
+  const statePath = resolveStatePath(config.statePath);
   const state = await loadStateImpl({ statePath });
 
   if (config.dryRun) {
