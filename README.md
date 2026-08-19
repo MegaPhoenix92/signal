@@ -1,6 +1,10 @@
 # Signal
 
-Permissioned inbox intelligence for sales and product teams. Signal ingests Gmail/Outlook mailboxes, detects revenue and product signals, routes notifications, and exposes an admin console for launch readiness.
+Permissioned inbox intelligence for sales and product teams. Signal ingests Gmail/Outlook mailboxes, digests them into **sales** and **product/service-improvement** signals, and shows them in a workspace (and later a tenant-authorized agent API).
+
+**Tenant advantage:** public research and marketing-scrub automations may *update the tenant DB*. Tenant mail never feeds public research.
+
+Blueprint (start here): [docs/PRODUCT.md](docs/PRODUCT.md) · [docs/MILESTONES.md](docs/MILESTONES.md) · [docs/BOUNDARY.md](docs/BOUNDARY.md) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/specs/index.md](docs/specs/index.md) · [docs/PRODUCTION_RUNBOOK.md](docs/PRODUCTION_RUNBOOK.md)
 
 ## Requirements
 
