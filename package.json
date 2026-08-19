@@ -31,6 +31,7 @@
     "test:critical-paths": "node --test scripts/test-signal-critical-paths.mjs",
     "test:persistence": "node --test scripts/test-signal-persistence.mjs",
     "test:scheduler": "node --test scripts/test-signal-scheduler.mjs",
+    "test:public-sales-signal": "node --test scripts/test-public-sales-signal.mjs",
     "test:provider-fetch": "node --test scripts/test-signal-provider-fetch.mjs",
     "test:state-service": "node --test scripts/test-signal-state-service.mjs",
     "test:token-vault": "node --test scripts/test-signal-token-vault.mjs",

@@ -1,0 +1,13 @@
+{
+  "source": "fixture:public-market-corpus",
+  "items": [
+    {
+      "id": "pub_fx_inbox_intelligence_evaluate",
+      "type": "category_intent",
+      "category": "inbox_intelligence",
+      "intent": "evaluate",
+      "summary": "Market operators are evaluating permissioned inbox digestion that stays inside the tenant boundary.",
+      "score": 0.71
+    }
+  ]
+}

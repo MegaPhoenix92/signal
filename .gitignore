@@ -13,6 +13,7 @@ data/provider-token-vault.json
 data/signal-scheduler.lock
 data/signal-state-service.json
 data/signal-state-service-backups/
+data/public-sales-signal.json
 
 # Real env files (only the .example template is committed)
 .env
