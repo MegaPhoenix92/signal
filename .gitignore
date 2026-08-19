@@ -19,9 +19,12 @@ data/signal-state-service-backups/
 .env.local
 .env.production
 
-# Proprietary / local-only (kept off the remote — same pattern as coinwatch/trozlanomni)
-docs/
+# Screenshots / local evidence stay off the remote
 evidence/
+
+# Blueprint specs are committed (PRODUCT, BOUNDARY, milestones, specs/).
+# Optional machine-local notes only:
+docs/_local/
 
 # Agent config files
 .clinerules-*

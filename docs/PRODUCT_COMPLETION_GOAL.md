@@ -1,47 +1,10 @@
-# Product Completion Goal
+# Product completion goal — pointer
 
-Signal's local SaaS completion goal is audited through the admin CLI and the admin console command strips. The initial admin CLI namespace inventory is:
+**This file is not the product definition.** It was a CLI namespace inventory.
 
-- `readiness`
-- `completion-audit`
-- `agent-handoff`
-- `backend-handoff`
-- `backend-cutover`
-- `onboarding-readiness`
-- `tenant-isolation`
-- `dashboard-audit`
-- `digestion-pipeline`
-- `operations-health`
-- `production-env`
-- `production-drill`
-- `production-plan`
-- `provider-handoff`
-- `provider-launch`
-- `email-handoff`
-- `payment-lifecycle`
-- `payment-handoff`
-- `qa-answers`
-- `launch-gate`
-- `session list`
-- `tenants`
-- `users`
-- `mailboxes`
-- `email-flows`
-- `quality`
-- `models`
-- `governance`
-- `integrations`
-  - `integrations refresh-evidence --save-evidence ./signal-provider-evidence.json --json`
-- `token-vault verify`
-- `token-vault rotate`
-- `accounts`
-- `notifications`
-- `signals`
-- `payments`
-- `lifecycle`
-- `lifecycle-playbook`
-- `jobs list`
-- `backend`
-- `scheduler-handoff`
-- `doctor`
-- `export`
+- Product: [PRODUCT.md](./PRODUCT.md)
+- Milestones: [MILESTONES.md](./MILESTONES.md)
+- Feature status: [specs/index.md](./specs/index.md)
+- Launch ops: [PRODUCTION_RUNBOOK.md](./PRODUCTION_RUNBOOK.md)
+
+Admin CLI remains `npm run admin -- <namespace>`. List namespaces via `npm run admin` / `signal-admin.mjs`. Do not treat that list as the roadmap.
