@@ -12,7 +12,7 @@ A milestone is done when the check is machine-runnable or the spec status is rec
 | **P2** | Correctness + IA (P1) | Historical — 7/7 closed. Routes, admin nav, signals/accounts UI |
 | **P3** | Polish (P2/P3) | Historical — 13/13 closed. UX, a11y, domain APIs |
 | **P4** | Spec truth | **This PR** — PRODUCT / ARCHITECTURE / BOUNDARY / specs match `1881799` |
-| **P5** | Tenant advantage + agentic doors | Not started — headless tenant API, public research store, mkt-scrub inbound, meter |
+| **P5** | Tenant advantage + agentic doors | Not started — **required** `public_sales_signal` automatic worker, public research store, tenant agent API, mkt-scrub inbound, meter |
 
 Do not mark P1–P3 “production live” in marketing. Last closed issues included **CRITICAL compose boot** (#157, #161); #162/#163 followed on `origin/main`. Live compose proof is a P4/P5 ops check, not assumed.
 
@@ -33,12 +33,14 @@ Do not mark P1–P3 “production live” in marketing. Last closed issues inclu
 
 1. Tenant-authorized headless API (read signals; default no snippets)
 2. Per-interaction meter + audit log
-3. **Public research DB** (separate) + one-way enrich into tenant
-4. **Marketing scrub** automation that **updates the tenant DB only**
-5. Queryable store if agent volume requires it (not the monolith JSON blob)
+3. **Automatic `public_sales_signal` worker** (required) — ingest public/licensed feeds → digest → public research DB + audit. Never tenant mail.
+4. **Public research DB** (separate) + one-way enrich into tenant
+5. **Marketing scrub** automation that **updates the tenant DB only**
+6. Queryable store if agent volume requires it (not the monolith JSON blob)
 
 **Done when**
 
+- A scheduler tick of `public_sales_signal` writes a public research row from a **non-tenant** fixture and leaves an audit row
 - A tenant agent can list that tenant’s signals with a key and an audit row
 - A public agent can query research and **cannot** read tenant mail
 - Enrich + mkt scrub write only to the tenant store, with source citation

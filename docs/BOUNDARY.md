@@ -5,6 +5,12 @@
 ## Two stores
 
 ```
+Public feeds (licensed / public web — NOT tenant mail)
+        │
+        ▼
+public_sales_signal  (automatic worker — required)
+        │
+        ▼
 Public / market research DB  ──enrich──▶  Tenant Signal DB
 Marketing scrub automation   ──update──▶  Tenant Signal DB
 Tenant mailbox digest        ── ✕ ──▶    Public research
@@ -14,7 +20,7 @@ Tenant A                     ── ✕ ──▶    Tenant B
 | Store | Holds | Readers | Writers |
 |---|---|---|---|
 | **Tenant Signal** | That company’s permissioned inbox digest + optional enrichments | Members + **that tenant’s** authorized agents | Detector, tenant users, **inbound enrich** (research, mkt scrub) |
-| **Public research** | Market corpus — **not** tenant mail, not snippets, not account names | Paying public/agentic research API | Separate ingestion (licensed/public feeds — source TBD). **Never** tenant mailboxes |
+| **Public research** | Market corpus — **not** tenant mail, not snippets, not account names | Paying public/agentic research API | **Only** the `public_sales_signal` worker (automatic). **Never** tenant mailboxes or tenant `signal_detection` |
 
 ## Inbound enrich (tenant advantage)
 
@@ -52,5 +58,6 @@ Both are **pulls into the tenant**. Neither is an export.
 | Reads a mailbox or writes a `Signal` from mail | Tenant detector — never public store |
 | Cleans marketing lists into the tenant | Mkt-scrub inbound — tenant store only |
 | Serves market comps to a tenant | Research enrich — copy into tenant, cite source |
+| Ingests public/licensed market feeds | `public_sales_signal` worker — public store only |
 | Serves market comps to a stranger agent | Public research API — research store only |
 | Quotes or opportunities as SSoT | QuoteWerks / CEO OS — not Signal |

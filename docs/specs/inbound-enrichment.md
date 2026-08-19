@@ -11,7 +11,7 @@
 
 **In (locked, not built):** one-way **tenant advantage**.
 
-1. **Public research enrich** — market corpus (separate DB) may attach cited context onto a tenant signal.
+1. **Public research enrich** — corpus filled by the **automatic** [`public_sales_signal`](./public-sales-signal-automation.md) worker (separate DB) may attach cited context onto a tenant signal.
 2. **Marketing scrub** — automation that **updates the tenant DB** (list hygiene, consent, campaign tags). Tenant-authorized.
 
 **Out:** tenant mail or snippets → public research; Tenant A → Tenant B; dual-write to Neon; public agents reading tenant digest.

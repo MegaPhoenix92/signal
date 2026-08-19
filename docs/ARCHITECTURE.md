@@ -40,9 +40,10 @@ Gmail / Outlook  →  mailbox sync / watch
                  →  Signal + AccountAction + Notification
                  →  Member UI  |  (P5) tenant agent API
 
-Public research DB ──enrich──▶ tenant JSON state
-Mkt scrub job      ──update──▶ tenant JSON state
-tenant digest      ── ✕ ──▶   public research
+public_sales_signal (automatic, isolated job)
+                 → Public research DB ──enrich──▶ tenant JSON state
+Mkt scrub job    ──update──▶ tenant JSON state
+tenant digest    ── ✕ ──▶   public research
 ```
 
 ## Why the JSON blob matters

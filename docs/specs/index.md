@@ -13,13 +13,16 @@ Status = code truth. `stub` = locked in PRODUCT/BOUNDARY, not implemented.
 | Billing (Stripe) | [billing-stripe](./billing-stripe.md) | `partial` | Webhooks + known 2026-06 billing bugs closed |
 | Admin + launch gate | [admin-launch-gate](./admin-launch-gate.md) | `shipped` | CLI + [PRODUCTION_RUNBOOK.md](../PRODUCTION_RUNBOOK.md) |
 | Inbound enrich + mkt scrub | [inbound-enrichment](./inbound-enrichment.md) | `stub` | Tenant advantage — P5 |
+| Public sales-signal automation | [public-sales-signal-automation](./public-sales-signal-automation.md) | `stub` | **Required** P5 worker; isolated from tenant detect |
 
 ## Module map
 
 ```
 Connect mailboxes → Detect flows → Signals / actions → Member UI
                                               ↘ (P5) tenant agent API
-Public research + mkt scrub ──inbound only──▶ tenant store
+public_sales_signal (automatic) → Public research DB → public agent API
+                              ↘ enrich ──inbound only──▶ tenant store
+mkt scrub ──update──▶ tenant store
 ```
 
 ## Refresh

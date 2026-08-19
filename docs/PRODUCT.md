@@ -44,7 +44,17 @@ Connect mailbox (Gmail / Outlook, consent)
         → Detect (email-flows + signal_detection job; shared_detector — no LLM SDK in package.json)
         → Route / notify / digest (daily|weekly)
         → Handoff (crm | task)
-        → Optional inbound enrich (public research, marketing scrub) → tenant DB only
+        → Optional inbound enrich (public research from automatic worker, marketing scrub) → tenant DB only
+
+Public channel (automatic, isolated):
+
+```
+Licensed / public feeds → public_sales_signal worker → Public research DB
+        → public agentic API (pay per query)
+        → optional cited enrich → tenant DB
+```
+
+The public worker is **required**, not a nice-to-have. It never opens tenant mailboxes.
 ```
 
 ## Who it is for
